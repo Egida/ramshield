@@ -29,6 +29,9 @@ pub struct AuthState {
     sessions: Arc<DashMap<String, Instant, ahash::RandomState>>,
     max_login_attempts: u32,
     max_password_length: usize,
+    /// Reverse proxies trusted to send `X-Forwarded-For` (CWE-307 fix).
+    /// Empty = trust no proxy; lockout key = direct TCP peer address.
+    trusted_proxies: Arc<Vec<String>>,
     /// Per-IP failed-login counters. A global counter let any host lock out
     /// every admin with 50 garbage POSTs (process-wide DoS). Windowed per IP:
     /// failures older than LOCKOUT_WINDOW decay and the slot is reclaimed.
@@ -60,6 +63,7 @@ impl AuthState {
         ttl_secs: u64,
         max_login_attempts: u32,
         max_password_length: usize,
+        trusted_proxies: Vec<String>,
     ) -> Self {
         // P3 fix: an unparseable PHC hash made verify_password() return
         // None forever — indistinguishable from a wrong password, i.e. a
@@ -77,6 +81,7 @@ impl AuthState {
             sessions: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             max_login_attempts,
             max_password_length,
+            trusted_proxies: Arc::new(trusted_proxies),
             failures: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             last_sweep: Arc::new(std::sync::atomic::AtomicI64::new(
                 std::time::SystemTime::now()
@@ -264,12 +269,32 @@ struct LoginForm {
 async fn login_submit(
     State(auth): State<AuthState>,
     addr: Option<ConnectInfo<SocketAddr>>,
+    headers: axum::http::header::HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
     // Per-IP lockout: one hostile host can no longer lock every admin out.
     // Option extractor: absent ConnectInfo (unit tests) falls back to ::,
     // which still rate-limits the un-identified path.
-    let ip = addr.map(|c| c.0.ip()).unwrap_or(IpAddr::from([0, 0, 0, 0]));
+    //
+    // CWE-307 fix: behind a trusted reverse proxy, extract the real client IP
+    // from X-Forwarded-For. If the peer is NOT a trusted proxy, fall back to
+    // the direct TCP peer address so a shared proxy IP doesn't collapse every
+    // admin into one lockout bucket.
+    let ip = if let Some(c) = addr {
+        let peer = c.0.ip();
+        if ramshield_config::peer_is_trusted_proxy(peer, &auth.trusted_proxies) {
+            // Trusted proxy — use X-Forwarded-For client IP (first entry = original client)
+            let xff_name = axum::http::header::HeaderName::from_static("x-forwarded-for");
+            let xff = headers.get(&xff_name).and_then(|v| v.to_str().ok());
+            ramshield_config::xff_client(xff).unwrap_or(peer)
+        } else {
+            // Untrusted peer — key by direct TCP address only
+            peer
+        }
+    } else {
+        // No ConnectInfo — unit test path, use placeholder
+        IpAddr::from([0, 0, 0, 0])
+    };
     if auth.is_locked(ip) {
         warn!(
             "dashboard login locked out from {ip} ({}+ failures)",
@@ -351,7 +376,7 @@ mod tests {
 
     #[test]
     fn login_sets_session_and_validates() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 50, 1024);
+        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 50, 1024, vec![]);
         assert!(a.enabled());
         assert!(login(&a, "wrong").is_none());
         let tok = login(&a, "hunter2").expect("good pw logs in");
@@ -361,14 +386,14 @@ mod tests {
 
     #[test]
     fn disabled_auth_has_no_sessions() {
-        let a = AuthState::new(None, 3600, 50, 1024);
+        let a = AuthState::new(None, 3600, 50, 1024, vec![]);
         assert!(!a.enabled());
         assert!(login(&a, "x").is_none()); // no hash → nothing validates
     }
 
     #[test]
     fn lockout_is_per_ip_not_global() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 3, 1024);
+        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 3, 1024, vec![]);
         let attacker = IpAddr::from([1, 2, 3, 4]);
         let admin = IpAddr::from([5, 6, 7, 8]);
         for _ in 0..4 {

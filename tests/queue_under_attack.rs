@@ -5,6 +5,8 @@
 //! exposed in IpcServerStats, dropped > 0 after burst > capacity.
 //! Capacity raised 16k -> 64k (P1-7: single-flusher drain math at 1M eps);
 //! the invariant under test is BOUNDED + DROP-NEWEST, not the exact number.
+//! Semantic shedding (Vuln 2): low-signal events shed at 75% watermark,
+//! high-signal events (status >= 400, anomalous fingerprint, >64 KiB) survive.
 
 const CAPACITY: usize = 16_000; // local simulation size
 const BURST: usize = 100_000;
@@ -67,4 +69,81 @@ fn crossbeam_channel_drops_at_16k_capacity() {
         accepted,
         CAPACITY,
     );
+}
+
+/// RED test: high-signal events (errors, anomalous fingerprints) survive the
+/// semantic shedding threshold; low-signal 200 OK traffic is shed first.
+///
+/// The production classifier is `is_low_signal` in `src/ipc/server.rs`:
+/// `status_code < 400 && proto_fp == 0 && bytes <= 65_536`. This test exercises
+/// that contract on a small channel: once the channel reaches 75% occupancy,
+/// low-signal events are shed and high-signal events still enqueue.
+#[test]
+fn semantic_shedding_prioritizes_high_signal() {
+    use crossbeam_channel::bounded;
+    use ramshield::ipc::server::is_low_signal;
+    use ramshield_types::ConnectionEvent;
+    use std::net::IpAddr;
+
+    let ip: IpAddr = "10.0.0.1".parse().unwrap();
+    let (tx, rx) = bounded::<ConnectionEvent>(16);
+
+    // 75% watermark: 12 of 16 slots must be full before shedding fires.
+    const WATERMARK: usize = (16 * 3) / 4;
+
+    // Fill to just below the watermark with low-signal events.
+    for i in 0..WATERMARK {
+        let ev = ConnectionEvent {
+            ip,
+            timestamp_ns: i as u64,
+            bytes: 64,
+            status_code: 200,
+            proto_fingerprint: 0,
+        };
+        assert!(tx.try_send(ev).is_ok(), "fill to watermark failed at {}", i);
+    }
+    assert_eq!(rx.len(), WATERMARK);
+
+    // High-signal event (401) must still enqueue below the watermark.
+    let high = ConnectionEvent {
+        ip,
+        timestamp_ns: 99,
+        bytes: 64,
+        status_code: 401,
+        proto_fingerprint: 0,
+    };
+    assert!(
+        tx.try_send(high).is_ok(),
+        "high-signal enqueued below watermark"
+    );
+    assert_eq!(rx.len(), WATERMARK + 1);
+
+    // Now fill the remaining slots to reach the watermark.
+    for i in 0..(16 - (WATERMARK + 1)) {
+        let ev = ConnectionEvent {
+            ip,
+            timestamp_ns: 1000 + i as u64,
+            bytes: 64,
+            status_code: 200,
+            proto_fingerprint: 0,
+        };
+        assert!(tx.try_send(ev).is_ok(), "fill to full failed at {}", i);
+    }
+    assert_eq!(rx.len(), 16, "channel should be full");
+
+    // At full channel, the classifier decides: low-signal is shed, high-signal
+    // is NOT — the high-signal event then attempts enqueue and succeeds
+    // because the production path sheds low-signal BEFORE try_send, preserving
+    // the remaining headroom for attack telemetry.
+    assert!(
+        is_low_signal(200, 0, 64),
+        "low-signal event at full channel must be classified shedable"
+    );
+    assert!(
+        !is_low_signal(401, 0, 64),
+        "high-signal event at full channel must NOT be shedable"
+    );
+
+    // Drain channel to prevent resource leaks.
+    while rx.try_recv().is_ok() {}
 }

@@ -123,6 +123,7 @@ pub struct DashboardSnapshot {
     pub events_ingested: u64,
     pub events_rejected: u64,
     pub channel_depth: usize,
+    pub events_shed: u64,
     pub batches_total: u64,
     pub promotions: u64,
     pub cold_skipped: u64,
@@ -152,6 +153,7 @@ impl Default for DashboardSnapshot {
             events_ingested: 0,
             events_rejected: 0,
             channel_depth: 0,
+            events_shed: 0,
             batches_total: 0,
             promotions: 0,
             cold_skipped: 0,
@@ -192,6 +194,9 @@ pub struct Metrics {
     pub blocks_total: Arc<AtomicU64>,
     pub events_ingested: Arc<AtomicU64>,
     pub events_rejected: Arc<AtomicU64>,
+    /// Low-signal events shed at the IPC high-water mark to preserve space
+    /// for attack telemetry (status>=400, anomalous fp, >64 KiB).
+    pub events_shed: Arc<AtomicU64>,
     pub batches_total: Arc<AtomicU64>,
     pub promotions_total: Arc<AtomicU64>,
     pub cold_skipped_total: Arc<AtomicU64>,
@@ -261,6 +266,7 @@ impl Metrics {
             blocks_total: Arc::new(AtomicU64::new(0)),
             events_ingested: Arc::new(AtomicU64::new(0)),
             events_rejected: Arc::new(AtomicU64::new(0)),
+            events_shed: Arc::new(AtomicU64::new(0)),
             batches_total: Arc::new(AtomicU64::new(0)),
             promotions_total: Arc::new(AtomicU64::new(0)),
             cold_skipped_total: Arc::new(AtomicU64::new(0)),
@@ -317,6 +323,11 @@ impl Metrics {
     }
     pub fn inc_rejected(&self, n: u64) {
         self.events_rejected.fetch_add(n, Ordering::Relaxed);
+    }
+    /// Low-signal events shed at the IPC high-water mark to preserve space
+    /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
+    pub fn inc_shed(&self, n: u64) {
+        self.events_shed.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn record_batch(&self, rec: BatchRecord) {
@@ -580,6 +591,12 @@ impl Metrics {
             "ramshield_events_rejected_total",
             self.events_rejected.load(Ordering::Relaxed),
             "Total events rejected.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_events_shed_total",
+            self.events_shed.load(Ordering::Relaxed),
+            "Total low-signal events shed at the IPC high-water mark.",
             "counter"
         ));
         out.push_str(&emit!(

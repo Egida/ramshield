@@ -155,6 +155,7 @@ impl Engine {
             events_ingested: ingested,
             events_rejected: metrics.events_rejected.load(Ordering::Relaxed),
             channel_depth,
+            events_shed: metrics.events_shed.load(Ordering::Relaxed),
             batches_total: batches,
             promotions,
             cold_skipped: metrics.cold_skipped_total.load(Ordering::Relaxed),

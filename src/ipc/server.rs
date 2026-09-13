@@ -488,6 +488,16 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Semantic shedding classifier (Vuln 2): events that are routine 200 OKs with
+/// benign fingerprint and small payload are LOW-signal — shed first at the
+/// high-water mark to preserve channel space for attack telemetry.
+pub fn is_low_signal(status_code: u16, proto_fp: u32, bytes: u64) -> bool {
+    status_code < 400 && proto_fp == 0 && bytes <= 65_536
+}
+
+/// IPC channel high-water mark: 75% of CHANNEL_CAPACITY (64k).
+const SHED_WATERMARK: usize = (CHANNEL_CAPACITY as usize * 3) / 4;
+
 fn process_request(
     req: Request,
     engine: &Arc<Engine>,
@@ -691,6 +701,14 @@ fn process_request(
                 status_code,
                 proto_fingerprint: proto_fp,
             };
+            // STAGE 1: Semantic shedding — at >=75% occupancy, shed low-signal
+            // (routine 200 OK / benign fingerprint) to preserve space for
+            // attack telemetry (401/429/500, anomalous fp, >64 KiB).
+            let is_low_signal = is_low_signal(status_code, proto_fp, bytes);
+            if event_tx.len() >= SHED_WATERMARK && is_low_signal {
+                engine.metrics.inc_shed(1);
+                return Response::BatchOk { accepted: 0, rejected: 0 };
+            }
             match event_tx.try_send(ev) {
                 Ok(()) => Response::Ok {
                     message: "accepted".into(),
@@ -721,13 +739,21 @@ fn process_request(
                     status_code: cr.status_code,
                     proto_fingerprint: cr.proto_fp,
                 };
+                // STAGE 1: Semantic shedding — at >=75% occupancy, shed low-signal
+                // (routine 200 OK / benign fingerprint) to preserve space for
+                // attack telemetry (401/429/500, anomalous fp, >64 KiB).
+                if event_tx.len() >= SHED_WATERMARK && is_low_signal(cr.status_code, cr.proto_fp, cr.bytes) {
+                    engine.metrics.inc_shed(1);
+                    continue; // shed: do not enqueue, count silently
+                }
                 match event_tx.try_send(ev) {
                     Ok(()) => accepted += 1,
-                    Err(e) => {
+                    Err(_) => {
+                        // STAGE 2: Emergency full — fall back to existing drop logic
                         rejected += 1;
                         dropped_events.fetch_add(1, Ordering::Relaxed);
                         engine.metrics.inc_rejected(1); // F2
-                        debug!("tx full: {:?}", e);
+                        debug!("tx full");
                     }
                 }
                 if accepted + rejected >= BATCH_MAX as u32 && total > accepted + rejected {

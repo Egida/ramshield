@@ -304,6 +304,52 @@ pub struct DashboardConfig {
     /// garbage input can't pin the CPU on a multi-MB blob.
     #[serde(default = "default_max_password_length")]
     pub max_password_length: usize,
+    /// Reverse proxies trusted to send `X-Forwarded-For` (default: empty =
+    /// use the direct TCP peer as the client IP). Each entry is an IP or
+    /// CIDR (e.g. `["10.0.0.15", "10.0.1.0/24"]`). Only a peer listed here
+    /// may attribute the lockout key to the forwarded client; all other
+    /// peers are keyed by TCP peer address. CWE-307 fix.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+}
+
+/// True when `peer` is in `trusted` (exact IP or CIDR member).
+/// No new deps — std IpAddr bit-math only. Invalid entries never match.
+pub fn peer_is_trusted_proxy(peer: IpAddr, trusted: &[String]) -> bool {
+    trusted.iter().any(|e| cidr_contains(e, peer))
+}
+
+/// Extract the leftmost client IP from an X-Forwarded-For header value.
+/// Leftmost = original client; proxies append to the right. Returns None
+/// when absent or unparseable (caller falls back to peer).
+pub fn xff_client(header: Option<&str>) -> Option<IpAddr> {
+    header?.split(',').next()?.trim().parse().ok()
+}
+
+fn cidr_contains(entry: &str, peer: IpAddr) -> bool {
+    let entry = entry.trim();
+    if !entry.contains('/') {
+        return entry.parse::<IpAddr>().ok() == Some(peer);
+    }
+    let (net, prefix) = match entry.split_once('/') {
+        Some(p) => p,
+        None => return false,
+    };
+    let prefix: u32 = match prefix.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    match (net.trim().parse::<IpAddr>(), peer) {
+        (Ok(IpAddr::V4(n)), IpAddr::V4(p)) if prefix <= 32 => {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            u32::from(n) & mask == u32::from(p) & mask
+        }
+        (Ok(IpAddr::V6(n)), IpAddr::V6(p)) if prefix <= 128 => {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            u128::from(n) & mask == u128::from(p) & mask
+        }
+        _ => false,
+    }
 }
 fn default_session_ttl_secs() -> u64 {
     28_800
@@ -330,6 +376,7 @@ impl Default for DashboardConfig {
             session_ttl_secs: default_session_ttl_secs(),
             max_login_attempts: default_max_login_attempts(),
             max_password_length: default_max_password_length(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
