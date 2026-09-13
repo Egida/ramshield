@@ -185,14 +185,24 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
     }
 
     let ip: *const Ipv4Hdr = ptr_at(&ctx, l3_off)?;
-    let src = u32::from_be_bytes(unsafe { (*ip).src_addr });
-    let key = [src as u64, 0u64];
+    // Zero-conversion raw byte copy: wire octets → key memory directly.
+    // No from_be_bytes / from_ne_bytes / integer casts — eliminates
+    // the endianness inversion that made every v4 lookup miss on LE.
+    let src_bytes = unsafe { (*ip).src_addr }; // [u8; 4] raw wire order
+    let mut key = [0u64; 2];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src_bytes.as_ptr(),
+            key.as_mut_ptr() as *mut u8,
+            4,
+        );
+    }
+    let mut ipb = [0u8; 16];
+    ipb[0..4].copy_from_slice(&src_bytes);
     if let Some(v) = unsafe { BLOCKLIST.get(&key) } {
         let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
         if now < *v {
             inc_counter(counter::V4_DROP);
-            let mut ipb = [0u8; 16];
-            ipb[0..4].copy_from_slice(&src.to_ne_bytes());
             emit_drop_event(counter::V4_DROP, &ipb);
             return Ok(xdp_action::XDP_DROP);
         }
@@ -200,8 +210,6 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
     // CIDR fallback: LPM_TRIE — one /24 entry replaces 256 flat entries in BLOCKLIST
     if BLOCKCIDR.get(&Key::new(32, key)).is_some() {
         inc_counter(counter::V4_DROP);
-        let mut ipb = [0u8; 16];
-        ipb[0..4].copy_from_slice(&src.to_ne_bytes());
         emit_drop_event(counter::V4_DROP, &ipb);
         return Ok(xdp_action::XDP_DROP);
     }

@@ -22,13 +22,55 @@ use uuid::Uuid;
 
 /// XDP blocklist key — must stay byte-compatible with the C program's
 /// `__u64[2]` map key. IPv4 occupies the low 32 bits of the first u64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(C)]
-pub struct BlocklistKey(pub u128);
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BlocklistKey(pub [u8; 16]);
 
-// Required by aya for eBPF map key types. #[repr(C)] POD only.
-#[allow(unsafe_code)]
+// Required if using Aya as your eBPF loader:
 unsafe impl aya::Pod for BlocklistKey {}
+
+impl BlocklistKey {
+    /// Creates a zeroed key.
+    #[inline(always)]
+    pub const fn zeroed() -> Self {
+        Self([0u8; 16])
+    }
+
+    /// Access the underlying raw byte slice.
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl From<Ipv4Addr> for BlocklistKey {
+    #[inline(always)]
+    fn from(v4: Ipv4Addr) -> Self {
+        let mut bytes = [0u8; 16];
+        // Directly copy the 4 wire octets into the first 4 bytes.
+        // Trailing 12 bytes remain 0.
+        bytes[0..4].copy_from_slice(&v4.octets());
+        Self(bytes)
+    }
+}
+
+impl From<Ipv6Addr> for BlocklistKey {
+    #[inline(always)]
+    fn from(v6: Ipv6Addr) -> Self {
+        // Full 16 wire octets.
+        Self(v6.octets())
+    }
+}
+
+impl From<IpAddr> for BlocklistKey {
+    #[inline(always)]
+    fn from(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(v4) => Self::from(v4),
+            IpAddr::V6(v6) => Self::from(v6),
+        }
+    }
+}
 
 /// Map value = absolute expiry ns on the monotonic clock (same clock as BPF's
 /// bpf_ktime_get_ns; on Linux std::time::Instant is CLOCK_MONOTONIC since
@@ -45,30 +87,10 @@ fn blocklist_value(now_ns: u64, ttl_seconds: u64) -> u64 {
     now_ns.saturating_add(ttl_seconds.saturating_mul(1_000_000_000))
 }
 
+// Compatibility: old call sites use `BlocklistKey::from_ip(ip)`.
 impl BlocklistKey {
     pub fn from_ip(ip: IpAddr) -> Self {
-        match ip {
-            // P0 fix: the kernel compares the RAW BYTES of this u128 against
-            // the C program's key. C does `key[0] = ip->saddr` — an LE load
-            // of the BE wire octets followed by an LE store back, which
-            // round-trips to the ORIGINAL octet order: 1.2.3.4 -> memory
-            // `01 02 03 04` + 12 zero bytes. The old value
-            // u128::from(u32::from(v4)) serialized to `04 03 02 01` — byte-
-            // reversed -> lookup NEVER hit -> XDP silently dropped nothing.
-            // u32::from_ne_bytes(octets) puts the octets at memory[0..4],
-            // matching C byte-for-byte on LE (all BPF targets we run:
-            // x86_64/ARM; bpfel).
-            IpAddr::V4(v4) => BlocklistKey(u128::from(u32::from_ne_bytes(v4.octets()))),
-            // IPv6 plan Task 3 (G4): same P0 class as the v4 comment above.
-            // The C program memcpy's the raw 16 saddr octets into the key, so
-            // memory must equal wire order. from_be_bytes produced the value
-            // with octets[0] as the MSB — serialized on LE that is REVERSED
-            // bytes, every v6 lookup would miss forever. from_le_bytes is
-            // the exact inverse of to_ne_bytes on LE (all BPF targets we run:
-            // x86_64/ARM; bpfel), pinned by v6_key_bytes_match_dataplane_layout.
-            // v6 keys go ONLY to BLOCKLIST6 (xdp_map_for) — never the v4 map.
-            IpAddr::V6(v6) => BlocklistKey(u128::from_le_bytes(v6.octets())),
-        }
+        Self::from(ip)
     }
 }
 
@@ -412,27 +434,33 @@ mod tests {
 
     /// P0 regression: the kernel memcmp's the raw memory of BlocklistKey
     /// against the C program's `key[0] = ip->saddr` layout — wire octets in
-    /// original order at bytes [0..4]. u32::from(v4) byte-reverses (04 03
-    /// 02 01) so every lookup missed and XDP silently dropped nothing.
+    /// original order at bytes [0..4]. Now uses BlocklistKey(pub [u8; 16]),
+    /// so insertion and lookup copy wire bytes verbatim with zero arithmetic.
     #[test]
     fn v4_key_bytes_match_dataplane_layout() {
+        // Test IP: 1.2.3.4 -> Hex wire bytes: [1, 2, 3, 4]
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
-        let mem = key.0.to_ne_bytes(); // aya Pod sends this exact memory
-        assert_eq!(&mem[0..4], &[1, 2, 3, 4], "octet order reversed vs C");
-        assert_eq!(&mem[4..], &[0; 12], "padding must be zero");
+        // 1. Assert first 4 bytes match the wire octets exactly
+        assert_eq!(&key.0[0..4], &[1, 2, 3, 4], "Octet order must match C wire order");
+        // 2. Assert remaining 12 bytes are strictly zeroed padding
+        assert_eq!(&key.0[4..16], &[0u8; 12], "Trailing 12 bytes must be zeroed padding for IPv4");
+        // 3. Simulate raw packet header copy from main.rs:188
+        let simulated_packet_header: [u8; 4] = [1, 2, 3, 4];
+        let mut dataplane_key = BlocklistKey::zeroed();
+        dataplane_key.0[0..4].copy_from_slice(&simulated_packet_header);
+        // PROOF OF INVARIANCE: Both must be bitwise identical in memory
+        assert_eq!(key.0, dataplane_key.0, "Userspace and dataplane keys must be bitwise identical");
     }
 
     /// IPv6 plan Task 3 (G4): same P0 class as the v4 byte-reversal. The C
     /// program memcpy's the raw 16 saddr octets into the key; userspace must
-    /// serialize the same memory. from_be_bytes put octets REVERSED on LE —
-    /// every v6 lookup would miss forever.
+    /// serialize the same memory.
     #[test]
     fn v6_key_bytes_match_dataplane_layout() {
         let key = BlocklistKey::from_ip("2001:db8::1".parse().unwrap());
-        let mem = key.0.to_ne_bytes();
-        assert_eq!(&mem[0..2], &[0x20, 0x01]);
-        assert_eq!(&mem[2..4], &[0x0d, 0xb8]);
-        assert_eq!(mem[15], 1, "last octet at memory[15] = wire order");
+        assert_eq!(&key.0[0..2], &[0x20, 0x01]);
+        assert_eq!(&key.0[2..4], &[0x0d, 0xb8]);
+        assert_eq!(key.0[15], 1, "last octet at key[15] = wire order");
     }
 
     /// IPv6 plan D2: v6 keys must NEVER enter the v4 map (a 16-byte v6 key
