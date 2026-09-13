@@ -23,18 +23,20 @@ mod tests {
 
     // --- mirror types (must stay 1:1 with ramshield-enforcement/src/xdp.rs) ---
 
-    /// `__u64[2]` map key.  16 bytes.  IPv4 occupies the low 32 bits of the
-    /// first u64; v6 fills all 16 octets in wire order.
+    /// Raw 16-byte map key. IPv4 occupies the first four wire-order bytes;
+    /// IPv6 occupies all sixteen. Mirror of enforcement::BlocklistKey.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    #[repr(C)]
-    struct BlocklistKey(u128);
+    #[repr(C, align(8))]
+    struct BlocklistKey([u8; 16]);
 
     impl BlocklistKey {
         fn from_ip(ip: IpAddr) -> Self {
+            let mut bytes = [0u8; 16];
             match ip {
-                IpAddr::V4(v4) => BlocklistKey(u128::from(u32::from_ne_bytes(v4.octets()))),
-                IpAddr::V6(v6) => BlocklistKey(u128::from_le_bytes(v6.octets())),
+                IpAddr::V4(v4) => bytes[..4].copy_from_slice(&v4.octets()),
+                IpAddr::V6(v6) => bytes.copy_from_slice(&v6.octets()),
             }
+            Self(bytes)
         }
     }
 
@@ -66,7 +68,7 @@ mod tests {
     fn v4_zero_all_zero_key_bytes() {
         // 0.0.0.0 → key bytes [0,0,0,0] + 12 zero pad bytes
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(&mem[..4], &[0, 0, 0, 0]);
         assert_eq!(&mem[4..], &[0; 12]);
     }
@@ -75,7 +77,7 @@ mod tests {
     fn v4_broadcast_all_ones() {
         // 255.255.255.255 → key bytes [255,255,255,255] + 12 zero pad bytes
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::BROADCAST));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(&mem[..4], &[255, 255, 255, 255]);
         assert_eq!(&mem[4..], &[0; 12]);
     }
@@ -84,7 +86,7 @@ mod tests {
     fn v4_loopback() {
         // 127.0.0.1 → key bytes [127,0,0,1]
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(&mem[..4], &[127, 0, 0, 1]);
         assert_eq!(&mem[4..], &[0; 12]);
     }
@@ -96,7 +98,7 @@ mod tests {
         // On LE host, assigning to key[0] stores the same byte pattern.
         // 1.2.3.4 → wire bytes 01 02 03 04 → memory[0..4] = [1,2,3,4].
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(&mem[..4], &[1, 2, 3, 4], "v4 octets must be wire-order");
         assert_eq!(&mem[4..], &[0; 12], "upper 96 bits must be zero");
     }
@@ -111,7 +113,7 @@ mod tests {
         // every low byte of the u128 key. Assert exact wire-order round-trip.
         let addr: Ipv6Addr = "2001:db8::ffff:ffff:ffff:ffff".parse().unwrap();
         let key = BlocklistKey::from_ip(IpAddr::V6(addr));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(
             mem,
             [
@@ -128,7 +130,7 @@ mod tests {
     fn v6_loopback() {
         let addr: Ipv6Addr = "::1".parse().unwrap();
         let key = BlocklistKey::from_ip(IpAddr::V6(addr));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(&mem[..15], &[0; 15]);
         assert_eq!(mem[15], 1, "loopback octet at byte 15");
     }
@@ -137,7 +139,7 @@ mod tests {
     fn v6_zeros() {
         let addr: Ipv6Addr = "::".parse().unwrap();
         let key = BlocklistKey::from_ip(IpAddr::V6(addr));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(mem, [0; 16]);
     }
 
@@ -145,7 +147,7 @@ mod tests {
     fn v6_all_ones() {
         let addr: Ipv6Addr = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap();
         let key = BlocklistKey::from_ip(IpAddr::V6(addr));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         assert_eq!(mem, [0xff; 16]);
     }
 
@@ -247,9 +249,8 @@ mod tests {
     /// Assigning to `key[0]` (u64) puts the 4 bytes at memory[0..3], with
     /// bytes [4..7] and [8..15] zero.
     ///
-    /// Rust: `BlocklistKey(u128::from(u32::from_ne_bytes(v4.octets())))`.
-    /// `u32::from_ne_bytes` places octets at memory[0..3] on LE.
-    /// `u128::from(u32)` zero-extends into the high 96 bits.
+    /// Rust: `BlocklistKey::from_ip` copies `v4.octets()` into key bytes
+    /// [0..4] verbatim (zero conversion, rest zeroed).
     ///
     /// Both produce identical memory. This test pins the contract.
     #[test]
@@ -263,7 +264,7 @@ mod tests {
         ];
         for v4 in ips {
             let key = BlocklistKey::from_ip(IpAddr::V4(v4));
-            let mem = key.0.to_ne_bytes();
+            let mem = key.0;
             // C layout: key[0] = saddr, key[1] = 0.
             // On LE: saddr bytes are [oct3, oct2, oct1, oct0] in u32 register,
             // but memory bytes are [oct0, oct1, oct2, oct3] for `saddr` field
@@ -290,9 +291,8 @@ mod tests {
     /// (16 bytes). The memory layout of the BPF map key is therefore the
     /// exact wire bytes of the IPv6 source address.
     ///
-    /// Rust: `BlocklistKey(u128::from_le_bytes(v6.octets()))`.
-    /// `octets()` returns wire-order bytes. `u128::from_le_bytes` places
-    /// octet[0] at the lowest memory address → same as C's memcpy.
+    /// Rust: `BlocklistKey::from_ip` copies all 16 `v6.octets()` verbatim
+    /// (zero conversion) — same memory as C's memcpy.
     ///
     /// This test verifies the exact byte layout for all octets.
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         // 2001:db8::1 → octets: 20 01 0d b8 00 00 00 00 00 00 00 00 00 00 00 01
         let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
         let key = BlocklistKey::from_ip(IpAddr::V6(addr));
-        let mem = key.0.to_ne_bytes();
+        let mem = key.0;
         let expected = addr.octets();
         assert_eq!(
             mem, expected,
