@@ -311,6 +311,14 @@ pub struct DashboardConfig {
     /// peers are keyed by TCP peer address. CWE-307 fix.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// TLS enabled for the dashboard HTTP server. Default: false.
+    /// RamShield has no built-in TLS stack — set true only when an external
+    /// TLS-terminating reverse proxy fronts the dashboard. When false and
+    /// the dashboard binds a non-loopback address, browsers silently drop
+    /// `Secure` session cookies on plain HTTP (RFC 6265bis §5.3), causing
+    /// infinite login loops with zero server-side errors. CWE-307-adjacent.
+    #[serde(default)]
+    pub tls_enabled: bool,
 }
 
 /// True when `peer` is in `trusted` (exact IP or CIDR member).
@@ -377,6 +385,7 @@ impl Default for DashboardConfig {
             max_login_attempts: default_max_login_attempts(),
             max_password_length: default_max_password_length(),
             trusted_proxies: Vec::new(),
+            tls_enabled: false,
         }
     }
 }
@@ -627,6 +636,16 @@ impl Config {
                 self.dashboard.http_addr
             ));
         }
+        if !self.dashboard.tls_enabled && !is_loopback_bind(&self.dashboard.http_addr) {
+            w.push(format!(
+                "dashboard.http_addr={} binds a non-loopback address over plain HTTP \
+                 without TLS. Browsers will silently drop the Secure session cookie \
+                 on HTTP for non-loopback origins (RFC 6265bis §5.3), causing \
+                 infinite login loops with zero server-side errors. \
+                 Set dashboard.tls_enabled=true or front with a TLS reverse proxy.",
+                self.dashboard.http_addr
+            ));
+        }
         if is_public_bind(&self.ipc.tcp_addr) {
             w.push(format!(
                 "ipc.tcp_addr={} is a public bind — IPC traffic (incl. HMAC frames) is \
@@ -667,6 +686,28 @@ fn is_public_bind(addr: &str) -> bool {
             // security hole.
             false
         }
+    }
+}
+
+/// True when `addr`'s host is a loopback IP (127.0.0.0/8, ::1).
+/// Browsers accept `Secure` cookies over plain HTTP only for loopback
+/// origins (RFC 6265bis "trustworthy origin"). A non-loopback HTTP bind
+/// without TLS makes the browser silently drop the `Secure` session
+/// cookie → infinite login loop with no server-side error.
+fn is_loopback_bind(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let host = host.trim_matches(['[', ']']);
+    if host.is_empty() || host == "0.0.0.0" || host == "::" || host == "*" {
+        return false;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_loopback(),
+        Ok(IpAddr::V6(ip)) => ip.is_loopback(),
+        // Hostnames: can't classify statically — treat as non-loopback so
+        // the warning fires (a loopback hostname like "localhost" gets a
+        // harmless extra warning; a LAN hostname missing the warning is
+        // the dangerous direction).
+        Err(_) => false,
     }
 }
 
@@ -722,6 +763,52 @@ mod tests {
         assert!(
             !is_public_bind("localhost:9999"),
             "hostname is operator's call"
+        );
+    }
+
+    /// Vuln 3 (Secure cookie lockout on non-loopback HTTP): the loopback
+    /// classifier is the mirror of is_public_bind but stricter — it only
+    /// accepts 127.0.0.0/8 and ::1. Browsers accept `Secure` cookies over
+    /// plain HTTP only for loopback origins (RFC 6265bis §5.3 "trustworthy
+    /// origin"); a non-loopback bind without TLS silently drops the cookie.
+    #[test]
+    fn loopback_bind_only_accepts_loopback() {
+        assert!(is_loopback_bind("127.0.0.1:9999"), "v4 loopback");
+        assert!(is_loopback_bind("127.0.0.0:9999"), "v4 loopback net base");
+        assert!(is_loopback_bind("127.255.255.255:9999"), "v4 loopback net top");
+        assert!(is_loopback_bind("[::1]:9999"), "v6 loopback bracketed");
+        assert!(is_loopback_bind("::1:9999"), "v6 loopback unbracketed");
+        assert!(!is_loopback_bind("192.168.1.5:9999"), "LAN is non-loopback");
+        assert!(!is_loopback_bind("10.0.0.1:7890"), "private is non-loopback");
+        assert!(!is_loopback_bind("0.0.0.0:9999"), "any-v4 is non-loopback");
+        assert!(!is_loopback_bind("[::]:9999"), "any-v6 is non-loopback");
+        assert!(!is_loopback_bind(":9999"), "empty host is non-loopback");
+        assert!(!is_loopback_bind("localhost:9999"), "hostname is non-loopback");
+    }
+
+    /// Vuln 3: exposure_warnings must fire the Secure-cookie warning for a
+    /// non-loopback bind without TLS, and must stay silent for loopback
+    /// (the default 127.0.0.1:9999) and for tls_enabled=true.
+    #[test]
+    fn secure_cookie_warning_fires_off_loopback() {
+        let mut c = Config::default();
+        // Default: loopback, no TLS → the loopback-Secure warning does not fire.
+        let secure_warn = |w: &str| w.contains("Secure session cookie");
+        assert!(
+            !c.exposure_warnings().iter().any(|w| secure_warn(w)),
+            "loopback must not fire the Secure-cookie HTTP warning"
+        );
+        // LAN bind without TLS → the loopback-Secure warning fires.
+        c.dashboard.http_addr = "192.168.1.50:9999".into();
+        assert!(
+            c.exposure_warnings().iter().any(|w| secure_warn(w)),
+            "LAN bind without TLS must fire the Secure-cookie HTTP warning"
+        );
+        // Same bind with TLS fronting → the loopback-Secure warning silenced.
+        c.dashboard.tls_enabled = true;
+        assert!(
+            !c.exposure_warnings().iter().any(|w| secure_warn(w)),
+            "tls_enabled=true must silence the Secure-cookie HTTP warning"
         );
     }
 
