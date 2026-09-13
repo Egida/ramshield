@@ -8,6 +8,12 @@ pub struct SubnetHll {
     registers: [u8; 1024],
 }
 
+impl Default for SubnetHll {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubnetHll {
     pub const fn new() -> Self {
         Self { registers: [0; 1024] }

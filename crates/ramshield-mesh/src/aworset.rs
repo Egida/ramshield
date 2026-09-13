@@ -113,7 +113,10 @@ impl AworsetBlocklist {
         let (phys_ms, seq) = self.hlc.tick(0, 0);
         let expires_at_ms = phys_ms + ttl_ms;
 
-        let dot = ClusterDot { node_id: self.node_id, counter: seq };
+let dot = ClusterDot {
+            node_id: self.node_id,
+            counter: seq,
+        };
         self.entries.insert((ip, self.node_id), (seq, expires_at_ms));
 
         ClusterBlockDelta { ip, dot, expires_at_ms, tier }
@@ -157,8 +160,17 @@ impl AworsetBlocklist {
     }
 
     /// Drop entries whose ban has expired (GC pass on the 250ms tick).
+    ///
+    /// F6-fix (audit /tmp/oo Frontier 2): entries are pruned only after
+    /// TOMBSTONE_HORIZON_MS past expiry, not at the exact expiry ms.
+    /// Premature deletion + delayed gossip = resurrection: a peer's stale
+    /// ban delta arriving after local pruning is treated as NEW and
+    /// re-bans the IP. The horizon must exceed max network delay + clock
+    /// skew across the fleet.
     pub fn purge_expired(&self, now_ms: u64) {
-        self.entries.retain(|_, (_, exp)| *exp > now_ms);
+        const TOMBSTONE_HORIZON_MS: u64 = 5_000;
+        self.entries
+            .retain(|_, (_, exp)| now_ms.saturating_sub(*exp) < TOMBSTONE_HORIZON_MS);
     }
 
     /// Local unblock: remove this node's dot for the IP so the unban
