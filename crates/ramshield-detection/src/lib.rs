@@ -971,7 +971,7 @@ impl DetectionEngine {
                     if tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
                         self.shm_table.publish_rule(
                             sk as u64,
-                            cfg.detection.subnet_burst_ttl_secs as u64 * 1000,
+                            cfg.detection.subnet_burst_ttl_secs * 1000,
                             tier,
                             0,
                             true,
@@ -980,7 +980,7 @@ impl DetectionEngine {
                     // P2: fleet-fenced gossip.
                     self.mesh_blocklist.record_ban(
                         r.ip,
-                        cfg.detection.subnet_burst_ttl_secs as u64 * 1000,
+                        cfg.detection.subnet_burst_ttl_secs * 1000,
                         tier,
                     );
                     self.metrics
