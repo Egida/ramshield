@@ -10,6 +10,9 @@ members = [
     "crates/ramshield-storage",
     "crates/ramshield-types",
     "crates/ramshield-xdp",
+    "crates/ramshield-cgnat",
+    "crates/ramshield-analytics",
+    "crates/ramshield-mesh",
 ]
 resolver = "3"
 
@@ -66,6 +69,7 @@ axum              = "0.7"
 tower             = { version = "0.5", features = ["util"] }
 tower-http        = { version = "0.5", features = ["cors"] }
 sysinfo           = "0.39"
+memmap2           = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -84,6 +88,9 @@ ramshield-detection = { path = "crates/ramshield-detection", version = "0.1.0" }
 ramshield-enforcement = { path = "crates/ramshield-enforcement", version = "0.1.0", default-features = false }
 ramshield-forecasting = { path = "crates/ramshield-forecasting", version = "0.1.0" }
 ramshield-protocol = { path = "crates/ramshield-protocol", version = "0.1.0" }
+ramshield-cgnat = { path = "crates/ramshield-cgnat", version = "0.1.0" }
+ramshield-analytics = { path = "crates/ramshield-analytics", version = "0.1.0" }
+ramshield-mesh = { path = "crates/ramshield-mesh", version = "0.1.0" }
 
 [dev-dependencies]
 serial_test = "3"
