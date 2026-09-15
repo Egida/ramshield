@@ -11,6 +11,6 @@ pub mod cgnat;
 pub mod shm;
 
 pub use cgnat::{
-    CgnatGuard, CGNAT_TIER_ALLOW, CGNAT_TIER_BLOCK, CGNAT_TIER_CHALLENGE, CGNAT_TIER_XDP_DROP,
+    CGNAT_TIER_ALLOW, CGNAT_TIER_BLOCK, CGNAT_TIER_CHALLENGE, CGNAT_TIER_XDP_DROP, CgnatGuard,
 };
-pub use shm::{ShmRuleEntry, ShmTableManager, FLAG_SHARED_INFRA, SHM_TABLE_CAPACITY};
+pub use shm::{FLAG_SHARED_INFRA, SHM_TABLE_CAPACITY, ShmRuleEntry, ShmTableManager};

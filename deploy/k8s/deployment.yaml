@@ -29,7 +29,7 @@ spec:
         - name: ramshield
           image: ghcr.io/grep999/ramshield:0.2.0
           imagePullPolicy: IfNotPresent
-          args: ["/etc/ramshield/config.toml"]
+          args: ["--config", "/etc/ramshield/config.toml"]
           ports:
             - name: ipc
               containerPort: 7890
@@ -46,6 +46,15 @@ spec:
                   name: ramshield-admin
                   key: argon2-hash
                   optional: true
+            # Required when ipc.tcp_addr is public; Config validation fails closed
+            # if this key is absent. Format: key-id:hex-secret[,key-id:hex-secret]
+            - name: RAMSHIELD_IPC__AUTH_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: ramshield-admin
+                  key: ipc-auth-key
+                  optional: false
+
           resources:
             requests:
               cpu: "500m"

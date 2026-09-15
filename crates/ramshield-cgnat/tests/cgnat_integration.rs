@@ -28,7 +28,8 @@ fn test_end_to_end_cgnat_shielding() {
     shm.publish_rule(client_hash, 60_000, clamped_tier, 0, is_shared);
     let delta = mesh.record_ban(target_ip, 60_000, clamped_tier);
 
-    let slot = shm.get_slot((client_hash as usize) & (ramshield_cgnat::shm::SHM_TABLE_CAPACITY - 1));
+    let slot =
+        shm.get_slot((client_hash as usize) & (ramshield_cgnat::shm::SHM_TABLE_CAPACITY - 1));
     assert_eq!(
         slot.tier.load(std::sync::atomic::Ordering::Relaxed),
         2,
@@ -36,5 +37,8 @@ fn test_end_to_end_cgnat_shielding() {
     );
     assert_eq!(delta.tier, 2);
     assert!(mesh.is_blocked(&target_ip, 1_000));
-    assert!(!mesh.is_blocked(&target_ip, 2_000_000_000_000), "ban must expire");
+    assert!(
+        !mesh.is_blocked(&target_ip, 2_000_000_000_000),
+        "ban must expire"
+    );
 }

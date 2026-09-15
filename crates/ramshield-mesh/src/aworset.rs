@@ -113,13 +113,19 @@ impl AworsetBlocklist {
         let (phys_ms, seq) = self.hlc.tick(0, 0);
         let expires_at_ms = phys_ms + ttl_ms;
 
-let dot = ClusterDot {
+        let dot = ClusterDot {
             node_id: self.node_id,
             counter: seq,
         };
-        self.entries.insert((ip, self.node_id), (seq, expires_at_ms));
+        self.entries
+            .insert((ip, self.node_id), (seq, expires_at_ms));
 
-        ClusterBlockDelta { ip, dot, expires_at_ms, tier }
+        ClusterBlockDelta {
+            ip,
+            dot,
+            expires_at_ms,
+            tier,
+        }
     }
 
     /// Absorb a peer delta. True if it changed local state.

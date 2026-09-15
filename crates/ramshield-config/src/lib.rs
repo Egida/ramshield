@@ -185,7 +185,7 @@ pub struct IpcConfig {
     pub connection_idle_timeout_ms: Option<u64>,
     /// Max line length in bytes (default 32MB). Frames exceeding this are dropped
     /// and the connection is closed. Prevents memory exhaustion from malformed clients.
-    #[serde(default = "default_max_line_length")]
+    #[serde(default)]
     pub max_line_length: Option<usize>,
     /// HMAC-SHA256 keys as `key_id:hex_key` pairs. When non-empty, every IPC
     /// frame MUST carry a valid `"auth":{"key_id","ts_ms","sig"}` envelope
@@ -205,9 +205,6 @@ fn default_write_timeout_ms() -> Option<u64> {
 }
 fn default_connection_idle_timeout_ms() -> Option<u64> {
     Some(30_000)
-}
-fn default_max_line_length() -> Option<usize> {
-    Some(33_554_432) // 32MB — ponytail: 64MB limit needs different impl
 }
 impl Default for IpcConfig {
     fn default() -> Self {
@@ -319,6 +316,12 @@ pub struct DashboardConfig {
     /// infinite login loops with zero server-side errors. CWE-307-adjacent.
     #[serde(default)]
     pub tls_enabled: bool,
+    /// Force or disable the Secure flag on session cookies. Default (None):
+    /// derive from the bind address — loopback => Secure, non-loopback
+    /// plain-HTTP => omit (browsers drop Secure cookies on non-trustworthy
+    /// origins). Set true explicitly when running behind an HTTPS terminator.
+    #[serde(default)]
+    pub cookie_secure: Option<bool>,
 }
 
 /// True when `peer` is in `trusted` (exact IP or CIDR member).
@@ -349,11 +352,19 @@ fn cidr_contains(entry: &str, peer: IpAddr) -> bool {
     };
     match (net.trim().parse::<IpAddr>(), peer) {
         (Ok(IpAddr::V4(n)), IpAddr::V4(p)) if prefix <= 32 => {
-            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
             u32::from(n) & mask == u32::from(p) & mask
         }
         (Ok(IpAddr::V6(n)), IpAddr::V6(p)) if prefix <= 128 => {
-            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
             u128::from(n) & mask == u128::from(p) & mask
         }
         _ => false,
@@ -386,6 +397,7 @@ impl Default for DashboardConfig {
             max_password_length: default_max_password_length(),
             trusted_proxies: Vec::new(),
             tls_enabled: false,
+            cookie_secure: None,
         }
     }
 }
@@ -501,6 +513,17 @@ impl Config {
             let salt = SaltString::generate(&mut OsRng);
             if let Ok(hash) = argon2::Argon2::default().hash_password(v.as_bytes(), &salt) {
                 self.dashboard.admin_password_hash = Some(hash.to_string());
+            }
+        }
+        // Pre-hashed password (PHC string) straight from a Secret. This is the
+        // name the shipped k8s manifests and docs use; without this reader the
+        // env var was inert and the dashboard silently booted unauthenticated.
+        // Takes precedence over the plaintext var so a manifest that sets both
+        // does not fall back to a runtime-generated salt.
+        if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ADMIN_PASSWORD_HASH") {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                self.dashboard.admin_password_hash = Some(v);
             }
         }
 
@@ -680,11 +703,17 @@ fn is_public_bind(addr: &str) -> bool {
         Ok(IpAddr::V4(ip)) => !(ip.is_loopback() || ip.is_link_local()),
         Ok(IpAddr::V6(ip)) => !(ip.is_loopback() || ip.is_unicast_link_local()),
         Err(_) => {
-            // Hostname (e.g. "localhost") is the operator's call — DNS may
-            // resolve to a public address, but we can't tell here. Treat as
-            // private: a misconfigured hostname is a config bug, not a
-            // security hole.
-            false
+            // ponytail: fail-CLOSED on unparseable hostnames. A hostname like
+            // "dashboard.example.com" would otherwise fall through as "private"
+            // and skip the public-bind-without-auth bail — an operator could
+            // set `dashboard.http_addr = "dashboard.example.com:9999"` and
+            // ship a public dashboard with no password. DNS may resolve to a
+            // private address (and we can't tell here), but the safe default
+            // is to require auth. Upgrade: resolve DNS at startup and cache.
+            //
+            // EXCEPTION: "localhost" (RFC 6761) is a reserved loopback name.
+            // Treat it as non-public so dev workflows without auth still work.
+            host != "localhost"
         }
     }
 }
@@ -694,7 +723,7 @@ fn is_public_bind(addr: &str) -> bool {
 /// origins (RFC 6265bis "trustworthy origin"). A non-loopback HTTP bind
 /// without TLS makes the browser silently drop the `Secure` session
 /// cookie → infinite login loop with no server-side error.
-fn is_loopback_bind(addr: &str) -> bool {
+pub fn is_loopback_bind(addr: &str) -> bool {
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     let host = host.trim_matches(['[', ']']);
     if host.is_empty() || host == "0.0.0.0" || host == "::" || host == "*" {
@@ -760,9 +789,16 @@ mod tests {
         assert!(is_public_bind("172.16.0.1:7890"), "v4 private 172.16/12");
         assert!(is_public_bind(":9999"), "empty host binds 0.0.0.0");
         assert!(!is_public_bind("[fe80::1]:7890"), "v6 link-local private");
+        // ponytail: 'localhost' (RFC 6761) is the only hostname exempted from
+        // fail-closed. All other unparseable hostnames are treated as public
+        // to prevent shipping a passwordless dashboard on a DNS name.
         assert!(
             !is_public_bind("localhost:9999"),
-            "hostname is operator's call"
+            "localhost is RFC 6761 loopback"
+        );
+        assert!(
+            is_public_bind("dashboard.example.com:9999"),
+            "arbitrary hostname is fail-closed public"
         );
     }
 
@@ -775,15 +811,24 @@ mod tests {
     fn loopback_bind_only_accepts_loopback() {
         assert!(is_loopback_bind("127.0.0.1:9999"), "v4 loopback");
         assert!(is_loopback_bind("127.0.0.0:9999"), "v4 loopback net base");
-        assert!(is_loopback_bind("127.255.255.255:9999"), "v4 loopback net top");
+        assert!(
+            is_loopback_bind("127.255.255.255:9999"),
+            "v4 loopback net top"
+        );
         assert!(is_loopback_bind("[::1]:9999"), "v6 loopback bracketed");
         assert!(is_loopback_bind("::1:9999"), "v6 loopback unbracketed");
         assert!(!is_loopback_bind("192.168.1.5:9999"), "LAN is non-loopback");
-        assert!(!is_loopback_bind("10.0.0.1:7890"), "private is non-loopback");
+        assert!(
+            !is_loopback_bind("10.0.0.1:7890"),
+            "private is non-loopback"
+        );
         assert!(!is_loopback_bind("0.0.0.0:9999"), "any-v4 is non-loopback");
         assert!(!is_loopback_bind("[::]:9999"), "any-v6 is non-loopback");
         assert!(!is_loopback_bind(":9999"), "empty host is non-loopback");
-        assert!(!is_loopback_bind("localhost:9999"), "hostname is non-loopback");
+        assert!(
+            !is_loopback_bind("localhost:9999"),
+            "hostname is non-loopback"
+        );
     }
 
     /// Vuln 3: exposure_warnings must fire the Secure-cookie warning for a

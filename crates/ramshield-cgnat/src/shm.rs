@@ -7,10 +7,10 @@
 //! Designed for integration with the ramshield-analytics crate
 //! (SubnetHll for IPv6 cardinality, host_bitmap for IPv4).
 
+use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
-use memmap2::{MmapMut, MmapOptions};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 pub const SHM_TABLE_CAPACITY: usize = 65_536; // 64K rule slots
 pub const FLAG_SHARED_INFRA: u8 = 0x01;
@@ -23,7 +23,7 @@ pub struct ShmRuleEntry {
     pub tier: AtomicU8,           // 0: Allow, 1: 429, 2: Challenge, 3: XDP Drop
     pub flags: AtomicU8,          // Bit 0: Shared Infrastructure / CGNAT
     pub challenge_seed: [u8; 16],
-    pub _padding: [u8; 30],       // Exact 64-byte alignment
+    pub _padding: [u8; 30], // Exact 64-byte alignment
 }
 
 pub struct ShmTableManager {
@@ -72,7 +72,14 @@ impl ShmTableManager {
         unsafe { &*(self.mmap.as_ptr().add(offset) as *const ShmRuleEntry) }
     }
 
-    pub fn publish_rule(&self, client_hash: u64, ttl_ms: u64, tier: u8, max_rps: u16, is_shared: bool) {
+    pub fn publish_rule(
+        &self,
+        client_hash: u64,
+        ttl_ms: u64,
+        tier: u8,
+        max_rps: u16,
+        is_shared: bool,
+    ) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

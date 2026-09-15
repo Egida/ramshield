@@ -189,6 +189,12 @@ impl DetectionEngine {
         // ponytail: hardcoded; lift to Config.detection.batch_channel_capacity
         // when traffic profiles diverge.
         let (tx, rx) = bounded::<ConnectionEvent>(CHANNEL_CAPACITY as usize);
+        let shm_table = Arc::new(
+            ramshield_cgnat::ShmTableManager::open_or_create(
+                &ramshield_cgnat::ShmTableManager::default_path(),
+            )
+            .expect("P2: SHM rule table must open at boot"),
+        );
         // pre_aggs writers = batch workers (≤ cores), so 64 shards removes
         // every realistic cross-thread collision. The old derivation
         // (bloom_bits/1024) sized the shard array off an UNRELATED
@@ -209,13 +215,8 @@ impl DetectionEngine {
             last_pre_aggs_flush_ns: AtomicU64::new(now_ns()),
             flushing: AtomicBool::new(false),
             worker_handles: std::sync::Mutex::new(Vec::new()),
-            // P2: single SHM rule table shared between proxy and CGNAT guard.
-            shm_table: Arc::new(
-                ramshield_cgnat::ShmTableManager::open_or_create(
-                    &ramshield_cgnat::ShmTableManager::default_path(),
-                )
-                .expect("P2: SHM rule table must open at boot"),
-            ),
+            // P2: one SHM open shared by proxy and CGNAT guard.
+            shm_table: shm_table.clone(),
             // ponytail: threshold 2.8 is JA4 shared-IP heuristic; lift to
             // Config.detection.cgnat_entropy_threshold when profiling diverges.
             cgnat_guard: ramshield_cgnat::CgnatGuard::new(

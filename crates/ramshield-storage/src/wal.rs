@@ -3,8 +3,8 @@ use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use ramshield_types::{Durability, Result, RsError};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -122,7 +122,13 @@ impl Wal {
         // Discover highest segment to resume from
         let max_seg = discover_max_seg(dir);
         let path = seg_path(dir, max_seg);
-        let file = Arc::new(OpenOptions::new().create(true).append(true).mode(0o600).open(&path)?);
+        let file = Arc::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path)?,
+        );
         let bytes = file.metadata()?.len();
 
         // Discover highest LSN across all segments

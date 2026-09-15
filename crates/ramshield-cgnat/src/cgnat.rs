@@ -4,9 +4,9 @@
 //! Uses ramshield_forecasting::shannon_entropy() to fingerprint JA4 etc.
 //! and flag shared-infra IPs for extra scrutiny.
 
-use std::sync::Arc;
 use crate::shm::ShmTableManager;
 use ramshield_forecasting::shannon_entropy;
+use std::sync::Arc;
 
 pub const CGNAT_TIER_ALLOW: u8 = 0;
 pub const CGNAT_TIER_CHALLENGE: u8 = 1;
@@ -20,7 +20,10 @@ pub struct CgnatGuard {
 
 impl CgnatGuard {
     pub fn new(rules: Arc<ShmTableManager>, entropy_threshold: f64) -> Self {
-        Self { rules, entropy_threshold }
+        Self {
+            rules,
+            entropy_threshold,
+        }
     }
 
     /// Convert fingerprint bytes into byte-value frequency counts
@@ -35,7 +38,9 @@ impl CgnatGuard {
     pub fn classify(&self, fingerprint: &[u8]) -> u8 {
         let counts = Self::fingerprint_counts(fingerprint);
         let entropy = shannon_entropy(&counts, fingerprint.len() as u64);
-        let slot = self.rules.get_slot((fingerprint.as_ptr() as u64 & 0xFFFF_FFFF) as usize % 65536);
+        let slot = self
+            .rules
+            .get_slot((fingerprint.as_ptr() as u64 & 0xFFFF_FFFF) as usize % 65536);
 
         if slot.client_hash.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             CGNAT_TIER_CHALLENGE
