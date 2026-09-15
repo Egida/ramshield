@@ -411,6 +411,10 @@ impl XdpApplier for AyaXdpApplier {
     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
         AyaXdpApplier::drain_drop_events(self)
     }
+
+    fn counters(&mut self) -> Result<[u64; 4], EnforcementError> {
+        AyaXdpApplier::counters(self)
+    }
 }
 
 #[cfg(test)]
@@ -441,15 +445,26 @@ mod tests {
         // Test IP: 1.2.3.4 -> Hex wire bytes: [1, 2, 3, 4]
         let key = BlocklistKey::from_ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
         // 1. Assert first 4 bytes match the wire octets exactly
-        assert_eq!(&key.0[0..4], &[1, 2, 3, 4], "Octet order must match C wire order");
+        assert_eq!(
+            &key.0[0..4],
+            &[1, 2, 3, 4],
+            "Octet order must match C wire order"
+        );
         // 2. Assert remaining 12 bytes are strictly zeroed padding
-        assert_eq!(&key.0[4..16], &[0u8; 12], "Trailing 12 bytes must be zeroed padding for IPv4");
+        assert_eq!(
+            &key.0[4..16],
+            &[0u8; 12],
+            "Trailing 12 bytes must be zeroed padding for IPv4"
+        );
         // 3. Simulate raw packet header copy from main.rs:188
         let simulated_packet_header: [u8; 4] = [1, 2, 3, 4];
         let mut dataplane_key = BlocklistKey::zeroed();
         dataplane_key.0[0..4].copy_from_slice(&simulated_packet_header);
         // PROOF OF INVARIANCE: Both must be bitwise identical in memory
-        assert_eq!(key.0, dataplane_key.0, "Userspace and dataplane keys must be bitwise identical");
+        assert_eq!(
+            key.0, dataplane_key.0,
+            "Userspace and dataplane keys must be bitwise identical"
+        );
     }
 
     /// IPv6 plan Task 3 (G4): same P0 class as the v4 byte-reversal. The C

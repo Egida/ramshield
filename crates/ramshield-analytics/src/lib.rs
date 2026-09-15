@@ -5,6 +5,6 @@
 //! Exponentially Weighted Welford for dynamic baseline (32 bytes).
 //! Replaces unbounded HashSet<IpAddr> detection with O(1) space.
 
-pub mod hll;
 pub mod cms;
+pub mod hll;
 pub mod welford;

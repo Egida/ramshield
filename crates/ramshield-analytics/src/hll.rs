@@ -16,7 +16,9 @@ impl Default for SubnetHll {
 
 impl SubnetHll {
     pub const fn new() -> Self {
-        Self { registers: [0; 1024] }
+        Self {
+            registers: [0; 1024],
+        }
     }
 
     pub fn insert(&mut self, hash: u64) {
@@ -61,7 +63,10 @@ mod tests {
     fn test_hll_bounded_memory() {
         let mut hll = SubnetHll::new();
         let initial_size = std::mem::size_of_val(&hll);
-        assert_eq!(initial_size, 1024, "HLL must be exactly 1024 bytes on stack");
+        assert_eq!(
+            initial_size, 1024,
+            "HLL must be exactly 1024 bytes on stack"
+        );
 
         // splitmix64: proper uniform hash — avoids the v2(i) correlation that
         // i*wrapping_mul(C) has with the low-10-bit index (register values
@@ -80,9 +85,18 @@ mod tests {
 
         let estimate = hll.estimate();
         let error = (estimate - 1_000_000.0).abs() / 1_000_000.0;
-        assert!(error < 0.05, "HLL error must be < 5%, got: {} (est={})", error, estimate);
+        assert!(
+            error < 0.05,
+            "HLL error must be < 5%, got: {} (est={})",
+            error,
+            estimate
+        );
 
         // Memory must remain strictly identical
-        assert_eq!(std::mem::size_of_val(&hll), 1024, "Memory must not grow on heap");
+        assert_eq!(
+            std::mem::size_of_val(&hll),
+            1024,
+            "Memory must not grow on heap"
+        );
     }
 }

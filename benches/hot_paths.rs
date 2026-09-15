@@ -413,6 +413,68 @@ fn bench_mesh_record_ban(n: usize) -> f64 {
     t0.elapsed().as_nanos() as f64 / n as f64
 }
 
+// ── 2000-Subnet DDoS Simulation ──────────────────────────────────────
+
+fn bench_subnet_key_2000(n: usize) -> f64 {
+    let t0 = Instant::now();
+    for i in 0..n {
+        let subnet_id = i % 2000;
+        let _key = ramshield_storage::subnet_key_v4([
+            (subnet_id >> 8) as u8,
+            (subnet_id & 0xFF) as u8,
+            0,
+            0,
+        ]);
+        std::hint::black_box(_key);
+    }
+    t0.elapsed().as_nanos() as f64 / n as f64
+}
+
+fn bench_aggregate_2000_subnets(n: usize) -> f64 {
+    use ramshield_detection::batch::aggregate;
+    use ramshield_types::ConnectionEvent;
+    let events: Vec<ConnectionEvent> = (0..2000)
+        .map(|i| {
+            let subnet = i % 2000;
+            let host = (i / 2000) % 254 + 1;
+            ConnectionEvent {
+                ip: format!("10.{}.{}.{}", (subnet >> 8) & 0xFF, subnet & 0xFF, host)
+                    .parse()
+                    .unwrap(),
+                timestamp_ns: 1_000_000_000 + i as u64 * 1_000_000,
+                bytes: 65535,
+                status_code: 502,
+                proto_fingerprint: 42,
+            }
+        })
+        .collect();
+    let t0 = Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(aggregate(&events));
+    }
+    t0.elapsed().as_nanos() as f64 / n as f64
+}
+
+fn bench_bloom_2000_subnets(n: usize) -> f64 {
+    let mut bloom = ramshield_detection::BloomFilter::new(2_000_000);
+    let t0 = Instant::now();
+    for i in 0..2000 {
+        let subnet = i % 2000;
+        let ip: IpAddr = format!("10.{}.{}.{}", (subnet >> 8) & 0xFF, subnet & 0xFF, 1)
+            .parse()
+            .unwrap();
+        bloom.insert(ip);
+    }
+    for i in 0..n {
+        let subnet = i % 2000;
+        let ip: IpAddr = format!("10.{}.{}.{}", (subnet >> 8) & 0xFF, subnet & 0xFF, 1)
+            .parse()
+            .unwrap();
+        std::hint::black_box(bloom.contains(ip));
+    }
+    t0.elapsed().as_nanos() as f64 / n as f64
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -495,6 +557,23 @@ fn main() {
     bench!("CMS::increment", bench_cms_update, n_fast);
     bench!("HLL::insert", bench_hll_insert, n_fast);
     bench!("Mesh record_ban", bench_mesh_record_ban, n_medium);
+
+    println!("\n── 2000-Subnet DDoS Simulation ─────────────────────────────────────");
+    bench!(
+        "subnet_key_v4 (2000 subnets)",
+        bench_subnet_key_2000,
+        n_fast
+    );
+    bench!(
+        "aggregate (2000 subnets × 250 addresses)",
+        bench_aggregate_2000_subnets,
+        n_slow
+    );
+    bench!(
+        "Bloom contains (2000 subnet keys)",
+        bench_bloom_2000_subnets,
+        n_medium
+    );
 
     println!("\n═══════════════════════════════════════════════════════════════════════════");
 }

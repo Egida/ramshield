@@ -139,10 +139,11 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
         if proto != ETH_P_8021Q && proto != ETH_P_8021AD {
             break;
         }
-        if l3_off + 4 > ctx.data_end() {
-            return Ok(xdp_action::XDP_PASS);
-        }
-        proto = unsafe { core::ptr::read_unaligned((ctx.data() + l3_off + 2) as *const u16) };
+        // ponytail: validate the VLAN header through packet-relative bounds;
+        // comparing an integer offset directly with data_end lets the BPF
+        // verifier lose the packet range and rejects the subsequent read.
+        let vlan: *const [u8; 4] = ptr_at(&ctx, l3_off)?;
+        proto = unsafe { core::ptr::read_unaligned((vlan as *const u8).add(2) as *const u16) };
         l3_off += 4;
     }
 

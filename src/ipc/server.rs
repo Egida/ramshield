@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use super::{Request, Response};
 use crate::engine::Engine;
-use ramshield_config::ConfigHandle;
 use crate::storage::Store;
+use ramshield_config::ConfigHandle;
 use ramshield_types::ConnectionEvent;
 use ramshield_types::{EnforceAction, EnforceCommand};
 
@@ -124,10 +124,12 @@ fn parse_ipc_keys(config: &crate::config::Config) -> Result<Vec<(String, Vec<u8>
             return Err(format!("ipc.auth_keys[{id}] contains non-hex characters"));
         }
         if hex_str.len() < 32 {
-            return Err(format!("ipc.auth_keys[{id}] hex key must be >= 32 chars (16 bytes)"));
+            return Err(format!(
+                "ipc.auth_keys[{id}] hex key must be >= 32 chars (16 bytes)"
+            ));
         }
-        let bytes = hex::decode(hex_str)
-            .map_err(|e| format!("ipc.auth_keys[{id}] hex decode: {e}"))?;
+        let bytes =
+            hex::decode(hex_str).map_err(|e| format!("ipc.auth_keys[{id}] hex decode: {e}"))?;
         out.push((id.to_string(), bytes));
     }
     Ok(out)
@@ -145,7 +147,15 @@ impl IpcServer {
             let cfg = config.load();
             cfg.validate().map_err(std::io::Error::other)?;
         }
-        let (addr, max_connections, max_connection_bytes, read_timeout_ms, write_timeout_ms, connection_idle_timeout_ms, max_line_length) = {
+        let (
+            addr,
+            max_connections,
+            max_connection_bytes,
+            read_timeout_ms,
+            write_timeout_ms,
+            connection_idle_timeout_ms,
+            max_line_length,
+        ) = {
             let cfg = config.load();
             let addr = cfg.ipc.tcp_addr.clone();
             info!("IPC server binding to {}", addr);
@@ -156,10 +166,14 @@ impl IpcServer {
             (
                 addr,
                 cfg.ipc.max_connections.max(1),
-                cfg.ipc.max_connection_bytes.unwrap_or(DEFAULT_MAX_CONNECTION_BYTES),
+                cfg.ipc
+                    .max_connection_bytes
+                    .unwrap_or(DEFAULT_MAX_CONNECTION_BYTES),
                 cfg.ipc.read_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS),
                 cfg.ipc.write_timeout_ms.unwrap_or(DEFAULT_WRITE_TIMEOUT_MS),
-                cfg.ipc.connection_idle_timeout_ms.unwrap_or(CONNECTION_IDLE_TIMEOUT_MS),
+                cfg.ipc
+                    .connection_idle_timeout_ms
+                    .unwrap_or(CONNECTION_IDLE_TIMEOUT_MS),
                 cfg.ipc.max_line_length.unwrap_or(MAX_LINE_LENGTH),
             )
         };
@@ -707,7 +721,10 @@ fn process_request(
             let is_low_signal = is_low_signal(status_code, proto_fp, bytes);
             if event_tx.len() >= SHED_WATERMARK && is_low_signal {
                 engine.metrics.inc_shed(1);
-                return Response::BatchOk { accepted: 0, rejected: 0 };
+                return Response::BatchOk {
+                    accepted: 0,
+                    rejected: 0,
+                };
             }
             match event_tx.try_send(ev) {
                 Ok(()) => Response::Ok {
@@ -742,7 +759,9 @@ fn process_request(
                 // STAGE 1: Semantic shedding — at >=75% occupancy, shed low-signal
                 // (routine 200 OK / benign fingerprint) to preserve space for
                 // attack telemetry (401/429/500, anomalous fp, >64 KiB).
-                if event_tx.len() >= SHED_WATERMARK && is_low_signal(cr.status_code, cr.proto_fp, cr.bytes) {
+                if event_tx.len() >= SHED_WATERMARK
+                    && is_low_signal(cr.status_code, cr.proto_fp, cr.bytes)
+                {
                     engine.metrics.inc_shed(1);
                     continue; // shed: do not enqueue, count silently
                 }

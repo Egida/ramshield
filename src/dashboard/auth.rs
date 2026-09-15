@@ -39,6 +39,11 @@ pub struct AuthState {
     /// Last time the session store was swept. Used by validate() to throttle
     /// the O(n) retain to once per SWEEP_INTERVAL instead of every request.
     last_sweep: Arc<std::sync::atomic::AtomicI64>,
+    /// Whether to stamp the Secure flag on session cookies. Browsers drop
+    /// Secure cookies on non-trustworthy origins (non-loopback plain HTTP)
+    /// which silently breaks login. ponytail: true by default; serve() sets
+    /// it based on the bind address at startup.
+    secure_cookie: bool,
 }
 
 /// Rolling failure window for one client IP.
@@ -64,6 +69,7 @@ impl AuthState {
         max_login_attempts: u32,
         max_password_length: usize,
         trusted_proxies: Vec<String>,
+        secure_cookie: bool,
     ) -> Self {
         // P3 fix: an unparseable PHC hash made verify_password() return
         // None forever — indistinguishable from a wrong password, i.e. a
@@ -89,6 +95,7 @@ impl AuthState {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0),
             )),
+            secure_cookie,
         }
     }
 
@@ -185,7 +192,8 @@ impl AuthState {
         let last = self.last_sweep.load(std::sync::atomic::Ordering::Relaxed);
         if now - last >= SWEEP_INTERVAL.as_secs() as i64 {
             self.sessions.retain(|_, t| t.elapsed() < self.ttl);
-            self.last_sweep.store(now, std::sync::atomic::Ordering::Relaxed);
+            self.last_sweep
+                .store(now, std::sync::atomic::Ordering::Relaxed);
         }
         self.sessions
             .get(token)
@@ -204,7 +212,10 @@ pub async fn require_auth(
         return next.run(req).await;
     }
     let path = req.uri().path();
-    if path == "/healthz" || path == "/login" || path.starts_with("/static/") {
+    // ponytail: /static/ is dead — nothing serves it (the HUD is inlined via
+    // include_str! in mod.rs). Leaving the prefix exemption is a latent
+    // unauthenticated surface the moment a static mount is added. Drop it.
+    if path == "/healthz" || path == "/login" {
         return next.run(req).await;
     }
     let valid = req
@@ -313,10 +324,12 @@ async fn login_submit(
     match verified {
         Some(token) => {
             auth.register_session(&token);
+            let secure = if auth.secure_cookie { "; Secure" } else { "" };
             let cookie = format!(
-                "{}={}; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age={}",
+                "{}={}; HttpOnly; SameSite=Lax{}; Path=/; Max-Age={}",
                 COOKIE_NAME,
                 token,
+                secure,
                 auth.ttl.as_secs()
             );
             // ponytail: cookie value is a hex token (header::HeaderValue::from_str
@@ -376,7 +389,7 @@ mod tests {
 
     #[test]
     fn login_sets_session_and_validates() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 50, 1024, vec![]);
+        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 50, 1024, vec![], true);
         assert!(a.enabled());
         assert!(login(&a, "wrong").is_none());
         let tok = login(&a, "hunter2").expect("good pw logs in");
@@ -386,14 +399,14 @@ mod tests {
 
     #[test]
     fn disabled_auth_has_no_sessions() {
-        let a = AuthState::new(None, 3600, 50, 1024, vec![]);
+        let a = AuthState::new(None, 3600, 50, 1024, vec![], true);
         assert!(!a.enabled());
         assert!(login(&a, "x").is_none()); // no hash → nothing validates
     }
 
     #[test]
     fn lockout_is_per_ip_not_global() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 3, 1024, vec![]);
+        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 3, 1024, vec![], true);
         let attacker = IpAddr::from([1, 2, 3, 4]);
         let admin = IpAddr::from([5, 6, 7, 8]);
         for _ in 0..4 {

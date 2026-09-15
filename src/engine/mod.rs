@@ -247,12 +247,26 @@ impl Engine {
             stats.ram_limit_mb,
         )
     }
+
+    /// Send a manual mitigation command from the dashboard console.
+    /// Uses try_send to avoid blocking on a full enforcement channel.
+    pub fn send_mitigation(&self, cmd: EnforceCommand) -> Result<(), String> {
+        self.enforcement_tx
+            .try_send(cmd)
+            .map_err(|e| format!("enforcement channel full or closed: {}", e))
+    }
 }
 
 async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
+    // FIX: use engine.config directly for live hot-reload — not a separate ArcSwap.
+    // The old code did cfg_snapshot.clone().into_handle() which created a parallel
+    // ArcSwap that never saw updates from api_set_config.
+    let cfg_handle = engine.config.clone();
+
+    // Boot-time snapshot: read-once values (XDP, WAL, forecaster config).
+    // These are immutable once the pipeline starts; changing them requires restart.
     let cfg_arc = engine.config.load(); // Arc<Config>
     let cfg_snapshot = cfg_arc.as_ref().clone(); // owned Config clone
-    let cfg_handle = cfg_snapshot.clone().into_handle(); // ConfigHandle
 
     // Use engine's shared store and metrics (shared with dashboard)
     let store = engine.store.clone();

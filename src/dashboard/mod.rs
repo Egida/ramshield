@@ -32,6 +32,9 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         cfg.dashboard.max_login_attempts,
         cfg.dashboard.max_password_length,
         cfg.dashboard.trusted_proxies.clone(),
+        cfg.dashboard
+            .cookie_secure
+            .unwrap_or(cfg.dashboard.tls_enabled),
     );
     let app_state = AppState {
         engine: engine.clone(),
@@ -357,7 +360,7 @@ mod tests {
             Arc::new(Store::new(16)),
             Arc::new(Metrics::new()),
         ));
-        let auth = Arc::new(auth::AuthState::new(None, 3600, 50, 1024, vec![]));
+        let auth = Arc::new(auth::AuthState::new(None, 3600, 50, 1024, vec![], true));
         AppState { engine, auth }
     }
 

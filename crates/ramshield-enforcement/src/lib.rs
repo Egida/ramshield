@@ -62,6 +62,9 @@ pub trait XdpApplier: Send + Sync {
     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
         Vec::new()
     }
+    fn counters(&mut self) -> Result<[u64; 4], EnforcementError> {
+        Ok([0; 4])
+    }
 }
 
 /// One kernel→userspace drop notification from the XDP EVENTS ringbuf.
