@@ -285,7 +285,7 @@ tr.fresh td { animation: rowIn 1.6s ease; }
   <div class="section-label">Threat Activity</div>
   <div class="tables">
     <div class="table-card">
-      <div class="card-label">Block Feed <span class="count-pill" id="blocks-count">0</span></div>
+      <div class="card-label">Active Quarantine Feed <span class="count-pill" id="blocks-count">0</span></div>
       <div class="scroll-y"><table>
         <thead><tr><th>IP</th><th>Reason</th><th>Module</th><th>Time</th></tr></thead>
         <tbody id="block-log"><tr class="empty-row"><td colspan="4">No blocks yet — all clear</td></tr></tbody>
@@ -321,26 +321,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 let prev = { ingested: 0, ts: 0 };
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-/* ── animated counters: one RAF loop drives ALL numbers ──────── */
-const anim = new Map(); // el -> {cur, target}
 function setNum(id, target) {
   const el = $(id);
-  if (!el) return;
-  const a = anim.get(el);
-  if (a) { a.target = target; return; }
-  anim.set(el, { cur: 0, target });
+  if (el) el.textContent = fmt(target);
 }
-function tickCounters() {
-  for (const [el, a] of anim) {
-    const d = a.target - a.cur;
-    if (Math.abs(d) < 1) {
-      if (a.cur !== a.target) { a.cur = a.target; el.textContent = fmt(a.cur); }
-    } else {
-      a.cur += d * (reducedMotion ? 1 : 0.18);
-      el.textContent = fmt(Math.round(a.cur));
-    }
-  }
-}
+function tickCounters() {}
 
 /* ── throughput chart (canvas, DPR-aware, zero deps) ─────────── */
 const N = 120; // samples ~2s apart => 4 min window
@@ -500,9 +485,9 @@ function renderModules(mods) {
 
 let seenBlocks = new Set();
 function renderBlockLog(blocks) {
-  blocks = blocks || [];
+  blocks = (blocks || []).slice().reverse(); // newest block stays visible at top
   $('blocks-count').textContent = blocks.length;
-  const fresh = new Set();
+  seenBlocks = new Set();
   $('block-log').innerHTML = blocks.length === 0
     ? '<tr class="empty-row"><td colspan="4">No blocks yet — all clear</td></tr>'
     : blocks.map(b => {
@@ -510,7 +495,7 @@ function renderBlockLog(blocks) {
         const cls = /high_rps|HighRps|ddos/i.test(r) ? 'badge-danger' : /subnet|entropy/i.test(r) ? 'badge-warn' : 'badge-muted';
         const key = b.ip + '|' + b.ts_ms;
         const isNew = !seenBlocks.has(key);
-        if (isNew) fresh.add(key);
+        seenBlocks.add(key);
         return `<tr class="${isNew ? 'fresh' : ''}">
           <td class="mono">${esc(b.ip)}</td>
           <td><span class="badge ${cls}">${esc(r.split('(')[0])}</span></td>
@@ -518,8 +503,6 @@ function renderBlockLog(blocks) {
           <td>${fmtTime(b.ts_ms)}</td>
         </tr>`;
       }).join('');
-  seenBlocks = fresh.size ? new Set([...seenBlocks, ...fresh]) : seenBlocks;
-  if (seenBlocks.size > 2000) seenBlocks = new Set(blocks.map(b => b.ip + '|' + b.ts_ms));
 }
 
 function renderSubnets(subs) {
@@ -560,7 +543,10 @@ async function refresh() {
     const [snap, modules, blocks, batches, subnets] = await Promise.all([
       fetch('/api/snapshot').then(r => r.json()),
       fetch('/api/status/modules').then(r => r.json()),
-      fetch('/api/history/blocks').then(r => r.json()),
+      fetch('/api/blocks/active').then(async r => {
+        if (!r.ok) throw new Error('active blocks endpoint failed');
+        return r.json();
+      }).catch(() => fetch('/api/history/blocks').then(r => r.json())),
       fetch('/api/history/batches').then(r => r.json()),
       fetch('/api/traffic/subnets').then(r => r.json()),
     ]);

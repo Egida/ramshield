@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::metrics::{DashboardSnapshot, ModuleStats, SubnetRow};
+use crate::metrics::{BlockRecord, DashboardSnapshot, ModuleStats, SubnetRow};
 
 /// Single state type so one Router::with_state call satisfies all handlers.
 #[derive(Clone)]
@@ -48,6 +48,7 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/history/batches", get(api_history_batches))
         .route("/api/history/blocks", get(api_history_blocks))
+        .route("/api/blocks/active", get(api_blocks_active))
         .route("/api/traffic/subnets", get(api_traffic_subnets))
         .route("/api/status/modules", get(api_status_modules))
         .route("/api/config", get(api_get_config).post(api_set_config))
@@ -135,6 +136,10 @@ async fn api_history_blocks(
         [(header::CONTENT_TYPE, "application/json")],
         state.engine.get_block_log_json().to_string(),
     )
+}
+
+async fn api_blocks_active(State(state): State<AppState>) -> Json<Vec<BlockRecord>> {
+    Json(state.engine.get_active_blocks())
 }
 
 async fn api_traffic_subnets(State(state): State<AppState>) -> Json<Vec<SubnetRow>> {
