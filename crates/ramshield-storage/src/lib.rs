@@ -516,9 +516,9 @@ impl Store {
             }
             _ => {}
         }
-        if tracing::enabled!(tracing::Level::DEBUG) {
+        if tracing::enabled!(tracing::Level::TRACE) {
             let current = self.ram_bytes.load(Ordering::Relaxed);
-            tracing::debug!(
+            tracing::trace!(
                 "Store::insert - current ram_bytes: {}, net_growth: {}",
                 current,
                 net_growth
@@ -537,8 +537,11 @@ impl Store {
                 .fetch_sub((old_size - entry_size) as u64, Ordering::Relaxed);
         }
         self.total_inserts.fetch_add(1, Ordering::Relaxed);
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!("Store::insert - OK key: {}", key);
+        if tracing::enabled!(tracing::Level::TRACE) {
+            // Per-event insert trace: high-cardinality flood under load.
+            // TRACE = opt-in low-level channel; RUST_LOG=debug stays batch-
+            // summary-only (metric deltas, not per-event lines).
+            tracing::trace!("Store::insert - OK key: {}", key);
         }
         Ok(())
     }

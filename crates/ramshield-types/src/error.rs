@@ -50,6 +50,12 @@ impl BlockReason {
             "forecast_anomaly" => Some(BlockReason::ForecastAnomaly),
             "entropy_anomaly" | "anomaly" => Some(BlockReason::EntropyAnomaly),
             "manual" | "manual_unblock" | "manual_block" => Some(BlockReason::ManualBlock),
+            // Mesh gossip emits its own reason strings; no canonical variant
+            // exists (wire-shared enum). ManualBlock fallback is the intended
+            // safe behavior — recognizing the tokens quiets spurious WARNs.
+            "mesh_final" | "mesh_purge" | "mesh-final" | "mesh-purge" => {
+                Some(BlockReason::ManualBlock)
+            }
             _ => None,
         }
     }

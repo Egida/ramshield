@@ -2,6 +2,9 @@
 set -uo pipefail
 
 # ponytail: debug runtime logs retained for the latest 10 runs; use external log storage for longer history.
+# RUST_LOG=debug  → batch summaries, decision events, 4 Hz XDP counter audit (no per-event lines).
+# RUST_LOG=trace  → opt-in per-event low-level channel (Store::insert per key).
+# Override: RUST_LOG=trace scripts/run_debug_logged.sh ...
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LOG_DIR=${RAMSHIELD_RUNTIME_LOG_DIR:-/tmp/ramshield-runtime}
 RETENTION=${RAMSHIELD_RUNTIME_LOG_RETENTION:-10}

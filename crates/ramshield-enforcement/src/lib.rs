@@ -26,7 +26,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 /// Fallback expiry horizon when TTL arithmetic overflows (belt-and-suspenders;
@@ -203,6 +203,15 @@ impl EnforcementService {
                     }
                     if let Ok(c) = self.xdp.counters() {
                         self.metrics.set_xdp_counters(c[0], c[1], c[2], c[3]);
+                        // 4 Hz audit: proves kernel counter deltas propagate to
+                        // Metrics (SSE xdp.* series). Low volume by design.
+                        debug!(
+                            v4_drops = c[0],
+                            v6_drops = c[1],
+                            wire_pass = c[2],
+                            parse_fails = c[3],
+                            "xdp counters read"
+                        );
                     }
                     // ponytail: publish enforcement state to Metrics so the
                     // dashboard reads live values instead of dead zeros.

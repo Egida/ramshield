@@ -484,6 +484,9 @@ pub struct Forecaster {
     peaks: tokio::sync::Mutex<PeakReservoir>,
     bayesian: tokio::sync::Mutex<HypothesisTracker>,
     prev_entropy: tokio::sync::Mutex<f64>,
+    // Cooldown gate: SLOW-RAMP WARN emitted at most once per WARN_COOLDOWN_MS
+    // while the hypothesis persists; quieter debug ticks in between.
+    last_slow_ramp_warn_ms: std::sync::atomic::AtomicU64,
 }
 
 /// Bounded reservoir of positive deviations; `extreme_q` returns the value that
@@ -562,6 +565,7 @@ impl Forecaster {
             peaks: tokio::sync::Mutex::new(PeakReservoir::new(512)),
             bayesian: tokio::sync::Mutex::new(HypothesisTracker::new()),
             prev_entropy: tokio::sync::Mutex::new(0.0),
+            last_slow_ramp_warn_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -668,10 +672,29 @@ impl Forecaster {
                 self.preemptive_block(&threat_sample).await;
             }
             Some((Hypothesis::SlowRampDoS, conf)) => {
-                warn!(
-                    "BAYESIAN H2 SLOW-RAMP conf={:.2} z={:.2} cusum rps={:.1}",
-                    conf, z, rps
-                );
+                // H2 persists across ticks once Bayesian confidence locks in;
+                // WARN at most once per 30s, debug ticks in between (log-flood
+                // fix: 1 Hz WARN spam while a low-z ramp cools down).
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let last = self
+                    .last_slow_ramp_warn_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if now_ms.saturating_sub(last) >= 30_000 {
+                    warn!(
+                        "BAYESIAN H2 SLOW-RAMP conf={:.2} z={:.2} cusum rps={:.1}",
+                        conf, z, rps
+                    );
+                    self.last_slow_ramp_warn_ms
+                        .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    debug!(
+                        "BAYESIAN H2 SLOW-RAMP (cooldown) conf={:.2} z={:.2} cusum rps={:.1}",
+                        conf, z, rps
+                    );
+                }
                 self.preemptive_block(&threat_sample).await;
                 self.cusum.lock().await.reset();
             }
