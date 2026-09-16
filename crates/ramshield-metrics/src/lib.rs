@@ -579,6 +579,8 @@ impl Metrics {
                     "hw_zscore": hw_z,
                     "entropy": entropy,
                     "forecast_blocks": self.blocks_forecast.load(Ordering::Relaxed),
+                    "forecast_ticks": self.forecast_ticks.load(Ordering::Relaxed),
+                    "entropy_ticks": self.entropy_ticks.load(Ordering::Relaxed),
                 }),
             },
             ModuleStats {
@@ -587,6 +589,7 @@ impl Metrics {
                 errors: 0,
                 rate_per_sec: self.cgnat_classify_ticks.load(Ordering::Relaxed) as f64 / elapsed,
                 detail: serde_json::json!({
+                    "classify_ticks": self.cgnat_classify_ticks.load(Ordering::Relaxed),
                     "tier_allow": self.cgnat_tier_allow.load(Ordering::Relaxed),
                     "tier_challenge": self.cgnat_tier_challenge.load(Ordering::Relaxed),
                     "tier_powdrop": self.cgnat_tier_powdrop.load(Ordering::Relaxed),
