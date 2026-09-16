@@ -92,10 +92,11 @@ class Server:
     def __enter__(self) -> "Server":
         if not BIN.exists():
             raise SystemExit(f"release binary missing: {BIN}\n  cargo build --release -F full")
+        self.log = open("/tmp/ramshield_suite_server.log", "a")
         self.proc = subprocess.Popen(
             [str(BIN), "--config", "config-xdp.toml"],
             cwd=str(REPO), env=TUNED_ENV,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=self.log, stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         end = time.monotonic() + START_TIMEOUT
@@ -109,8 +110,46 @@ class Server:
         else:
             self.__exit__(None, None, None)
             raise SystemExit("server failed to become healthy")
+        if not self._port_owned_by(IPC_PORT, self.proc.pid):
+            time.sleep(0.5)
+        if not self._port_owned_by(IPC_PORT, self.proc.pid):
+            self.__exit__(None, None, None)
+            raise SystemExit(
+                f"suite server did not bind {IPC_ADDR} (stray process or bind failure); "
+                f"see /tmp/ramshield_suite_server.log"
+            )
         print(f"  server up: ipc={IPC_ADDR} dash={DASH_URL} (pid {self.proc.pid})")
         return self
+
+    @staticmethod
+    def _port_owned_by(port: int, pid: int) -> bool:
+        """True when <pid> owns the LISTEN socket on <port>.
+        /proc-based: ss -p shows no PID column for other users on this host."""
+        try:
+            want = f"{port:04X}"
+            inode = None
+            for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+                with open(table) as f:
+                    next(f)
+                    for line in f:
+                        p = line.split()
+                        if len(p) >= 10 and p[3] == "0A" and p[1].split(":")[1] == want:
+                            inode = p[9]
+                            break
+                if inode:
+                    break
+            if not inode:
+                return False
+            fd_dir = f"/proc/{pid}/fd"
+            for fd in os.listdir(fd_dir):
+                try:
+                    if os.readlink(os.path.join(fd_dir, fd)).endswith(f"socket:[{inode}]"):
+                        return True
+                except OSError:
+                    continue
+            return False
+        except Exception:
+            return True  # /proc unavailable → skip ownership check
 
     def __exit__(self, *exc) -> None:
         if self.proc:
