@@ -748,6 +748,8 @@ fn process_request(
             let total = events.len() as u32;
             let mut accepted = 0u32;
             let mut rejected = 0u32;
+            let mut shed = 0u32;
+            let mut tail_dropped = 0u32;
             for cr in events {
                 let ev = ConnectionEvent {
                     ip: cr.ip, // typed on the wire (item 2): no per-event String alloc + parse
@@ -763,7 +765,8 @@ fn process_request(
                     && is_low_signal(cr.status_code, cr.proto_fp, cr.bytes)
                 {
                     engine.metrics.inc_shed(1);
-                    continue; // shed: do not enqueue, count silently
+                    shed += 1;
+                    continue; // shed: do not enqueue
                 }
                 match event_tx.try_send(ev) {
                     Ok(()) => accepted += 1,
@@ -772,20 +775,34 @@ fn process_request(
                         rejected += 1;
                         dropped_events.fetch_add(1, Ordering::Relaxed);
                         engine.metrics.inc_rejected(1); // F2
-                        debug!("tx full");
+                        // Sampled: per-event debug here floods under
+                        // backpressure (this was one line per rejected event).
+                        if rejected & 0x3FF == 1 {
+                            debug!(
+                                rejected,
+                                chan_depth = event_tx.len(),
+                                "event channel full (sampled 1/1024)"
+                            );
+                        }
                     }
                 }
                 if accepted + rejected >= BATCH_MAX as u32 && total > accepted + rejected {
                     let dropped = total - accepted - rejected;
                     rejected += dropped;
+                    tail_dropped = dropped;
                     dropped_events.fetch_add(dropped as u64, Ordering::Relaxed);
                     engine.metrics.inc_rejected(dropped as u64); // F2
                     break;
                 }
             }
             debug!(
-                "report_connections: accepted={} rejected={}",
-                accepted, rejected
+                events = total,
+                accepted,
+                rejected,
+                shed,
+                tail_dropped,
+                chan_depth = event_tx.len(),
+                "report_connections batch"
             );
             Response::BatchOk { accepted, rejected }
         }

@@ -730,6 +730,7 @@ impl Forecaster {
         }
 
         let mut n = 0usize;
+        let mut rejected_q = 0u32;
         for &(ip, threat) in sample {
             if threat <= 0.7 {
                 continue;
@@ -749,7 +750,15 @@ impl Forecaster {
                 action: EnforceAction::Block,
             };
             if self.enforcement_tx.try_send(cmd).is_err() {
-                warn!(%ip, "enforcement queue full; forecast block rejected");
+                // Sampled: queue-full fires per IP in a burst.
+                rejected_q += 1;
+                if rejected_q & 0x3FF == 1 {
+                    warn!(
+                        ip = %ip,
+                        rejected_q,
+                        "enforcement queue full; forecast block rejected (sampled 1/1024)"
+                    );
+                }
             }
             self.metrics
                 .record_block_ip(&ip, "forecast_anomaly", "forecasting");
