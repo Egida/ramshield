@@ -168,6 +168,8 @@ impl Engine {
                 merged: stats.ips_tracked as u64,
                 blocked: blocks_applied,
             },
+            wal_lsn: self.metrics.wal_lsn.load(Ordering::Relaxed),
+            pending_expirations: self.metrics.pending_expirations.load(Ordering::Relaxed),
             is_healthy: !self.is_shutting_down() && ram_pct < 95.0,
             health_reason: if self.is_shutting_down() {
                 "shutting down".into()

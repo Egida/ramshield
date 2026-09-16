@@ -134,6 +134,10 @@ pub struct DashboardSnapshot {
     /// True if the kernel XDP dataplane is loaded and attached. False when
     /// the daemon is running in degraded mode (in-band enforcement only).
     pub xdp_active: bool,
+    /// Last committed WAL LSN (0 = no WAL configured).
+    pub wal_lsn: u64,
+    /// Pending TTL expirations in the enforcement ring.
+    pub pending_expirations: u64,
 }
 
 impl Default for DashboardSnapshot {
@@ -169,6 +173,8 @@ impl Default for DashboardSnapshot {
             is_healthy: true,
             health_reason: "initializing".to_string(),
             xdp_active: false,
+            wal_lsn: 0,
+            pending_expirations: 0,
         }
     }
 }
@@ -227,6 +233,16 @@ pub struct Metrics {
     pub hll_insert_count: Arc<AtomicU64>,
     pub cms_increment_count: Arc<AtomicU64>,
     pub cms_decay_ticks: Arc<AtomicU64>,
+    /// XDP kernel dataplane counters (from AyaXdpApplier::counters())
+    /// COUNTERS PerCpuArray: [v4_drop, v6_drop, wire_pass, parse_fail]
+    pub xdp_v4_drops: Arc<AtomicU64>,
+    pub xdp_v6_drops: Arc<AtomicU64>,
+    pub xdp_wire_pass: Arc<AtomicU64>,
+    pub xdp_parse_fails: Arc<AtomicU64>,
+    /// Enforcement: last committed WAL LSN (atomic read for dashboard).
+    pub wal_lsn: Arc<AtomicU64>,
+    /// Enforcement: pending TTL expirations count.
+    pub pending_expirations: Arc<AtomicU64>,
     /// P3: Mesh CRDT counters
     pub mesh_record_ban_count: Arc<AtomicU64>,
     pub mesh_record_unban_count: Arc<AtomicU64>,
@@ -292,6 +308,12 @@ impl Metrics {
             hll_insert_count: Arc::new(AtomicU64::new(0)),
             cms_increment_count: Arc::new(AtomicU64::new(0)),
             cms_decay_ticks: Arc::new(AtomicU64::new(0)),
+            xdp_v4_drops: Arc::new(AtomicU64::new(0)),
+            xdp_v6_drops: Arc::new(AtomicU64::new(0)),
+            xdp_wire_pass: Arc::new(AtomicU64::new(0)),
+            xdp_parse_fails: Arc::new(AtomicU64::new(0)),
+            wal_lsn: Arc::new(AtomicU64::new(0)),
+            pending_expirations: Arc::new(AtomicU64::new(0)),
             mesh_record_ban_count: Arc::new(AtomicU64::new(0)),
             mesh_record_unban_count: Arc::new(AtomicU64::new(0)),
             mesh_purge_ticks: Arc::new(AtomicU64::new(0)),
@@ -328,6 +350,18 @@ impl Metrics {
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
     pub fn inc_shed(&self, n: u64) {
         self.events_shed.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn set_xdp_counters(&self, v4_drop: u64, v6_drop: u64, pass: u64, parse_fail: u64) {
+        self.xdp_v4_drops.store(v4_drop, Ordering::Relaxed);
+        self.xdp_v6_drops.store(v6_drop, Ordering::Relaxed);
+        self.xdp_wire_pass.store(pass, Ordering::Relaxed);
+        self.xdp_parse_fails.store(parse_fail, Ordering::Relaxed);
+    }
+    pub fn set_wal_lsn(&self, lsn: u64) {
+        self.wal_lsn.store(lsn, Ordering::Relaxed);
+    }
+    pub fn set_pending_expirations(&self, n: u64) {
+        self.pending_expirations.store(n, Ordering::Relaxed);
     }
 
     pub fn record_batch(&self, rec: BatchRecord) {
@@ -759,6 +793,42 @@ impl Metrics {
             "ramshield_mesh_hlc_ticks",
             self.mesh_hlc_ticks.load(Ordering::Relaxed),
             "Mesh HLC logical-clock ticks.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_v4_drops",
+            self.xdp_v4_drops.load(Ordering::Relaxed),
+            "XDP kernel IPv4 drops (COUNTERS PerCpuArray).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_v6_drops",
+            self.xdp_v6_drops.load(Ordering::Relaxed),
+            "XDP kernel IPv6 drops (COUNTERS PerCpuArray).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_wire_pass",
+            self.xdp_wire_pass.load(Ordering::Relaxed),
+            "XDP kernel wire passes (COUNTERS PerCpuArray).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_wal_lsn",
+            self.wal_lsn.load(Ordering::Relaxed),
+            "Last committed WAL sequence number.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_pending_expirations",
+            self.pending_expirations.load(Ordering::Relaxed),
+            "Pending TTL expirations in enforcement ring.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_parse_fails",
+            self.xdp_parse_fails.load(Ordering::Relaxed),
+            "XDP kernel parse failures (COUNTERS PerCpuArray).",
             "counter"
         ));
         // No trailing println! here — every emit stanza already ends in '\n',

@@ -131,6 +131,8 @@ pub struct EnforcementService {
     buckets: BTreeMap<u64, Vec<IpAddr>>,
     epoch: Instant,
     shutdown: Arc<AtomicBool>,
+    /// Last committed WAL LSN (updated on every enforce() call). None = no WAL.
+    last_wal_lsn: Option<u64>,
     /// P2: Cluster blocklist CRDT — companion to `blocked_ips` local mirror.
     /// Local blocks are authoritative; this CRDT absorbs peer deltas and
     /// merges them on the next enforcement tick. None = single-node.
@@ -156,6 +158,7 @@ impl EnforcementService {
             buckets: BTreeMap::new(),
             epoch: Instant::now(),
             shutdown,
+            last_wal_lsn: None,
             // P2: disabled mesh by default; enable with `with_mesh_blocklist`.
             mesh_blocklist: None,
         }
@@ -193,10 +196,20 @@ impl EnforcementService {
             tokio::select! {
                 _ = tick.tick() => {
                     self.expire_due().await;
+                    // XDP kernel counters: drain ringbuf events, read counters
                     let drops = self.xdp.drain_drop_events();
                     if !drops.is_empty() {
                         trace!(n = drops.len(), "XDP drop events drained");
                     }
+                    if let Ok(c) = self.xdp.counters() {
+                        self.metrics.set_xdp_counters(c[0], c[1], c[2], c[3]);
+                    }
+                    // ponytail: publish enforcement state to Metrics so the
+                    // dashboard reads live values instead of dead zeros.
+                    if let Some(lsn) = self.last_wal_lsn {
+                        self.metrics.set_wal_lsn(lsn);
+                    }
+                    self.metrics.set_pending_expirations(self.expirations.len() as u64);
                     if self.shutdown.load(Ordering::Acquire) { break; }
                 }
                 cmd = command_rx.recv() => {
@@ -379,10 +392,11 @@ impl EnforcementService {
                     ts_ns: now_ns,
                 },
             };
-            Some(
-                wal.append(&entry)
-                    .map_err(|e| EnforcementError::Wal(e.to_string()))?,
-            )
+            let lsn = wal
+                .append(&entry)
+                .map_err(|e| EnforcementError::Wal(e.to_string()))?;
+            self.last_wal_lsn = Some(lsn);
+            Some(lsn)
         } else {
             None
         };

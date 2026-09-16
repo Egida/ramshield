@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! RamShield library facade — thin re-export shell over workspace crates.
 //! Domain logic lives in crates/ramshield-*; this module exists so the
 //! binaries (main.rs, cli.rs) and glue (engine/, ipc/, dashboard/) keep

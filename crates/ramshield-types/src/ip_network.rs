@@ -25,12 +25,20 @@ impl IpNetwork {
         let addr = match addr {
             IpAddr::V4(ip) => {
                 let bits = u32::from(ip);
-                let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    !0u32 << (32 - prefix_len)
+                };
                 IpAddr::V4(Ipv4Addr::from(bits & mask))
             }
             IpAddr::V6(ip) => {
                 let bits = u128::from(ip);
-                let mask = if prefix_len == 0 { 0 } else { !0u128 << (128 - prefix_len) };
+                let mask = if prefix_len == 0 {
+                    0
+                } else {
+                    !0u128 << (128 - prefix_len)
+                };
                 IpAddr::V6(Ipv6Addr::from(bits & mask))
             }
         };
