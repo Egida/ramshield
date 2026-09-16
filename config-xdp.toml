@@ -25,5 +25,5 @@ min_entropy = 4.5
 
 [xdp]
 enabled = true
-interface = "lo"
+interface = "xdp_test0"
 mode = "skb"

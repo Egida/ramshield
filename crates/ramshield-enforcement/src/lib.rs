@@ -210,6 +210,15 @@ impl EnforcementService {
                         self.metrics.set_wal_lsn(lsn);
                     }
                     self.metrics.set_pending_expirations(self.expirations.len() as u64);
+                    // ponytail: mesh CRDT counters — enforcement owns the
+                    // blocklist CRDT, so publish its live state here.
+                    if let Some(mesh) = &self.mesh_blocklist {
+                        self.metrics.mesh_record_ban_count.store(
+                            mesh.len() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        self.metrics.inc_mesh_purge();
+                    }
                     if self.shutdown.load(Ordering::Acquire) { break; }
                 }
                 cmd = command_rx.recv() => {
@@ -506,6 +515,12 @@ impl EnforcementService {
                         .map_err(|e| EnforcementError::Storage(e.to_string()))?;
                 }
                 self.blocked_ips.remove(&cmd.ip);
+                // Ponytail: mesh CRDT unbans — publish so dashboard reflects
+                // live unblock activity.
+                if let Some(mesh) = &self.mesh_blocklist {
+                    mesh.record_unban(cmd.ip);
+                    self.metrics.inc_mesh_record_unban();
+                }
                 // Purge any pending TTL so a later re-block starts clean.
                 self.detach_expiration(cmd.ip);
                 let xdp_applied = match self.xdp.apply_unblock(cmd.ip, cmd.decision_id) {

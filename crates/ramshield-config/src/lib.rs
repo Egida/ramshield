@@ -480,6 +480,26 @@ impl Config {
         {
             self.detection.subnet_burst_ttl_secs = parsed;
         }
+        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__RATE_WINDOW_SECS")
+            && let Ok(parsed) = v.parse::<u64>()
+        {
+            self.detection.rate_window_secs = parsed;
+        }
+        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_THRESHOLD")
+            && let Ok(parsed) = v.parse::<usize>()
+        {
+            self.detection.subnet_batch_threshold = parsed;
+        }
+        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_MIN_EVENTS")
+            && let Ok(parsed) = v.parse::<u64>()
+        {
+            self.detection.subnet_batch_min_events = parsed;
+        }
+        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BATCH_BLOCK_ENABLED")
+            && let Ok(parsed) = v.parse::<bool>()
+        {
+            self.detection.batch_block_enabled = parsed;
+        }
 
         // IPC overrides
         if let Ok(v) = std::env::var("RAMSHIELD_IPC__AUTH_KEYS") {

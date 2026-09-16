@@ -323,6 +323,11 @@ impl DetectionEngine {
 
         let total_events: u64 = aggs.iter().map(|a| a.1.count as u64).sum();
         self.metrics.inc_ingested(total_events);
+        // ponytail: the batch path is the owner of analytics ingestion. Keep
+        // counters adjacent to the aggregate so dashboard values cannot drift
+        // from the events actually entering detection.
+        self.metrics.inc_hll_inserts(aggs.len() as u64);
+        self.metrics.inc_cms_increments(total_events);
 
         let subnet_counts = subnet_counts_of(&aggs);
         self.flush_batch(
@@ -969,6 +974,14 @@ impl DetectionEngine {
                     // Challenge (429+JS) rather than hard Block (blackhole).
                     let fp_bytes = (r.ip.to_string() + &sk.to_string()).as_bytes().to_vec();
                     let tier = self.cgnat_guard.classify(&fp_bytes);
+                    self.metrics.inc_cgnat_classify();
+                    match tier {
+                        ramshield_cgnat::CGNAT_TIER_ALLOW => self.metrics.inc_cgnat_allow(),
+                        ramshield_cgnat::CGNAT_TIER_CHALLENGE => self.metrics.inc_cgnat_challenge(),
+                        ramshield_cgnat::CGNAT_TIER_XDP_DROP => self.metrics.inc_cgnat_powdrop(),
+                        ramshield_cgnat::CGNAT_TIER_BLOCK => self.metrics.inc_cgnat_block(),
+                        _ => {} // ponytail: future tiers — no crash, just don't count
+                    }
                     if tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
                         self.shm_table.publish_rule(
                             sk as u64,
@@ -977,6 +990,7 @@ impl DetectionEngine {
                             0,
                             true,
                         );
+                        self.metrics.inc_shm_publish();
                     }
                     // P2: fleet-fenced gossip.
                     self.mesh_blocklist.record_ban(
@@ -984,6 +998,7 @@ impl DetectionEngine {
                         cfg.detection.subnet_burst_ttl_secs * 1000,
                         tier,
                     );
+                    self.metrics.inc_mesh_record_ban();
                     self.metrics
                         .record_block_ip(&r.ip, "subnet_batch", "detection");
                     self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);

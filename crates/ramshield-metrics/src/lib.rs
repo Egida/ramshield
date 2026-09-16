@@ -363,6 +363,66 @@ impl Metrics {
     pub fn set_pending_expirations(&self, n: u64) {
         self.pending_expirations.store(n, Ordering::Relaxed);
     }
+    // ponytail: P2/P3 module counters — writer methods so the dashboard reads
+    // live values instead of dead zeros. Each caller owns its Arc<Metrics>
+    // and calls the matching inc_* on the hot path.
+
+    /// CGNAT graduated-mitigation verdicts.
+    pub fn inc_cgnat_classify(&self) {
+        self.cgnat_classify_ticks.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cgnat_allow(&self) {
+        self.cgnat_tier_allow.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cgnat_challenge(&self) {
+        self.cgnat_tier_challenge.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cgnat_powdrop(&self) {
+        self.cgnat_tier_powdrop.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cgnat_block(&self) {
+        self.cgnat_tier_block.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Analytics streaming counters.
+    pub fn inc_hll_insert(&self) {
+        self.hll_insert_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_hll_inserts(&self, n: u64) {
+        self.hll_insert_count.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_cms_increment(&self) {
+        self.cms_increment_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cms_increments(&self, n: u64) {
+        self.cms_increment_count.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_shm_publish(&self) {
+        self.shm_publish_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_shm_lookup(&self) {
+        self.shm_lookup_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_shm_cache_hit(&self) {
+        self.shm_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_cms_decay(&self) {
+        self.cms_decay_ticks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Mesh CRDT counters.
+    pub fn inc_mesh_record_ban(&self) {
+        self.mesh_record_ban_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_mesh_record_unban(&self) {
+        self.mesh_record_unban_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_mesh_purge(&self) {
+        self.mesh_purge_ticks.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_mesh_hlc(&self) {
+        self.mesh_hlc_ticks.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub fn record_batch(&self, rec: BatchRecord) {
         self.batches_total.fetch_add(1, Ordering::Relaxed);
