@@ -22,6 +22,18 @@ impl IpNetwork {
         if prefix_len > max_prefix {
             return Err("prefix length exceeds address family maximum");
         }
+        let addr = match addr {
+            IpAddr::V4(ip) => {
+                let bits = u32::from(ip);
+                let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+                IpAddr::V4(Ipv4Addr::from(bits & mask))
+            }
+            IpAddr::V6(ip) => {
+                let bits = u128::from(ip);
+                let mask = if prefix_len == 0 { 0 } else { !0u128 << (128 - prefix_len) };
+                IpAddr::V6(Ipv6Addr::from(bits & mask))
+            }
+        };
         Ok(Self { addr, prefix_len })
     }
 
@@ -211,5 +223,18 @@ mod tests {
     fn test_invalid_prefix_length() {
         assert!(IpNetwork::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 33).is_err());
         assert!(IpNetwork::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 129).is_err());
+    }
+
+    #[test]
+    fn test_new_normalizes_ipv4_host_bits() {
+        let net = IpNetwork::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40)), 24).unwrap();
+        assert_eq!(net.addr, IpAddr::V4(Ipv4Addr::new(10, 20, 30, 0)));
+        assert_eq!(net.to_string(), "10.20.30.0/24");
+    }
+
+    #[test]
+    fn test_new_normalizes_non_byte_aligned_prefix() {
+        let net = IpNetwork::new(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 255)), 25).unwrap();
+        assert_eq!(net.addr, IpAddr::V4(Ipv4Addr::new(10, 20, 30, 128)));
     }
 }
