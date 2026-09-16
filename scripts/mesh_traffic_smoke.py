@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Trigger mesh CRDT counters (hlc_ticks, purge_ticks, record_bans, record_unbans).
+"""Exercise mesh-related telemetry on a single-node daemon.
 
-Mesh is single-node by default — this script enables it via IPC and exercises
-the CRDT directly so the dashboard shows non-zero mesh telemetry.
+Mesh gossip counters remain zero unless mesh_blocklist is configured; local
+block records still verify the dashboard module wiring.
 """
 from __future__ import annotations
 import json, socket, time, urllib.request
@@ -46,8 +46,10 @@ def main() -> int:
     mods = {m["label"]: m["detail"] for m in frame["detection"].get("modules", [])}
     mh = mods.get("Mesh", {})
     print(json.dumps(mh, indent=2))
-    ok = (mh.get("record_bans", 0) > 0
-          and mh.get("purge_ticks", 0) >= 0)
+    required = {"record_bans", "record_unbans", "purge_ticks", "hlc_ticks"}
+    ok = required <= mh.keys() and mh.get("record_bans", 0) > 0
+    if mh.get("hlc_ticks", 0) == 0 or mh.get("purge_ticks", 0) == 0:
+        print("INFO: gossip mesh disabled; HLC/purge counters correctly idle")
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
