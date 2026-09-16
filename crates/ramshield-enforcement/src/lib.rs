@@ -571,7 +571,7 @@ pub fn replay_wal_into_store(store: &Arc<Store>, wal: &Wal) -> anyhow::Result<Ve
     for (ip, (reason, ts_ns, ttl_secs)) in blocked {
         // Expired TTL → don't resurrect.
         if let Some(ttl) = ttl_secs
-            && ts_ns + ttl.saturating_mul(1_000_000_000) <= now_ns
+            && ts_ns.saturating_add(ttl.saturating_mul(1_000_000_000)) <= now_ns
         {
             continue;
         }
