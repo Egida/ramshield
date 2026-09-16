@@ -7,7 +7,10 @@ use axum::{
     extract::State,
     http::{StatusCode, header},
     middleware as axum_mw,
-    response::{Html, Json},
+    response::{
+        Html, Json, Sse,
+        sse::{Event, KeepAlive},
+    },
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +49,7 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         .route("/healthz", get(api_healthz))
         .route("/metrics", get(api_metrics))
         .route("/api/snapshot", get(api_snapshot))
+        .route("/api/stream", get(api_stream))
         .route("/api/history/batches", get(api_history_batches))
         .route("/api/history/blocks", get(api_history_blocks))
         .route("/api/blocks/active", get(api_blocks_active))
@@ -341,6 +345,80 @@ async fn api_set_config(
             config: ConfigView::from_config(&cfg),
         }),
     )
+}
+
+/// Live rev2 telemetry stream. The server samples the existing atomic-backed
+/// snapshot; it never enters the packet path or mutates engine state.
+async fn api_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let stream = futures_util::stream::unfold(state, |state| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let snapshot = state.engine.dashboard_snapshot();
+        let modules = state.engine.get_module_stats();
+        let pipeline_stages = vec![
+            serde_json::json!({"stage":"wire","ingress":snapshot.events_ingested+snapshot.events_rejected+snapshot.events_shed,"drops":0}),
+            serde_json::json!({"stage":"xdp","ingress":state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),"drops":state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed)}),
+            serde_json::json!({"stage":"ipc","ingress":snapshot.pipeline.queued+snapshot.events_rejected+snapshot.events_shed,"drops":snapshot.events_rejected+snapshot.events_shed}),
+            serde_json::json!({"stage":"cold","ingress":snapshot.pipeline.batched,"drops":snapshot.cold_skipped}),
+            serde_json::json!({"stage":"detection","ingress":snapshot.pipeline.promoted+snapshot.pipeline.merged+snapshot.pipeline.blocked,"drops":snapshot.cold_skipped}),
+            serde_json::json!({"stage":"enforcement","ingress":snapshot.pipeline.blocked,"drops":0}),
+        ];
+        let payload = serde_json::json!({
+            "ts": snapshot.ts_ms,
+            "ts_ms": snapshot.ts_ms,
+            "xdp": {
+                "v4_drops_total": state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed),
+                "v6_drops_total": state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),
+                "wire_pass_total": state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed),
+                "parse_fails_total": state.engine.metrics.xdp_parse_fails.load(std::sync::atomic::Ordering::Relaxed),
+                "active": snapshot.xdp_active,
+                "map_capacity": 102400
+            },
+            "ipc": {
+                "ingest_total": snapshot.events_ingested,
+                "rejected_total": snapshot.events_rejected,
+                "shed_total": snapshot.events_shed,
+                "active_connections": 0,
+                "ring_depth": snapshot.channel_depth,
+                "ring_capacity": 64000
+            },
+            "detection": {
+                "promotions_total": snapshot.promotions,
+                "cold_skipped_total": snapshot.cold_skipped,
+                "blocks_total": snapshot.blocks_applied,
+                "modules": modules
+            },
+            "forecasting": modules.iter().find(|m| m.label == "Forecasting").map(|m| m.detail.clone()).unwrap_or_else(|| serde_json::json!({})),
+            "cgnat": modules.iter().find(|m| m.label == "CGNAT").map(|m| m.detail.clone()).unwrap_or_else(|| serde_json::json!({})),
+            "analytics": modules.iter().find(|m| m.label == "Analytics").map(|m| m.detail.clone()).unwrap_or_else(|| serde_json::json!({})),
+            "mesh": modules.iter().find(|m| m.label == "Mesh").map(|m| m.detail.clone()).unwrap_or_else(|| serde_json::json!({})),
+            "system": {
+                "cpu_pct": snapshot.cpu_usage,
+                "rss_mb": snapshot.memory_usage_mb,
+                "total_ram_mb": snapshot.total_ram_mb,
+                "store_ram_bytes": snapshot.ram_bytes,
+                "store_ram_limit_mb": snapshot.ram_limit_mb,
+                "ram_pct": snapshot.ram_pct,
+                "ips_tracked": snapshot.ips_tracked
+            },
+            "durability": {
+                "wal_lsn": snapshot.wal_lsn,
+                "pending_expirations": snapshot.pending_expirations
+            },
+            "health": {
+                "is_healthy": snapshot.is_healthy,
+                "health_reason": snapshot.health_reason,
+                "xdp_active": snapshot.xdp_active
+            },
+            "pipeline": pipeline_stages
+        });
+        let event = Event::default()
+            .json_data(payload)
+            .unwrap_or_else(|_| Event::default());
+        Some((Ok(event), state))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]
@@ -666,5 +744,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Verifies the SSE route returns a streaming response with the correct content
+    /// type. We read only the first chunk — the stream is infinite, so we must not
+    /// await the body to completion.
+    #[tokio::test]
+    async fn api_stream_emits_sse_events() {
+        let state = test_app_state();
+        let app = Router::new()
+            .route("/api/stream", get(api_stream))
+            .with_state(state);
+
+        let response = app
+            .oneshot(Request::get("/api/stream").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(
+            ct,
+            Some("text/event-stream"),
+            "SSE endpoint must set content-type text/event-stream"
+        );
     }
 }

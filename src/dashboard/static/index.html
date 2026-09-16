@@ -149,6 +149,45 @@
   .ops-bar-fill.ok { background: var(--status-nominal); }
   .ops-bar-fill.warn { background: var(--status-warning); }
   .ops-bar-fill.crit { background: var(--status-critical); }
+
+  /* Tab Navigation */
+  .tab-bar {
+    display: flex; gap: 2px; margin-bottom: -1px; position: relative; z-index: 1;
+  }
+  .tab-btn {
+    background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+    border-bottom: none; border-radius: 6px 6px 0 0; padding: 8px 18px;
+    font-size: 12px; font-weight: 600; color: var(--text-muted); cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.15s;
+  }
+  .tab-btn:hover { color: var(--text-secondary); background: var(--bg-surface); }
+  .tab-btn.active {
+    background: var(--bg-surface); color: var(--text-primary);
+    border-color: var(--border-subtle);
+  }
+  .tab-pane { display: none; flex-direction: column; gap: 20px; }
+  .tab-pane.active { display: flex; }
+
+  /* Pipeline Flow Visualizer (rev2) */
+  .pipeline { margin-top: 20px; }
+  .pipeline-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 1px; margin-bottom: 12px; }
+  .pipeline-stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+  .pipe-stage {
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px;
+    transition: border-color 0.2s;
+  }
+  .pipe-stage.active { border-color: var(--brand-primary); }
+  .pipe-stage-name { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-primary); letter-spacing: 0.5px; }
+  .pipe-stage-metrics { display: flex; flex-direction: column; gap: 4px; }
+  .pipe-metric { font-size: 10px; color: var(--text-muted); font-family: var(--mono-font); }
+  .pipe-metric.drop { color: var(--status-critical); }
+  .pipe-bar-track { width: 100%; height: 4px; background: var(--bg-elevated); border-radius: 2px; overflow: hidden; }
+  .pipe-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s; background: var(--status-nominal); }
+  .pipe-bar-fill.warn { background: var(--status-warning); }
+  .pipe-bar-fill.crit { background: var(--status-critical); }
+  @media (max-width: 1200px) { .pipeline-stages { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 700px) { .pipeline-stages { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -159,6 +198,11 @@
     <div class="nav-title">RAMSHIELD // DEFENSE OPERATIONS CONSOLE</div>
   </div>
   <div class="nav-controls">
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="quarantine" onclick="switchTab('quarantine')">Threat Quarantine</button>
+      <button class="tab-btn" data-tab="telemetry" onclick="switchTab('telemetry')">Telemetry &amp; Forecasting</button>
+      <button class="tab-btn" data-tab="diagnostics" onclick="switchTab('diagnostics')">System Diagnostics</button>
+    </div>
     <div class="badge-status" id="cluster-status">
       <span class="dot"></span>
       <span id="cluster-status-text">HEALTHY</span>
@@ -168,154 +212,200 @@
 </nav>
 
 <div class="container">
+  <div class="tab-pane active" id="tab-quarantine">
+    <!-- KPI Ribbon -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Kernel Drop Throughput</div>
+        <div class="kpi-val" id="kpi-xdp" style="color: var(--status-critical)">0.00 drops/s</div>
+        <div class="kpi-footer">Line-rate XDP eBPF</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Ingress Traffic Rate</div>
+        <div class="kpi-val" id="kpi-ingress" style="color: var(--status-info)">0 req/s</div>
+        <div class="kpi-footer">L7 Semantic Proxy</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Active SHM Rules</div>
+        <div class="kpi-val" id="kpi-rules" style="color: var(--status-nominal)">0</div>
+        <div class="kpi-footer">2-Way Seqlock Consistency</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">CGNAT Entropy H(X)</div>
+        <div class="kpi-val" id="kpi-entropy">0.00</div>
+        <div class="kpi-footer">Veto Limit: H(X) &ge; 2.80</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Cluster Clock Drift</div>
+        <div class="kpi-val" id="kpi-hlc" style="color: var(--brand-primary)">0 ms</div>
+        <div class="kpi-footer">Hybrid Logical Clock</div>
+      </div>
+    </div>
 
-  <div class="kpi-grid">
-    <div class="kpi-card">
-      <div class="kpi-label">Kernel Drop Throughput</div>
-      <div class="kpi-val" id="kpi-xdp" style="color: var(--status-critical)">0.00 drops/s</div>
-      <div class="kpi-footer">Line-rate XDP eBPF</div>
+    <!-- Operational Grid -->
+    <div class="ops-grid">
+      <div class="ops-panel" id="ops-xdp">
+        <div class="ops-title">Kernel Dataplane (XDP)</div>
+        <div class="ops-row"><span class="ops-label">V4 Drops</span><span class="ops-value" id="od-v4">0</span></div>
+        <div class="ops-row"><span class="ops-label">V6 Drops</span><span class="ops-value" id="od-v6">0</span></div>
+        <div class="ops-row"><span class="ops-label">Wire Pass</span><span class="ops-value" id="od-pass">0</span></div>
+        <div class="ops-row"><span class="ops-label">Parse Fail</span><span class="ops-value" id="od-fail">0</span></div>
+        <div class="ops-row"><span class="ops-label">Blocklist</span><span class="ops-value" id="od-blcap">0 / 102400</span></div>
+        <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-bar" style="width:0%"></div></div>
+      </div>
+      <div class="ops-panel" id="ops-ipc">
+        <div class="ops-title">IPC Ingestion</div>
+        <div class="ops-row"><span class="ops-label">Ingest</span><span class="ops-value" id="od-ingest">0</span></div>
+        <div class="ops-row"><span class="ops-label">Rejected</span><span class="ops-value" id="od-reject">0</span></div>
+        <div class="ops-row"><span class="ops-label">Shed</span><span class="ops-value" id="od-shed">0</span></div>
+        <div class="ops-row"><span class="ops-label">Channel</span><span class="ops-value" id="od-chan">0 / 64000</span></div>
+        <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-chan-bar" style="width:0%"></div></div>
+      </div>
+      <div class="ops-panel" id="ops-det">
+        <div class="ops-title">Detection &amp; Enforcement</div>
+        <div class="ops-row"><span class="ops-label">Promotions</span><span class="ops-value" id="od-promo">0</span></div>
+        <div class="ops-row"><span class="ops-label">Cold Skipped</span><span class="ops-value" id="od-cold">0</span></div>
+        <div class="ops-row"><span class="ops-label">Blocks (Det)</span><span class="ops-value" id="od-bdet">0</span></div>
+        <div class="ops-row"><span class="ops-label">Blocks (Sub)</span><span class="ops-value" id="od-bsub">0</span></div>
+        <div class="ops-row"><span class="ops-label">Blocks (Fcst)</span><span class="ops-value" id="od-bfc">0</span></div>
+        <div class="ops-row"><span class="ops-label">Cap Exceeded</span><span class="ops-value" id="od-capex">0</span></div>
+        <div class="ops-row"><span class="ops-label">Subnet Bitmap</span><span class="ops-value" id="od-submap">0</span></div>
+      </div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Ingress Traffic Rate</div>
-      <div class="kpi-val" id="kpi-ingress" style="color: var(--status-info)">0 req/s</div>
-      <div class="kpi-footer">L7 Semantic Proxy</div>
+
+    <!-- Pipeline Flow Visualizer -->
+    <div class="pipeline">
+      <div class="pipeline-title">Packet Pipeline — 6-Stage Flow</div>
+      <div class="pipeline-stages" id="pipelineStages">
+        <div class="pipe-stage" data-stage="wire">
+          <div class="pipe-stage-name">Wire</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">in: <b id="pl-wire-in">0</b></span><span class="pipe-metric drop">drop: <b id="pl-wire-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-wire-bar" style="width:100%"></div></div>
+        </div>
+        <div class="pipe-stage" data-stage="xdp">
+          <div class="pipe-stage-name">XDP</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">pass: <b id="pl-xdp-pass">0</b></span><span class="pipe-metric drop">drop: <b id="pl-xdp-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-xdp-bar" style="width:100%"></div></div>
+        </div>
+        <div class="pipe-stage" data-stage="ipc">
+          <div class="pipe-stage-name">IPC</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">in: <b id="pl-ipc-in">0</b></span><span class="pipe-metric drop">drop: <b id="pl-ipc-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-ipc-bar" style="width:100%"></div></div>
+        </div>
+        <div class="pipe-stage" data-stage="cold">
+          <div class="pipe-stage-name">Cold</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">skip: <b id="pl-cold-skip">0</b></span><span class="pipe-metric drop">drop: <b id="pl-cold-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-cold-bar" style="width:100%"></div></div>
+        </div>
+        <div class="pipe-stage" data-stage="detect">
+          <div class="pipe-stage-name">Detect</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">promo: <b id="pl-det-promo">0</b></span><span class="pipe-metric drop">drop: <b id="pl-det-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-det-bar" style="width:100%"></div></div>
+        </div>
+        <div class="pipe-stage" data-stage="enforce">
+          <div class="pipe-stage-name">Enforce</div>
+          <div class="pipe-stage-metrics"><span class="pipe-metric">block: <b id="pl-enf-block">0</b></span><span class="pipe-metric drop">drop: <b id="pl-enf-drop">0</b></span></div>
+          <div class="pipe-bar-track"><div class="pipe-bar-fill" id="pl-enf-bar" style="width:100%"></div></div>
+        </div>
+      </div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Active SHM Rules</div>
-      <div class="kpi-val" id="kpi-rules" style="color: var(--status-nominal)">0</div>
-      <div class="kpi-footer">2-Way Seqlock Consistency</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">CGNAT Entropy H(X)</div>
-      <div class="kpi-val" id="kpi-entropy">0.00</div>
-      <div class="kpi-footer">Veto Limit: H(X) &ge; 2.80</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Cluster Clock Drift</div>
-      <div class="kpi-val" id="kpi-hlc" style="color: var(--brand-primary)">0 ms</div>
-      <div class="kpi-footer">Hybrid Logical Clock</div>
+
+    <!-- Quarantine Feed -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">Active Quarantine Feed</div>
+        <div class="table-toolbar">
+          <input type="text" class="search-input" id="tableSearch" placeholder="Filter by IP, CIDR, or module...">
+          <button class="btn btn-outline" onclick="exportCSV()">Export CSV</button>
+        </div>
+      </div>
+      <div style="overflow-x: auto;">
+        <table class="data-table" id="quarantineTable">
+          <thead>
+            <tr>
+              <th>TARGET IP</th>
+              <th>DETECTION MECHANISM</th>
+              <th>SEVERITY</th>
+              <th>ACTIVE TIER</th>
+              <th>TIME LOGGED</th>
+            </tr>
+          </thead>
+          <tbody id="quarantineBody">
+            <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">Listening for live telemetry...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 
-  <!-- Operational Grid (rev2) -->
-  <div class="ops-grid">
-    <div class="ops-panel" id="ops-xdp">
-      <div class="ops-title">Kernel Dataplane (XDP)</div>
-      <div class="ops-row"><span class="ops-label">V4 Drops</span><span class="ops-value" id="od-v4">0</span></div>
-      <div class="ops-row"><span class="ops-label">V6 Drops</span><span class="ops-value" id="od-v6">0</span></div>
-      <div class="ops-row"><span class="ops-label">Wire Pass</span><span class="ops-value" id="od-pass">0</span></div>
-      <div class="ops-row"><span class="ops-label">Parse Fail</span><span class="ops-value" id="od-fail">0</span></div>
-      <div class="ops-row"><span class="ops-label">Blocklist</span><span class="ops-value" id="od-blcap">0 / 102400</span></div>
-      <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-bar" style="width:0%"></div></div>
-    </div>
-    <div class="ops-panel" id="ops-ipc">
-      <div class="ops-title">IPC Ingestion</div>
-      <div class="ops-row"><span class="ops-label">Ingest</span><span class="ops-value" id="od-ingest">0</span></div>
-      <div class="ops-row"><span class="ops-label">Rejected</span><span class="ops-value" id="od-reject">0</span></div>
-      <div class="ops-row"><span class="ops-label">Shed</span><span class="ops-value" id="od-shed">0</span></div>
-      <div class="ops-row"><span class="ops-label">Channel</span><span class="ops-value" id="od-chan">0 / 64000</span></div>
-      <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-chan-bar" style="width:0%"></div></div>
-    </div>
-    <div class="ops-panel" id="ops-det">
-      <div class="ops-title">Detection &amp; Enforcement</div>
-      <div class="ops-row"><span class="ops-label">Promotions</span><span class="ops-value" id="od-promo">0</span></div>
-      <div class="ops-row"><span class="ops-label">Cold Skipped</span><span class="ops-value" id="od-cold">0</span></div>
-      <div class="ops-row"><span class="ops-label">Blocks (Det)</span><span class="ops-value" id="od-bdet">0</span></div>
-      <div class="ops-row"><span class="ops-label">Blocks (Sub)</span><span class="ops-value" id="od-bsub">0</span></div>
-      <div class="ops-row"><span class="ops-label">Blocks (Fcst)</span><span class="ops-value" id="od-bfc">0</span></div>
-      <div class="ops-row"><span class="ops-label">Cap Exceeded</span><span class="ops-value" id="od-capex">0</span></div>
-      <div class="ops-row"><span class="ops-label">Subnet Bitmap</span><span class="ops-value" id="od-submap">0</span></div>
-    </div>
-    <div class="ops-panel" id="ops-fcst">
-      <div class="ops-title">Forecasting</div>
-      <div class="ops-row"><span class="ops-label">HW Projected</span><span class="ops-value" id="od-fcst">0</span></div>
-      <div class="ops-row"><span class="ops-label">HW Z-Score</span><span class="ops-value" id="od-zscore">0.00</span></div>
-      <div class="ops-row"><span class="ops-label">HW Baseline</span><span class="ops-value" id="od-baseline">0.00</span></div>
-      <div class="ops-row"><span class="ops-label">Entropy</span><span class="ops-value" id="od-ent">0.00</span></div>
-      <div class="ops-row"><span class="ops-label">Entropy Ticks</span><span class="ops-value" id="od-entt">0</span></div>
-      <div class="ops-row"><span class="ops-label">Forecast Ticks</span><span class="ops-value" id="od-fctt">0</span></div>
-    </div>
-    <div class="ops-panel" id="ops-cgnat">
-      <div class="ops-title">CGNAT &amp; SHM</div>
-      <div class="ops-row"><span class="ops-label">Classify</span><span class="ops-value" id="od-cgcls">0</span></div>
-      <div class="ops-row"><span class="ops-label">Tier Allow</span><span class="ops-value" id="od-cgallow">0</span></div>
-      <div class="ops-row"><span class="ops-label">Tier Challenge</span><span class="ops-value" id="od-cgchall">0</span></div>
-      <div class="ops-row"><span class="ops-label">Tier PoW Drop</span><span class="ops-value" id="od-cgpow">0</span></div>
-      <div class="ops-row"><span class="ops-label">Tier Block</span><span class="ops-value" id="od-cgblock">0</span></div>
-      <div class="ops-row"><span class="ops-label">SHM Publishes</span><span class="ops-value" id="od-cgpub">0</span></div>
-      <div class="ops-row"><span class="ops-label">SHM Hit Rate</span><span class="ops-value" id="od-cghit">100%</span></div>
-    </div>
-    <div class="ops-panel" id="ops-analytics">
-      <div class="ops-title">Analytics Sketches</div>
-      <div class="ops-row"><span class="ops-label">HLL Insert Rate</span><span class="ops-value" id="od-hll">0</span></div>
-      <div class="ops-row"><span class="ops-label">CMS Increment Rate</span><span class="ops-value" id="od-cms">0</span></div>
-      <div class="ops-row"><span class="ops-label">CMS Decay Ticks</span><span class="ops-value" id="od-cmsdec">0</span></div>
-    </div>
-    <div class="ops-panel" id="ops-mesh">
-      <div class="ops-title">Mesh Replication</div>
-      <div class="ops-row"><span class="ops-label">HLC Drift</span><span class="ops-value" id="od-mhlc">0</span></div>
-      <div class="ops-row"><span class="ops-label">Ban Sync</span><span class="ops-value" id="od-mban">0</span></div>
-      <div class="ops-row"><span class="ops-label">Unban Sync</span><span class="ops-value" id="od-munban">0</span></div>
-      <div class="ops-row"><span class="ops-label">Purge Ticks</span><span class="ops-value" id="od-mpurge">0</span></div>
-    </div>
-    <div class="ops-panel" id="ops-system">
-      <div class="ops-title">System Resources</div>
-      <div class="ops-row"><span class="ops-label">CPU</span><span class="ops-value" id="od-cpu">0%</span></div>
-      <div class="ops-row"><span class="ops-label">RSS</span><span class="ops-value" id="od-rss">0 MB</span></div>
-      <div class="ops-row"><span class="ops-label">RAM</span><span class="ops-value" id="od-ram">0%</span></div>
-      <div class="ops-row"><span class="ops-label">IPS Tracked</span><span class="ops-value" id="od-ips">0</span></div>
-      <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-ram-bar" style="width:0%"></div></div>
-    </div>
-  </div>
-
-  <div class="grid-2col">
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">Packet Pipeline Velocity (Drops vs Ingress)</div>
-        <div class="panel-title" style="color: var(--text-muted)">100ms Granularity</div>
+  <div class="tab-pane" id="tab-telemetry">
+    <div class="grid-2col">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">Packet Pipeline Velocity (Drops vs Ingress)</div>
+          <div class="panel-title" style="color: var(--text-muted)">100ms Granularity</div>
+        </div>
+        <div class="panel-body">
+          <canvas class="chart-canvas" id="telemetryChart"></canvas>
+        </div>
       </div>
-      <div class="panel-body">
-        <canvas class="chart-canvas" id="telemetryChart"></canvas>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">HostBitmap Subnet Density (/24 Popcnt)</div>
-        <div class="mono" id="bitmap-count" style="font-size: 11px;">0 / 256 ACTIVE</div>
-      </div>
-      <div class="panel-body matrix-wrapper">
-        <div class="matrix-grid" id="subnetGrid"></div>
-        <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
-          Lock-free bitfield tracking: 32-byte exact cacheline alignment.
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">HostBitmap Subnet Density (/24 Popcnt)</div>
+          <div class="mono" id="bitmap-count" style="font-size: 11px;">0 / 256 ACTIVE</div>
+        </div>
+        <div class="panel-body matrix-wrapper">
+          <div class="matrix-grid" id="subnetGrid"></div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+            Lock-free bitfield tracking: 32-byte exact cacheline alignment.
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-header">
-      <div class="panel-title">Active Quarantine Feed</div>
-      <div class="table-toolbar">
-        <input type="text" class="search-input" id="tableSearch" placeholder="Filter by IP, CIDR, or module...">
+  <div class="tab-pane" id="tab-diagnostics">
+    <div class="ops-grid">
+      <div class="ops-panel" id="ops-fcst">
+        <div class="ops-title">Forecasting</div>
+        <div class="ops-row"><span class="ops-label">HW Projected</span><span class="ops-value" id="od-fcst">0</span></div>
+        <div class="ops-row"><span class="ops-label">HW Z-Score</span><span class="ops-value" id="od-zscore">0.00</span></div>
+        <div class="ops-row"><span class="ops-label">HW Baseline</span><span class="ops-value" id="od-baseline">0.00</span></div>
+        <div class="ops-row"><span class="ops-label">Entropy</span><span class="ops-value" id="od-ent">0.00</span></div>
+        <div class="ops-row"><span class="ops-label">Entropy Ticks</span><span class="ops-value" id="od-entt">0</span></div>
+        <div class="ops-row"><span class="ops-label">Forecast Ticks</span><span class="ops-value" id="od-fctt">0</span></div>
       </div>
-    </div>
-    <div style="overflow-x: auto;">
-      <table class="data-table" id="quarantineTable">
-        <thead>
-          <tr>
-            <th>TARGET IP</th>
-            <th>DETECTION MECHANISM</th>
-            <th>SEVERITY</th>
-            <th>ACTIVE TIER</th>
-            <th>TIME LOGGED</th>
-            <th>ACTION</th>
-          </tr>
-        </thead>
-        <tbody id="quarantineBody">
-          <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 24px;">Listening for live telemetry...</td></tr>
-        </tbody>
-      </table>
+      <div class="ops-panel" id="ops-cgnat">
+        <div class="ops-title">CGNAT &amp; SHM</div>
+        <div class="ops-row"><span class="ops-label">Classify</span><span class="ops-value" id="od-cgcls">0</span></div>
+        <div class="ops-row"><span class="ops-label">Tier Allow</span><span class="ops-value" id="od-cgallow">0</span></div>
+        <div class="ops-row"><span class="ops-label">Tier Challenge</span><span class="ops-value" id="od-cgchall">0</span></div>
+        <div class="ops-row"><span class="ops-label">Tier PoW Drop</span><span class="ops-value" id="od-cgpow">0</span></div>
+        <div class="ops-row"><span class="ops-label">Tier Block</span><span class="ops-value" id="od-cgblock">0</span></div>
+        <div class="ops-row"><span class="ops-label">SHM Publishes</span><span class="ops-value" id="od-cgpub">0</span></div>
+        <div class="ops-row"><span class="ops-label">SHM Hit Rate</span><span class="ops-value" id="od-cghit">100%</span></div>
+      </div>
+      <div class="ops-panel" id="ops-analytics">
+        <div class="ops-title">Analytics Sketches</div>
+        <div class="ops-row"><span class="ops-label">HLL Insert Rate</span><span class="ops-value" id="od-hll">0</span></div>
+        <div class="ops-row"><span class="ops-label">CMS Increment Rate</span><span class="ops-value" id="od-cms">0</span></div>
+        <div class="ops-row"><span class="ops-label">CMS Decay Ticks</span><span class="ops-value" id="od-cmsdec">0</span></div>
+      </div>
+      <div class="ops-panel" id="ops-mesh">
+        <div class="ops-title">Mesh Replication</div>
+        <div class="ops-row"><span class="ops-label">HLC Drift</span><span class="ops-value" id="od-mhlc">0</span></div>
+        <div class="ops-row"><span class="ops-label">Ban Sync</span><span class="ops-value" id="od-mban">0</span></div>
+        <div class="ops-row"><span class="ops-label">Unban Sync</span><span class="ops-value" id="od-munban">0</span></div>
+        <div class="ops-row"><span class="ops-label">Purge Ticks</span><span class="ops-value" id="od-mpurge">0</span></div>
+      </div>
+      <div class="ops-panel" id="ops-system">
+        <div class="ops-title">System Resources</div>
+        <div class="ops-row"><span class="ops-label">CPU</span><span class="ops-value" id="od-cpu">0%</span></div>
+        <div class="ops-row"><span class="ops-label">RSS</span><span class="ops-value" id="od-rss">0 MB</span></div>
+        <div class="ops-row"><span class="ops-label">RAM</span><span class="ops-value" id="od-ram">0%</span></div>
+        <div class="ops-row"><span class="ops-label">IPS Tracked</span><span class="ops-value" id="od-ips">0</span></div>
+        <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-ram-bar" style="width:0%"></div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -397,7 +487,101 @@
     } catch(e){console.error('quarantine feed:',e)}
   }
   async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const [snap,mods,subs]=await Promise.all(['/api/snapshot','/api/status/modules','/api/traffic/subnets'].map(u=>fetch(u).then(r=>{if(!r.ok)throw Error(u+' '+r.status);return r.json()})));renderTelemetry(snap,mods,subs);await loadBlocks()}catch(e){$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='DISCONNECTED';console.error('dashboard refresh:',e)}finally{refreshInFlight=false}}
-  setInterval(refresh,2000); refresh();
+  function renderPipeline(p){
+    if(!Array.isArray(p))return;
+    const get=k=>{const st=p.find(s=>s.stage===k);return st?{ingest:+st.ingress||0,egress:+st.egress||0,drop:+st.drops||0}:null;};
+    const stages={
+      'wire':get('wire'),'xdp':get('xdp'),'ipc':get('ipc'),'cold':get('cold'),'detect':get('detection'),'enforce':get('enforcement')
+    };
+    const wire=stages['wire']||{ingest:0,drop:0};
+    const xdp=stages['xdp']||{ingest:wire.ingest,drop:0};
+    const ipc=stages['ipc']||{ingest:xdp.ingest-xdp.drop,drop:0};
+    const cold=stages['cold']||{ingest:ipc.ingest-ipc.drop,drop:0};
+    const dt=stages['detect']||{ingest:cold.ingest-cold.drop,drop:0};
+    const enf=stages['enforce']||{ingest:dt.ingest-dt.drop,drop:dt.drop};
+    $('pl-wire-in').textContent=fmt(wire.ingest,0); $('pl-wire-drop').textContent=fmt(wire.drop,0);
+    $('pl-xdp-pass').textContent=fmt(xdp.egress||xdp.ingest-xdp.drop,0); $('pl-xdp-drop').textContent=fmt(xdp.drop,0);
+    $('pl-ipc-in').textContent=fmt(ipc.ingest,0); $('pl-ipc-drop').textContent=fmt(ipc.drop,0);
+    $('pl-cold-skip').textContent=fmt(cold.ingest,0); $('pl-cold-drop').textContent=fmt(cold.drop,0);
+    $('pl-det-promo').textContent=fmt(dt.ingest,0); $('pl-det-drop').textContent=fmt(dt.drop,0);
+    $('pl-enf-block').textContent=fmt(enf.egress||enf.ingest,0); $('pl-enf-drop').textContent=fmt(enf.drop,0);
+    const flows=[[wire,'pl-wire-bar'],[xdp,'pl-xdp-bar'],[ipc,'pl-ipc-bar'],[cold,'pl-cold-bar'],[dt,'pl-det-bar'],[enf,'pl-enf-bar']];
+    for(const [st,bar] of flows){
+      const util=st.ingest?Math.min(100,Math.max(0,(st.ingest-(st.drop||0))/Math.max(1,st.ingest)*100)):100;
+      const el=$(bar); el.style.width=util+'%'; el.className='pipe-bar-fill'+(util<50?' crit':util<80?' warn':'');
+    }
+    document.querySelectorAll('.pipe-stage').forEach(el=>{
+      const k=el.dataset.stage;
+      el.classList.toggle('active',!!stages[k]);
+    });
+  }
+  function renderStream(d){
+    const x=d.xdp||{}, ipc=d.ipc||{}, det=d.detection||{};
+    const dSlots={drops_total:x.v4_drops_total+x.v6_drops_total,ingest_total:ipc.ingest_total,shed_total:ipc.shed_total,promo_total:det.promotions_total,cold_total:det.cold_skipped_total};
+    const elapsed=renderStream.prev?Math.max(.1,(d.ts_ms-renderStream.prev.ts)/1000):0;
+    if(renderStream.prev){
+      for(const k of Object.keys(dSlots)){
+        const raw=Math.max(0,(dSlots[k]-(renderStream.prev[k]||0))/elapsed);
+        dSlots[k+'_pps']=raw===0?(ewma[k+'_pps']||0):ewmaUpdate(k+'_pps',raw);
+      }
+    }else{for(const k of Object.keys(dSlots))dSlots[k+'_pps']=0;}
+    renderStream.prev={...dSlots,ts:d.ts_ms};
+    const snap={...d,ts_ms:d.ts_ms||d.ts,events_ingested:ipc.ingest_total,events_rejected:ipc.rejected_total,events_shed:ipc.shed_total,channel_depth:ipc.ring_depth,blocked_total:det.blocks_total};
+    renderTelemetry(snap,det.modules||[],[]);
+    renderPipeline(d.pipeline);
+    $('kpi-xdp').textContent=fmt(dSlots.drops_pps,1)+' drops/s'; $('kpi-ingress').textContent=fmt(dSlots.ingest_pps,1)+' req/s';
+    $('kpi-rules').textContent=fmt(snap.blocked_total,0); $('kpi-entropy').textContent='n/a';
+    $('kpi-hlc').textContent=fmt((d.durability||{}).wal_lsn,0)+' LSN';
+    $('od-v4').textContent=fmt(dSlots.drops_pps,0)+' pps ('+fmt(x.v4_drops_total,0)+')'; $('od-v6').textContent='0 pps ('+fmt(x.v6_drops_total,0)+')'; $('od-pass').textContent=fmt(x.wire_pass_total,0); $('od-fail').textContent=fmt(x.parse_fails_total,0);
+    $('od-blcap').textContent=fmt(snap.blocked_total,0)+' / '+fmt(x.map_capacity,0); $('od-bar').style.width=Math.min(100,(snap.blocked_total||0)/(x.map_capacity||1)*100)+'%';
+    $('od-ingest').textContent=fmt(dSlots.ingest_pps,1)+' /s'; $('od-reject').textContent=fmt(ipc.rejected_total,0); $('od-shed').textContent=fmt(dSlots.shed_pps,1)+' /s'; $('od-chan').textContent=fmt(ipc.ring_depth,0)+' / '+fmt(ipc.ring_capacity,0); $('od-chan-bar').style.width=Math.min(100,(ipc.ring_depth||0)/(ipc.ring_capacity||1)*100)+'%';
+    $('od-promo').textContent=fmt(dSlots.promo_pps,1); $('od-cold').textContent=fmt(dSlots.cold_pps,1); $('od-bdet').textContent=fmt(det.blocks_total,0); $('od-capex').textContent='n/a'; $('od-submap').textContent='n/a';
+    const fc=d.forecasting||{},cg=d.cgnat||{},an=d.analytics||{},mh=d.mesh||{},sy=d.system||{};
+    $('od-fcst').textContent=fmt(fc.hw_forecast,1); $('od-zscore').textContent=fmt(fc.hw_zscore,2); $('od-baseline').textContent=fmt(fc.hw_rps,1); $('od-ent').textContent=fmt(fc.entropy,2); $('od-entt').textContent='n/a'; $('od-fctt').textContent='n/a';
+    $('od-cgcls').textContent='n/a'; $('od-cgallow').textContent=fmt(cg.tier_allow,0); $('od-cgchall').textContent=fmt(cg.tier_challenge,0); $('od-cgpow').textContent=fmt(cg.tier_powdrop,0); $('od-cgblock').textContent=fmt(cg.tier_block,0); $('od-cgpub').textContent=fmt(cg.shm_publishes,0); $('od-cghit').textContent=fmt(cg.shm_cache_hits,0);
+    $('od-hll').textContent=fmt(an.hll_inserts,0); $('od-cms').textContent=fmt(an.cms_increments,0); $('od-cmsdec').textContent=fmt(an.cms_decay_ticks,0);
+    $('od-mhlc').textContent=fmt(mh.hlc_ticks,0); $('od-mban').textContent=fmt(mh.record_bans,0); $('od-munban').textContent=fmt(mh.record_unbans,0); $('od-mpurge').textContent=fmt(mh.purge_ticks,0);
+    $('od-cpu').textContent=fmt(sy.cpu_pct,1)+'%'; $('od-rss').textContent=fmt(sy.rss_mb,0)+' MB'; $('od-ram').textContent=fmt(sy.ram_pct,1)+'%'; $('od-ram-bar').style.width=Math.min(100,sy.ram_pct||0)+'%'; $('od-ips').textContent=fmt(sy.ips_tracked,0);
+    const healthy=!!(d.health||{}).is_healthy; $('cluster-status').className=healthy?'badge-status':'badge-status degraded'; $('cluster-status-text').textContent=healthy?'HEALTHY':((d.health||{}).health_reason||'DEGRADED');
+  }
+  renderStream.prev=null;
+  let stream;
+  const telemetryStore = { latest: null, renderQueued: false };
+  const ewma = { alpha: 0.3, drops_pps: 0, ingress_rps: 0, shed_rps: 0, promo_rps: 0, cold_rps: 0, initialized: false };
+  function ewmaUpdate(key, raw){
+    if(!ewma.initialized){ewma[key]=raw;ewma.initialized=true;return raw;}
+    ewma[key]=ewma[key]*(1-ewma.alpha)+raw*ewma.alpha;
+    return ewma[key];
+  }
+  function queueTelemetry(frame){
+    telemetryStore.latest=frame;
+    if(telemetryStore.renderQueued)return;
+    telemetryStore.renderQueued=true;
+    requestAnimationFrame(()=>{
+      telemetryStore.renderQueued=false;
+      if(telemetryStore.latest)renderStream(telemetryStore.latest);
+    });
+  }
+  function connectStream(){
+    stream=new EventSource('/api/stream');
+    stream.onmessage=e=>{try{queueTelemetry(JSON.parse(e.data))}catch(err){console.error('telemetry event:',err)}};
+    stream.onerror=()=>{$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='RECONNECTING';};
+  }
+  function switchTab(tab){
+    document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.getElementById('tab-'+tab)?.classList.add('active');
+    document.querySelector('[data-tab="'+tab+'"]')?.classList.add('active');
+    if(tab==='telemetry') renderChart();
+  }
+  function exportCSV(){
+    const rows=document.querySelectorAll('#quarantineBody tr');
+    let csv='IP,Module,Severity,Tier,Time\n';
+    rows.forEach(r=>{const cells=r.querySelectorAll('td');if(cells.length>=4)csv+=Array.from(cells).slice(0,4).map(c=>'"'+c.textContent.trim()+'"').join(',')+'\n';});
+    const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='quarantine.csv';a.click();
+  }
+  refresh(); connectStream();
+  setInterval(loadBlocks,10000);
   function filterTable() { const q = $('tableSearch').value.toLowerCase(); document.querySelectorAll('#quarantineBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none'; }); }
 
 </script>
