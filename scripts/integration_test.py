@@ -88,7 +88,7 @@ r = ipc_send('{"type":"get_status"}')
 test("get_status returns ok", r.get("type") == "ok")
 
 # block_ip
-r = ipc_send(json.dumps({"type":"block_ip","ip":"198.51.100.50","reason":"test","ttl_secs":120}))
+r = ipc_send(json.dumps({"type":"block_ip","ip":"198.51.100.50","reason":"manual_block","ttl_secs":120}))
 test("block_ip returns pending", r.get("state") == "pending", str(r))
 time.sleep(0.1)
 r = ipc_send('{"type":"check_ip","ip":"198.51.100.50"}')
@@ -163,7 +163,7 @@ test("config has dashboard section", "dashboard" in cfg or "http_addr" in cfg)
 print("\n── 6. DETECTION ENGINE (dual gate test) ──")
 
 # Reset by blocking then unblocking a test IP
-ipc_send(json.dumps({"type":"block_ip","ip":"172.16.0.1","reason":"test","ttl_secs":60}))
+ipc_send(json.dumps({"type":"block_ip","ip":"172.16.0.1","reason":"manual_block","ttl_secs":60}))
 ipc_send('{"type":"unblock_ip","ip":"172.16.0.1"}')
 
 # Send batch from concentrated subnet (must hit 50 unique IPs + 100 events to trigger subnet_batch)

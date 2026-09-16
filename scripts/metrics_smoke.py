@@ -116,7 +116,7 @@ def phase_ban_unban():
     print("Phase 5: IPC block/unblock (bans + unbans)...")
     for i in range(20):
         ip = f"203.0.113.{i+1}"
-        ipc_send({"type": "block_ip", "ip": ip, "reason": "test", "ttl_secs": 300})
+        ipc_send({"type": "block_ip", "ip": ip, "reason": "manual_block", "ttl_secs": 300})
     time.sleep(0.5)
     for i in range(10):
         ip = f"203.0.113.{i+1}"

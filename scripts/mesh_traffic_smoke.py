@@ -30,7 +30,7 @@ def main() -> int:
     # Phase 1: ban/unban cycles
     for i in range(20):
         ip = f"10.99.{i % 50}.{i // 50 + 1}"
-        ipc({"type": "block_ip", "ip": ip, "reason": "mesh-smoke", "ttl_secs": 300})
+        ipc({"type": "block_ip", "ip": ip, "reason": "mesh_final", "ttl_secs": 300})
     time.sleep(1)
     for i in range(10):
         ipc({"type": "unblock_ip", "ip": f"10.99.{i % 50}.{i // 50 + 1}"})
