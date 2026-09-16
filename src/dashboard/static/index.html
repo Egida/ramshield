@@ -469,15 +469,12 @@
     previous = {ts, ingest: snap.events_ingested || 0};
     const det = (modules || []).find(m => m.label === 'Detection') || {}, fc = (modules || []).find(m => m.label === 'Forecasting') || {};
     const dd = det.detail || {}, fd = fc.detail || {}, active = Math.min(256, (subnets || []).length);
-    $('kpi-xdp').textContent='0 drops/s'; $('kpi-ingress').textContent=fmt(ingress,0)+' req/s'; $('kpi-rules').textContent=fmt(snap.blocked_total,0); $('kpi-entropy').textContent='n/a'; $('kpi-hlc').textContent='n/a';
+    // ponytail: renderTelemetry is also called from renderStream (SSE path) —
+    // do NOT clobber SSE-computed values; only set elements SSE doesn't manage.
     $('current-timestamp').textContent=new Date(ts).toISOString().substring(11,19)+' UTC'; $('bitmap-count').textContent=active+' / 256 ACTIVE';
     for(let i=0;i<256;i++){cells[i].className='matrix-cell';if(i<active)cells[i].classList.add(i%5===0?'tier-block':'tier-pass')} pushTelemetry(0,ingress);renderChart();
     const healthy=!!snap.is_healthy&&!!snap.xdp_active; $('cluster-status').className=healthy?'badge-status':'badge-status degraded'; $('cluster-status-text').textContent=healthy?'HEALTHY':(snap.xdp_active?(snap.health_reason||'DEGRADED'):'XDP INACTIVE');
-    $('od-v4').textContent='0 pps (0)'; $('od-v6').textContent='0 pps (0)'; $('od-pass').textContent='n/a'; $('od-fail').textContent='n/a'; $('od-blcap').textContent=fmt(snap.blocked_total,0)+' active'; $('od-bar').style.width=Math.min(100,(snap.blocked_total||0)/102400*100)+'%';
-    $('od-ingest').textContent=fmt(ingress,1)+' /s'; $('od-reject').textContent=fmt(snap.events_rejected,0); $('od-shed').textContent=fmt(snap.events_shed,0); $('od-chan').textContent=fmt(snap.channel_depth,0)+' / 64000'; $('od-chan-bar').style.width=Math.min(100,(snap.channel_depth||0)/64000*100)+'%';
-    $('od-promo').textContent=fmt(dd.promotions,0); $('od-cold').textContent=fmt(dd.cold_skipped,0); $('od-bdet').textContent=fmt(dd.blocks,0); $('od-bsub').textContent=fmt(dd.subnet_blocks,0); $('od-bfc').textContent=fmt(fd.forecast_blocks,0); $('od-capex').textContent='n/a'; $('od-submap').textContent=active;
-    $('od-fcst').textContent=fmt(fd.hw_forecast,1); $('od-zscore').textContent=fmt(fd.hw_zscore,2); $('od-baseline').textContent=fmt(fd.hw_rps,1); $('od-ent').textContent=fmt(fd.entropy,2); $('od-entt').textContent='n/a'; $('od-fctt').textContent=fmt(fc.events,0);
-    ['od-cgcls','od-cgallow','od-cgchall','od-cgpow','od-cgblock','od-cgpub','od-cghit','od-hll','od-cms','od-cmsdec','od-mhlc','od-mban','od-munban','od-mpurge'].forEach(id=>$(id).textContent='n/a');
+    $('od-capex').textContent='n/a'; $('od-submap').textContent=active;
     $('od-cpu').textContent=(snap.cpu_usage||0).toFixed(1)+'%'; $('od-rss').textContent=fmt(snap.memory_usage_mb,0)+' MB'; $('od-ram').textContent=(snap.ram_pct||0).toFixed(1)+'%'; $('od-ram-bar').style.width=Math.min(100,snap.ram_pct||0)+'%'; $('od-ips').textContent=fmt(snap.ips_tracked,0);
   }
   async function loadBlocks(){
