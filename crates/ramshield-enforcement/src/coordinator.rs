@@ -30,6 +30,7 @@ use ramshield_detection::DetectionEngine;
 use crate::EnforcementService;
 use ramshield_metrics::Metrics;
 use ramshield_storage::Store;
+use tracing::debug;
 
 /// Two-phase coordinator that guarantees atomic enforcement across detection, enforcement,
 /// shared memory, and mesh CRDT for split-brain safety.
@@ -279,8 +280,20 @@ impl CoordinatedEnforcementEngine {
             let _ = self.active_records.remove(&ip);
         }
 
-        // GC CRDT tombstones older than 10s.
+        // GC CRDT tombstones older than the horizon.
+        // mesh_purge_ticks is counted HERE — this is the sweep that actually
+        // purges; the enforcement tick loop is not a purge site.
+        let before = self.mesh_blocklist.len();
         self.mesh_blocklist.purge_expired(now_ns / 1_000_000);
+        let purged = before.saturating_sub(self.mesh_blocklist.len());
+        self.metrics.inc_mesh_purge();
+        if purged > 0 {
+            debug!(
+                purged_n = purged,
+                entries_after = self.mesh_blocklist.len(),
+                "mesh CRDT tombstone purge"
+            );
+        }
 
         // Update last maintenance timestamp.
         self.last_maintenance_ns.store(now_ns, std::sync::atomic::Ordering::Relaxed);

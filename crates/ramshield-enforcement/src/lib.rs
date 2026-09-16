@@ -87,11 +87,11 @@ impl XdpApplier for StubXdpApplier {
         _decision_id: Uuid,
         _ttl_seconds: u64,
     ) -> Result<(), EnforcementError> {
-        info!(%ip, "XDP block (stub)");
+        trace!(%ip, "XDP block (stub)");
         Ok(())
     }
     fn apply_unblock(&mut self, ip: IpAddr, _decision_id: Uuid) -> Result<(), EnforcementError> {
-        info!(%ip, "XDP unblock (stub)");
+        trace!(%ip, "XDP unblock (stub)");
         Ok(())
     }
     fn reconcile(
@@ -201,17 +201,22 @@ impl EnforcementService {
                     if !drops.is_empty() {
                         trace!(n = drops.len(), "XDP drop events drained");
                     }
-                    if let Ok(c) = self.xdp.counters() {
-                        self.metrics.set_xdp_counters(c[0], c[1], c[2], c[3]);
-                        // 4 Hz audit: proves kernel counter deltas propagate to
-                        // Metrics (SSE xdp.* series). Low volume by design.
-                        debug!(
-                            v4_drops = c[0],
-                            v6_drops = c[1],
-                            wire_pass = c[2],
-                            parse_fails = c[3],
-                            "xdp counters read"
-                        );
+                    match self.xdp.counters() {
+                        Ok(c) => {
+                            self.metrics.set_xdp_counters(c[0], c[1], c[2], c[3]);
+                            // 4 Hz audit: proves kernel counter deltas
+                            // propagate to Metrics (SSE xdp.* series).
+                            debug!(
+                                v4_drops = c[0],
+                                v6_drops = c[1],
+                                wire_pass = c[2],
+                                parse_fails = c[3],
+                                "xdp counters read"
+                            );
+                        }
+                        // Non-fatal (stub backend, missing COUNTERS map).
+                        // trace: must not become a per-tick debug flood.
+                        Err(e) => trace!(error = %e, "xdp counters unavailable"),
                     }
                     // ponytail: publish enforcement state to Metrics so the
                     // dashboard reads live values instead of dead zeros.
@@ -219,19 +224,19 @@ impl EnforcementService {
                         self.metrics.set_wal_lsn(lsn);
                     }
                     self.metrics.set_pending_expirations(self.expirations.len() as u64);
-                    // ponytail: mesh CRDT counters — enforcement owns the
-                    // blocklist CRDT, so publish its live state here.
+                    // HLC activity: published from the CRDT that owns the clock.
+                    // NOTE: mesh_blocklist_len is NOT written into
+                    // mesh_record_ban_count — that atomic is a cumulative
+                    // counter owned by detection (record_ban). Overwriting it
+                    // with len() every tick made the counter meaningless.
                     if let Some(mesh) = &self.mesh_blocklist {
-                        self.metrics.mesh_record_ban_count.store(
-                            mesh.len() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
                         self.metrics.mesh_hlc_ticks.store(
                             mesh.hlc_ticks(),
                             std::sync::atomic::Ordering::Relaxed,
                         );
-                        self.metrics.inc_mesh_purge();
                     }
+                    // mesh_purge_ticks is owned by the real purge site
+                    // (coordinator maintenance sweep), not this tick loop.
                     if self.shutdown.load(Ordering::Acquire) { break; }
                 }
                 cmd = command_rx.recv() => {

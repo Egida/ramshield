@@ -582,18 +582,25 @@ impl DetectionEngine {
             let (_ewma_rps, threat, should_block, _was_blocked, stored) =
                 self.merge_record(ip, agg, det, ram_lim, now, sk);
             if !stored {
-                self.metrics
+                let exceeded = self
+                    .metrics
                     .capacity_exceeded_count
-                    .fetch_add(1, Ordering::Relaxed);
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
                 self.metrics
                     .capacity_exceeded_ips
                     .fetch_add(1, Ordering::Relaxed);
-                warn!(
-                    ip = %ip,
-                    ram_usage = self.store.ram_bytes(),
-                    ram_limit = ram_lim,
-                    "detection: record update capacity-exceeded — IP not tracked"
-                );
+                // Sampled like the enforcement-queue warn below: under RAM
+                // pressure this fires per refused IP and floods the log.
+                if exceeded & 0x3FF == 1 {
+                    warn!(
+                        ip = %ip,
+                        exceeded,
+                        ram_usage = self.store.ram_bytes(),
+                        ram_limit = ram_lim,
+                        "detection: capacity-exceeded, IP not tracked (sampled 1/1024)"
+                    );
+                }
                 cold_skipped += 1;
                 cold_skipped_events += agg.count;
                 continue;
@@ -941,6 +948,7 @@ impl DetectionEngine {
             .collect();
 
         for (sk, uniq, count, cidr) in hot {
+            let mut rejected_q = 0u32;
             // Decision event, not an anomaly — state is live on the dashboard
             // (SSE subnet grid + block counters). Per-tick WARN for every hot
             // subnet floods logs under sustained flood (500/s); debug level.
@@ -979,7 +987,15 @@ impl DetectionEngine {
                         action: EnforceAction::Block,
                     };
                     if self.enforcement_tx.try_send(cmd).is_err() {
-                        warn!(ip=%r.ip, "enforcement queue full; subnet block rejected");
+                        // Sampled: fires per IP of a hot subnet.
+                        rejected_q += 1;
+                        if rejected_q & 0x3FF == 1 {
+                            warn!(
+                                ip = %r.ip,
+                                rejected_q,
+                                "enforcement queue full; subnet block rejected (sampled 1/1024)"
+                            );
+                        }
                     }
                     // P2: CGNAT graduated clamp — shared-infra subnets get
                     // Challenge (429+JS) rather than hard Block (blackhole).
