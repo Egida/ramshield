@@ -198,6 +198,35 @@ impl Engine {
         self.metrics.get_block_log()
     }
 
+    pub fn get_active_blocks(&self) -> Vec<BlockRecord> {
+        let mut blocks: Vec<BlockRecord> = self
+            .store
+            .get_all_blocked_ips()
+            .into_iter()
+            .filter_map(|ip| {
+                let value = self.store.get(&ip)?;
+                let ramshield_storage::Value::IpRecord(record) = value else {
+                    return None;
+                };
+                let ramshield_storage::BlockState::Blocked {
+                    ref reason,
+                    since_ns,
+                } = record.block_state
+                else {
+                    return None;
+                };
+                Some(BlockRecord {
+                    ts_ms: since_ns / 1_000_000,
+                    ip: ip.to_string(),
+                    reason: format!("{reason:?}"),
+                    module: "enforcement".to_string(),
+                })
+            })
+            .collect();
+        blocks.sort_unstable_by_key(|block| std::cmp::Reverse(block.ts_ms));
+        blocks
+    }
+
     pub fn get_hot_subnets(&self) -> Vec<SubnetRow> {
         // ponytail: select_nth_unstable finds the 100th in O(n) — old sort was
         // O(n log n) when only top-100 is kept. Strings still allocate; the
