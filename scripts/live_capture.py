@@ -15,7 +15,7 @@ import os, socket, json, time, random, threading, urllib.request
 
 IPC_HOST = os.environ.get("RAMSHIELD_TEST_HOST", "127.0.0.1")
 IPC_PORT = int(os.environ.get("RAMSHIELD_TEST_IPC_PORT", "7890"))
-DASH_URL = os.environ.get("RAMSHIELD_TEST_DASH_URL", "http://127.0.0.1:9999/api/stream")
+DASH_URL = os.environ.get("RAMSHIELD_TEST_DASH_URL", "http://127.0.0.1:9999")
 
 ATTACKER_IPS = [f"10.{random.randint(1,250)}.{random.randint(1,250)}.{random.randint(1,254)}"
                 for _ in range(80)]
