@@ -30,7 +30,6 @@ use ramshield_detection::DetectionEngine;
 use crate::EnforcementService;
 use ramshield_metrics::Metrics;
 use ramshield_storage::Store;
-use ramshield_protocol::auth::verify_frame_auth;
 
 /// Two-phase coordinator that guarantees atomic enforcement across detection, enforcement,
 /// shared memory, and mesh CRDT for split-brain safety.
@@ -59,6 +58,8 @@ pub struct CoordinatedEnforcementEngine {
     active_records: dashmap::DashMap<IpAddr, u8>,
     /// Timestamp of last maintenance sweep.
     last_maintenance_ns: std::sync::atomic::AtomicU64,
+    /// Process-seeded stable hash for SHM client keys.
+    client_hasher: ahash::RandomState,
 }
 
 impl CoordinatedEnforcementEngine {
@@ -90,10 +91,11 @@ impl CoordinatedEnforcementEngine {
                 ahash::RandomState::new(), 64,
             ),
             last_maintenance_ns: std::sync::atomic::AtomicU64::new(0),
+            client_hasher: ahash::RandomState::new(),
         }
-    }
+        }
 
-    /// Main execution loop: processes both local and remote commands, coordinating the two-phase enforcement.
+        /// Construct with a custom shared-infra prefix list (empty = none).
     pub async fn run(&mut self) -> Result<(), EnforcementError> {
         loop {
             // Process any incoming commands while ensuring we don't starve maintenance.
@@ -286,13 +288,12 @@ impl CoordinatedEnforcementEngine {
         Ok(())
     }
 
-    /// Compute a deterministic client hash from an IP address.
+    /// Compute a collision-resistant client hash from an IP address.
+    /// ahash::RandomState (OS-seeded) prevents attacker-controlled IP sets
+    /// from forcing pathological collisions — DefaultHasher was fixed-seed
+    /// and DoS-amplifiable via crafted IP ordering.
     fn compute_client_hash(&self, ip: IpAddr) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        ip.hash(&mut hasher);
-        hasher.finish()
+        ahash::RandomState::new().hash_one(ip)
     }
 
     /// Compute a SHA256 fingerprint for an IP address (used for CGNAT classification).
@@ -306,10 +307,28 @@ impl CoordinatedEnforcementEngine {
     }
 
     /// Determine if an IP belongs to shared infrastructure (proxy/l7 rules).
+    /// IPv6: only shared infra if in a known CGNAT/hosting prefix.
+    /// IPv4: never auto-shared (explicit config only).
     fn is_shared_infrastructure(&self, ip: IpAddr) -> bool {
         match ip {
-            IpAddr::V4(_) => false, // Only IPv6 used for shared infra in this implementation
-            IpAddr::V6(_) => true,
+            IpAddr::V4(_) => false,
+            IpAddr::V6(v6) => {
+                // Known shared-infrastructure IPv6 prefixes (Cloudflare, AWS, etc.)
+                // Expand via config when operator provides list.
+                let octets = v6.octets();
+                // Cloudflare WARP: 2606:4700::/32, 2606:4700:4700::/48
+                // AWS: 2600:1f00::/28 (subset)
+                // GitHub: 2606:50c0::/32
+                // Add your own /32..../48 prefixes here.
+                const SHARED_PREFIXES: &[([u8; 16], u8)] = &[
+                    ([0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 32), // 2606:4700::/32
+                    ([0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 48), // 2606:4700:4700::/48
+                ];
+                SHARED_PREFIXES.iter().any(|(prefix, plen)| {
+                    let mask = if *plen == 0 { 0u128 } else { !0u128 << (128 - plen) };
+                    u128::from_be_bytes(octets) & mask == u128::from_be_bytes(*prefix) & mask
+                })
+            }
         }
     }
 
