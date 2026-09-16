@@ -387,7 +387,9 @@ async fn api_stream(
                 "promotions_total": snapshot.promotions,
                 "cold_skipped_total": snapshot.cold_skipped,
                 "blocks_total": snapshot.blocks_applied,
-                "subnet_blocks": snapshot.blocks_applied,
+                "blocks_detection": state.engine.metrics.blocks_detection.load(std::sync::atomic::Ordering::Relaxed),
+                "subnet_blocks": state.engine.metrics.blocks_subnet.load(std::sync::atomic::Ordering::Relaxed),
+                "forecast_blocks": state.engine.metrics.blocks_forecast.load(std::sync::atomic::Ordering::Relaxed),
                 "modules": modules
             },
             "forecasting": modules.iter().find(|m| m.label == "Forecasting").map(|m| m.detail.clone()).unwrap_or_else(|| serde_json::json!({})),
