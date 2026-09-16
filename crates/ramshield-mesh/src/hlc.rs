@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Hlc {
     physical_ms: AtomicU64,
     logical_seq: AtomicU32,
+    tick_count: AtomicU64,
 }
 
 impl Hlc {
@@ -17,6 +18,7 @@ impl Hlc {
         Self {
             physical_ms: AtomicU64::new(0),
             logical_seq: AtomicU32::new(0),
+            tick_count: AtomicU64::new(0),
         }
     }
 
@@ -48,9 +50,14 @@ impl Hlc {
                 .is_ok()
             {
                 self.logical_seq.store(next_seq, Ordering::Relaxed);
+                self.tick_count.fetch_add(1, Ordering::Relaxed);
                 return (next_phys, next_seq);
             }
         }
+    }
+
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count.load(Ordering::Relaxed)
     }
 
     /// Local-only tick: advance past the wall clock, zero the counter when
@@ -77,6 +84,7 @@ mod tests {
         let t1 = hlc.now();
         let t2 = hlc.now();
         assert!(t2 >= t1);
+        assert_eq!(hlc.tick_count(), 2);
     }
 
     #[test]

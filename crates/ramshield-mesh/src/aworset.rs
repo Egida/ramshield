@@ -161,6 +161,10 @@ impl AworsetBlocklist {
         self.entries.len()
     }
 
+    pub fn hlc_ticks(&self) -> u64 {
+        self.hlc.tick_count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

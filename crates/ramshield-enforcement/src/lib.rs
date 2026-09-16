@@ -217,6 +217,10 @@ impl EnforcementService {
                             mesh.len() as u64,
                             std::sync::atomic::Ordering::Relaxed,
                         );
+                        self.metrics.mesh_hlc_ticks.store(
+                            mesh.hlc_ticks(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         self.metrics.inc_mesh_purge();
                     }
                     if self.shutdown.load(Ordering::Acquire) { break; }
