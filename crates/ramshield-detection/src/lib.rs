@@ -679,8 +679,14 @@ impl DetectionEngine {
         });
 
         debug!(
-            "batch flush: {} events, {} unique IPs, {} hot subnets",
-            total_events, unique_ips, hot_subnets,
+            batch_id = now / 1_000_000,
+            events = total_events,
+            unique_ips,
+            promoted_events,
+            cold_skipped_events,
+            blocks = sent_blocks,
+            hot_subnets,
+            "batch flush",
         );
     }
 
@@ -935,11 +941,16 @@ impl DetectionEngine {
             .collect();
 
         for (sk, uniq, count, cidr) in hot {
-            warn!(
-                "Batch block subnet {} ({} IPs / {} events in window)",
-                cidr, uniq, count
+            // Decision event, not an anomaly — state is live on the dashboard
+            // (SSE subnet grid + block counters). Per-tick WARN for every hot
+            // subnet floods logs under sustained flood (500/s); debug level.
+            debug!(
+                cidr = %cidr,
+                unique_ips = uniq,
+                events = count,
+                "Batch block subnet in window"
             );
-            info!("Batch blocking subnet key {:#x}", sk);
+            debug!("Batch blocking subnet key {:#x}", sk);
 
             // O(1) lookup for IPs in the hot subnet instead of full scan
             let now = now_ns();
