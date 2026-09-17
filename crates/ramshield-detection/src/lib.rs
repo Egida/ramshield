@@ -175,6 +175,8 @@ impl Drop for FlushGuard<'_> {
 }
 
 impl DetectionEngine {
+    /// Compatibility constructor for tests and legacy callers.
+    /// Production boot uses `try_new` so SHM failures reach the boot error path.
     pub fn new(
         store: Arc<Store>,
         config: ConfigHandle,
@@ -182,6 +184,19 @@ impl DetectionEngine {
         metrics: Arc<Metrics>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
+        match Self::try_new(store, config, enforcement_tx, metrics, shutdown) {
+            Ok(engine) => engine,
+            Err(error) => panic!("detection SHM initialization failed: {error}"),
+        }
+    }
+
+    pub fn try_new(
+        store: Arc<Store>,
+        config: ConfigHandle,
+        enforcement_tx: mpsc::Sender<EnforceCommand>,
+        metrics: Arc<Metrics>,
+        shutdown: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
         let bloom_bits = config.load().detection.bloom_bits;
         // 64k cap ≈ 4MB RSS, fills in ~64ms at 1M eps — keeps the batch
         // processor honest without megabytes of dead head-of-line buffer.
@@ -189,12 +204,9 @@ impl DetectionEngine {
         // ponytail: hardcoded; lift to Config.detection.batch_channel_capacity
         // when traffic profiles diverge.
         let (tx, rx) = bounded::<ConnectionEvent>(CHANNEL_CAPACITY as usize);
-        let shm_table = Arc::new(
-            ramshield_cgnat::ShmTableManager::open_or_create(
-                &ramshield_cgnat::ShmTableManager::default_path(),
-            )
-            .expect("P2: SHM rule table must open at boot"),
-        );
+        let shm_table = Arc::new(ramshield_cgnat::ShmTableManager::open_or_create(
+            &ramshield_cgnat::ShmTableManager::default_path(),
+        )?);
         // pre_aggs writers = batch workers (≤ cores), so 64 shards removes
         // every realistic cross-thread collision. The old derivation
         // (bloom_bits/1024) sized the shard array off an UNRELATED
@@ -202,7 +214,7 @@ impl DetectionEngine {
         // every shard lookup chased a huge array of cache lines it could
         // never reuse (TLB tax per event). Shards should track worker
         // count, not bloom size. ponytail: revisit if workers ever > 64.
-        Self {
+        Ok(Self {
             store,
             config,
             metrics,
@@ -219,17 +231,9 @@ impl DetectionEngine {
             shm_table: shm_table.clone(),
             // ponytail: threshold 2.8 is JA4 shared-IP heuristic; lift to
             // Config.detection.cgnat_entropy_threshold when profiling diverges.
-            cgnat_guard: ramshield_cgnat::CgnatGuard::new(
-                Arc::new(
-                    ramshield_cgnat::ShmTableManager::open_or_create(
-                        &ramshield_cgnat::ShmTableManager::default_path(),
-                    )
-                    .expect("P2: CGNAT SHM table must open at boot"),
-                ),
-                2.8,
-            ),
+            cgnat_guard: ramshield_cgnat::CgnatGuard::new(shm_table.clone(), 2.8),
             mesh_blocklist: Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(0)),
-        }
+        })
     }
 
     pub fn event_sender(&self) -> Sender<ConnectionEvent> {

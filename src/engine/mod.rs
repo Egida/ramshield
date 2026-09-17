@@ -452,13 +452,13 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         })
     };
 
-    let detection = Arc::new(DetectionEngine::new(
+    let detection = Arc::new(DetectionEngine::try_new(
         store.clone(),
         cfg_handle.clone(),
         engine.enforcement_tx.clone(),
         metrics.clone(),
         engine.shutdown.clone(),
-    ));
+    )?);
     let event_tx = detection.event_sender();
     detection
         .clone()
