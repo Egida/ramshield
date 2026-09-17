@@ -132,6 +132,12 @@ pub struct EnforcementService {
     processed_decisions: HashSet<Uuid>,
     processed_order: VecDeque<Uuid>,
     blocked_ips: HashSet<IpAddr>,
+    /// Userspace mirror of active CIDR blocks (permanent + TTL'd), feeding the
+    /// `ramshield_active_cidr_blocks` gauge. ponytail: kernel BLOCKCIDR maps
+    /// are the authoritative dataplane; this mirror gives cheap telemetry
+    /// without per-tick map iteration — upgrade to LpmTrie::iter if exact
+    /// kernel entry counts are ever required.
+    active_cidrs: HashSet<IpNetwork>,
     /// TTL expiry index: IP -> (second-bucket, position in that bucket's Vec).
     /// RAM-for-CPU item 14: was a flat HashMap swept with `retain()` every
     /// 250ms — O(all pending expirations) per tick to usually find zero due.
@@ -174,6 +180,7 @@ impl EnforcementService {
             processed_decisions: HashSet::new(),
             processed_order: VecDeque::with_capacity(65_536),
             blocked_ips: HashSet::new(),
+            active_cidrs: HashSet::new(),
             expirations: HashMap::new(),
             cidr_expirations: HashMap::new(),
             buckets: BTreeMap::new(),
@@ -245,6 +252,7 @@ impl EnforcementService {
                         self.metrics.set_wal_lsn(lsn);
                     }
                     self.metrics.set_pending_expirations(self.expirations.len() as u64);
+                    self.metrics.set_active_cidr_blocks(self.active_cidrs.len());
                     // HLC activity: published from the CRDT that owns the clock.
                     // NOTE: mesh_blocklist_len is NOT written into
                     // mesh_record_ban_count — that atomic is a cumulative
@@ -406,6 +414,7 @@ impl EnforcementService {
                 warn!(cidr=?network, "WAL CIDR restore failed: {}", e);
                 continue;
             }
+            self.active_cidrs.insert(network);
             if remaining_secs > 0 {
                 self.cidr_expirations.insert(
                     network,
@@ -561,6 +570,9 @@ impl EnforcementService {
                     .map_err(|e| EnforcementError::Storage(e.to_string()))?;
 
                 self.blocked_ips.insert(cmd.ip);
+                if let Some(network) = cmd.cidr {
+                    self.active_cidrs.insert(network);
+                }
                 // Invariant: at most one expiration per IP. A re-block must not
                 // inherit a stale TTL from a previous block/unblock cycle.
                 // Ring schedule/detach are both O(1) — TTL refresh moves the
@@ -646,6 +658,7 @@ impl EnforcementService {
                 self.detach_expiration(cmd.ip);
                 if let Some(network) = cmd.cidr {
                     self.cidr_expirations.remove(&network);
+                    self.active_cidrs.remove(&network);
                 }
                 let xdp_applied = match cmd.cidr {
                     Some(network) => self.xdp.apply_cidr_unblock(network, cmd.decision_id),
