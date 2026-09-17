@@ -1141,7 +1141,6 @@ dependencies = [
  "ramshield-analytics",
  "ramshield-cgnat",
  "ramshield-config",
- "ramshield-mesh",
  "ramshield-metrics",
  "ramshield-storage",
  "ramshield-types",
