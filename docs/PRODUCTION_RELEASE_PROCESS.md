@@ -15,7 +15,7 @@ Production release means a verified artifact, not a green compile. The release u
    - metric-keystore and generated JSONL hashes;
    - target host/kernel/XDP capability state;
    - current daemon PID/listeners.
-3. Keep open findings visible. F5 (partial subnet coverage) and F1 (production SHM `.expect()`) block a claim of production-ready security, even if the release candidate builds.
+3. Keep open findings visible. F1 and F5 are closed (see `PRODUCTION_READINESS.md` findings ledger); any newly open finding must be documented before the production-ready claim.
 4. Run the narrow feature check RED-first, then the complete review gate:
 
 ```bash
@@ -119,4 +119,4 @@ Restore the previous config and WAL policy. Verify health, listeners, auth, snap
 
 ## Release claim
 
-A release candidate may be promoted to `master` while production blockers remain documented. It may not be labeled production-ready until F1/F5 are closed, an immutable OCI digest is recorded, WAL restart recovery is verified, and privileged XDP smoke passes on the target deployment class.
+A release candidate may be promoted to `master` while production blockers remain documented. It may not be labeled production-ready until open findings are closed, an immutable OCI digest is recorded, WAL restart recovery is verified, and privileged XDP smoke passes on the target deployment class.

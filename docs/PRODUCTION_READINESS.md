@@ -275,11 +275,19 @@ and rollback reference.
   attacker within the range stays protected. Security-relevant.
 - **Owner**: `crates/ramshield-detection/src/lib.rs` `subnet_batch_scan` +
   `crates/ramshield-storage/src/lib.rs` `get_ips_in_subnet_windowed`.
-- **Fix candidates** (investigate in order): (1) prove full per-IP iteration and
-  block every unblocked windowed IP; (2) extend `EnforceCommand` with a CIDR
-  variant wired through enforcement, XDP `BLOCKCIDR` map, and history.
+- **Fix**: `EnforceCommand` gained a `cidr: Option<IpNetwork>` variant
+  (`crates/ramshield-types/src/command.rs`); enforcement layers a true prefix
+  block onto XDP `BLOCKCIDR`/`BLOCKCIDR6` LPM trie maps; IPC `BlockCidr`
+  request validates and normalizes prefixes (`src/ipc/server.rs`).
+  Full-prefix coverage is now structural — one map entry covers every host,
+  independent of the windowed per-IP index.
+- **Verified**: `scripts/xdp_netns_sim.py --cidr 203.0.113.0/24`, isolated veth
+  pair + 2 netns VMs broadcasting at ~115k pps, XDP counters before/after:
+  `wire_pass 5→10` (ARP only), `v4_drops 0→919408` — 100% of 919,408 packets
+  from the blocked prefix dropped, unblocked traffic passes.
 - **Phase**: convergence & security (roadmap Phase 4/5).
-- **Status**: open.
+- **Status**: closed in commits `803460e` (LPM maps), `e7805a9` (IPC path),
+  `b4b3df4` (netns packet verification), verified 2026-09-17.
 
 ### F1 — production `.expect()` in detection SHM boot path
 
