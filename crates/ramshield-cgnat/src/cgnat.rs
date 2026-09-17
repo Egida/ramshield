@@ -18,6 +18,25 @@ pub struct CgnatGuard {
     entropy_threshold: f64,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn classify_uses_explicit_slot_key_not_memory_address() {
+        let path = std::env::temp_dir().join(format!("ramshield-cgnat-{}", std::process::id()));
+        let rules = Arc::new(ShmTableManager::open_or_create(Path::new(&path)).unwrap());
+        rules.publish_rule(42, 60_000, CGNAT_TIER_BLOCK, 0, false);
+        let guard = CgnatGuard::new(rules, 2.8);
+
+        let fingerprint: Vec<u8> = (0..=31).collect();
+        assert_eq!(guard.classify(&fingerprint, 42), CGNAT_TIER_BLOCK);
+        assert_eq!(guard.classify(&fingerprint, 43), CGNAT_TIER_CHALLENGE);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 impl CgnatGuard {
     pub fn new(rules: Arc<ShmTableManager>, entropy_threshold: f64) -> Self {
         Self {
@@ -35,12 +54,14 @@ impl CgnatGuard {
         counts
     }
 
-    pub fn classify(&self, fingerprint: &[u8]) -> u8 {
+    /// Classify a fingerprint against the caller's stable SHM slot key.
+    ///
+    /// The key is supplied by the caller because a slice address is process-
+    /// local, ASLR-dependent, and unrelated to the published rule slot.
+    pub fn classify(&self, fingerprint: &[u8], slot_key: u64) -> u8 {
         let counts = Self::fingerprint_counts(fingerprint);
         let entropy = shannon_entropy(&counts, fingerprint.len() as u64);
-        let slot = self
-            .rules
-            .get_slot((fingerprint.as_ptr() as u64 & 0xFFFF_FFFF) as usize % 65536);
+        let slot = self.rules.get_slot(slot_key as usize);
 
         if slot.client_hash.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             CGNAT_TIER_CHALLENGE
