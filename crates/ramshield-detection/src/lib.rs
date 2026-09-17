@@ -680,6 +680,7 @@ impl DetectionEngine {
                 ttl_seconds: b.2,
                 reason: b.1.as_str().into(),
                 ip: b.0,
+                cidr: None,
                 action: EnforceAction::Block,
             };
             if self.enforcement_tx.try_send(cmd).is_ok() {
@@ -939,7 +940,7 @@ impl DetectionEngine {
         let ip_threshold = cfg.detection.subnet_batch_threshold as u64;
         let ev_threshold = cfg.detection.subnet_batch_min_events;
 
-        let hot: Vec<(SubnetKey, u64, u64, String)> = self
+        let hot: Vec<(SubnetKey, u64, u64, IpNetwork)> = self
             .store
             .subnet_table()
             .iter()
@@ -961,7 +962,7 @@ impl DetectionEngine {
                         .subnet_member_count_windowed(*e.key(), 2 * 1_000_000_000, now)
                 };
                 if uniq >= ip_threshold && r.total_rps >= ev_threshold {
-                    Some((*e.key(), uniq, r.total_rps, r.network.to_string()))
+                    Some((*e.key(), uniq, r.total_rps, r.network))
                 } else {
                     None
                 }
@@ -981,8 +982,28 @@ impl DetectionEngine {
             );
             debug!("Batch blocking subnet key {:#x}", sk);
 
-            // O(1) lookup for IPs in the hot subnet instead of full scan
+            // The CIDR is one decision. Exact-IP expansion leaves rotating
+            // hosts uncovered; the XDP LPM map enforces the complete prefix.
             let now = now_ns();
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "detection".into(),
+                actor: "system".into(),
+                timestamp_utc: (now / 1_000_000_000) as i64,
+                ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
+                reason: "subnet_burst".into(),
+                ip: cidr.addr,
+                cidr: Some(cidr),
+                action: EnforceAction::Block,
+            };
+            if self.enforcement_tx.try_send(cmd).is_err() {
+                rejected_q += 1;
+                warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
+            } else {
+                self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
+            }
+
             let ips_in_subnet = self
                 .store
                 .get_ips_in_subnet_windowed(sk, 2 * 1_000_000_000, now);
@@ -990,34 +1011,6 @@ impl DetectionEngine {
                 if let Some(e) = self.store.inner().get(&key)
                     && let Value::IpRecord(ref r) = e.value().value
                 {
-                    if matches!(r.block_state, BlockState::Blocked { .. }) {
-                        continue;
-                    }
-
-                    let cmd = EnforceCommand {
-                        decision_id: Uuid::new_v4(),
-                        policy_version: 1,
-                        source: "detection".into(),
-                        actor: "system".into(),
-                        timestamp_utc: (now_ns() / 1_000_000_000) as i64,
-                        // Subnet blocks cover up to 253 hosts of shared
-                        // egress — short TTL, re-fires on continued abuse.
-                        ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
-                        reason: "subnet_burst".into(),
-                        ip: r.ip,
-                        action: EnforceAction::Block,
-                    };
-                    if self.enforcement_tx.try_send(cmd).is_err() {
-                        // Sampled: fires per IP of a hot subnet.
-                        rejected_q += 1;
-                        if rejected_q & 0x3FF == 1 {
-                            warn!(
-                                ip = %r.ip,
-                                rejected_q,
-                                "enforcement queue full; subnet block rejected (sampled 1/1024)"
-                            );
-                        }
-                    }
                     // P2: CGNAT graduated clamp — shared-infra subnets get
                     // Challenge (429+JS) rather than hard Block (blackhole).
                     let fp_bytes = (r.ip.to_string() + &sk.to_string()).as_bytes().to_vec();
@@ -1319,10 +1312,11 @@ mod tests {
             .iter()
             .filter(|c| c.ip.is_ipv6() && c.reason == "subnet_burst")
             .collect();
+        assert_eq!(v6_blocks.len(), 1, "v6 /64 swarm emits one CIDR decision");
+        assert_eq!(v6_blocks[0].cidr.map(|n| n.prefix_len), Some(64));
         assert_eq!(
-            v6_blocks.len(),
-            60,
-            "v6 /64 swarm must batch-block every member IP, got {v6_blocks:?}",
+            v6_blocks[0].cidr.map(|n| n.addr),
+            Some("2001:db8:abcd::".parse().unwrap()),
         );
     }
 

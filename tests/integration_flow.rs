@@ -91,6 +91,7 @@ async fn enforcement_wal_replay_roundtrip() {
         ttl_seconds: 60,
         reason: "high_rps".into(),
         ip: std::net::IpAddr::from([192, 168, 7, 7]),
+        cidr: None,
         action: EnforceAction::Block,
     };
     tx.send(cmd).await.unwrap();

@@ -613,6 +613,7 @@ fn process_request(
                 ttl_seconds: ttl_secs,
                 reason,
                 ip: ip_addr,
+                cidr: None,
                 action: EnforceAction::Block,
             };
             match enforcement_tx.try_send(cmd) {
@@ -651,6 +652,7 @@ fn process_request(
                 ttl_seconds: 0,
                 reason: "manual_unblock".into(),
                 ip: ip_addr,
+                cidr: None,
                 action: EnforceAction::Unblock,
             };
             match enforcement_tx.try_send(cmd) {

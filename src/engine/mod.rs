@@ -426,6 +426,10 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         // P1-4: restored blocks must expire on schedule — re-arm
                         // the TTL ring (expirations/buckets are empty at boot).
                         enforcement.restore_expirations(pairs);
+                        match ramshield_enforcement::replay_wal_cidrs(&wal) {
+                            Ok(cidrs) => enforcement.restore_cidr_blocks(cidrs),
+                            Err(e) => tracing::error!("WAL CIDR replay failed: {}", e),
+                        }
                     }
                     Err(e) => {
                         tracing::error!("WAL replay failed: {} — starting with empty block set", e)

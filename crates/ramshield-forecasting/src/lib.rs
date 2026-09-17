@@ -764,6 +764,7 @@ impl Forecaster {
                 ttl_seconds: FORECAST_BLOCK_TTL_SECS,
                 reason: "forecast_anomaly".into(),
                 ip,
+                cidr: None,
                 action: EnforceAction::Block,
             };
             if self.enforcement_tx.try_send(cmd).is_err() {

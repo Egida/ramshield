@@ -1,6 +1,6 @@
 use crc32fast::Hasher as Crc32;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
-use ramshield_types::{Durability, Result, RsError};
+use ramshield_types::{Durability, IpNetwork, Result, RsError};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
@@ -30,6 +30,16 @@ pub enum WalEntry {
     },
     UnblockIp {
         ip: String,
+        ts_ns: u64,
+    },
+    BlockCidr {
+        cidr: IpNetwork,
+        reason: String,
+        ttl_secs: Option<u64>,
+        ts_ns: u64,
+    },
+    UnblockCidr {
+        cidr: IpNetwork,
         ts_ns: u64,
     },
     Insert {
