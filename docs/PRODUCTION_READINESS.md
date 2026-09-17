@@ -252,6 +252,42 @@ security review findings triaged
 release checklist complete
 ```
 
+## Findings ledger
+
+Open findings tracked during roadmap execution. Each entry: evidence, contract
+mismatch, owner, phase, status. Close an entry only with a verification report
+and rollback reference.
+
+### F5 — subnet batch blocks cover a fraction of the /24 (P1)
+
+- **Date**: 2026-09-17
+- **Evidence**: trace probe (`RUST_LOG=ramshield=trace`, scratch server,
+  env recipe thresholds 1/1): `Batch block subnet in window cidr=192.0.2.0/24`
+  fired on 4 successive scans (unique_ips=113→167→171→178) yet only **17 IPs**
+  were committed (`reason=subnet_burst`, `ttl_seconds=120`, `xdp_applied=true`);
+  snapshot `blocks_applied=17`. `check_ip` on any other fixture host → unblocked.
+- **Root contract mismatch**: `EnforceCommand.ip` is an exact `IpAddr` — there is
+  no CIDR command. The scan iterates `get_ips_in_subnet_windowed(sk, 2s)` and
+  blocks each unblocked host individually, but the windowed index/loop yields a
+  sparse subset per tick. README, docs, and block history label the feature
+  "Batch block /24", implying full-subnet coverage.
+- **Impact**: ~90% of hosts in the /24 evade the "subnet" block; a rotating
+  attacker within the range stays protected. Security-relevant.
+- **Owner**: `crates/ramshield-detection/src/lib.rs` `subnet_batch_scan` +
+  `crates/ramshield-storage/src/lib.rs` `get_ips_in_subnet_windowed`.
+- **Fix candidates** (investigate in order): (1) prove full per-IP iteration and
+  block every unblocked windowed IP; (2) extend `EnforceCommand` with a CIDR
+  variant wired through enforcement, XDP `BLOCKCIDR` map, and history.
+- **Phase**: convergence & security (roadmap Phase 4/5).
+- **Status**: open.
+
+### F1 — production `.expect()` in detection SHM boot path
+
+- **Date**: 2026-09-17
+- **Evidence**: `audit_static` no-unwrap gate flags
+  `crates/ramshield-detection/src/lib.rs:196 .expect("P2: SHM rule table must open at boot")`.
+- **Status**: open. Remove or convert to typed error per roadmap P1-6.
+
 ## Verification matrix
 
 | Boundary | Current evidence | Required next proof |
