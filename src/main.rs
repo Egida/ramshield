@@ -136,8 +136,19 @@ async fn main() -> Result<()> {
 
     info!("RamShield running — Ctrl+C to stop");
 
-    // Wait for Ctrl+C signal
-    tokio::signal::ctrl_c().await?;
+    // Graceful shutdown trap: SIGINT (Ctrl+C), SIGTERM (systemd stop/kill
+    // default), SIGHUP (terminal hangup / reload request). Any of the three
+    // starts the same drain: engine.shutdown() → worker joins → enforcement
+    // task exits → AyaXdpApplier dropped → Ebpf closed → kernel unbinds the
+    // XDP program (RAII detach restores default stack forwarding).
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::select! {
+        _ = sigint.recv() => info!("Received SIGINT; initiating graceful shutdown"),
+        _ = sigterm.recv() => info!("Received SIGTERM; initiating graceful shutdown"),
+        _ = sighup.recv() => info!("Received SIGHUP; initiating graceful shutdown"),
+    }
 
     // Initiate graceful shutdown
     engine.shutdown();
