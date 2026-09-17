@@ -396,6 +396,11 @@ impl EnforcementService {
             });
         }
         if cmd.ip.is_unspecified() {
+            trace!(
+                ip = %cmd.ip,
+                reason = %cmd.reason,
+                "enforce rejected: unspecified IP"
+            );
             return Err(EnforcementError::InvalidCommand(
                 "unspecified IP is not blockable".into(),
             ));
@@ -511,6 +516,16 @@ impl EnforcementService {
                     };
                 self.remember_decision(cmd.decision_id);
                 self.metrics.inc_blocks();
+                trace!(
+                    ip = %cmd.ip,
+                    action = "block",
+                    reason = %cmd.reason,
+                    ttl_seconds = cmd.ttl_seconds,
+                    wal_lsn = ?wal_lsn,
+                    xdp_applied,
+                    decision_id = %cmd.decision_id,
+                    "enforce applied: block committed"
+                );
                 Ok(EnforceResult {
                     decision_id: cmd.decision_id,
                     committed: true,
@@ -549,6 +564,15 @@ impl EnforcementService {
                     }
                 };
                 self.remember_decision(cmd.decision_id);
+                trace!(
+                    ip = %cmd.ip,
+                    action = "unblock",
+                    reason = %cmd.reason,
+                    wal_lsn = ?wal_lsn,
+                    xdp_applied,
+                    decision_id = %cmd.decision_id,
+                    "enforce applied: unblock committed"
+                );
                 Ok(EnforceResult {
                     decision_id: cmd.decision_id,
                     committed: true,

@@ -22,7 +22,7 @@ use ramshield_types::{EnforceAction, EnforceCommand};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 // ── Block TTLs ───────────────────────────────────────────────────────────────
@@ -661,6 +661,13 @@ impl Forecaster {
 
         // ── Type-specific response ───────────────────────────────────────────
         if n < 10 {
+            trace!(
+                n,
+                rps = %format!("{:.1}", rps),
+                z = %format!("{:.2}", z),
+                delta_h = %format!("{:.2}", delta_h),
+                "forecast tick: skipped, insufficient samples"
+            );
             return; // not enough data for any decision
         }
         match hypothesis {
@@ -705,7 +712,17 @@ impl Forecaster {
                 );
                 // intentional: flash crowd = legitimate traffic surge, no blocking
             }
-            _ => {}
+            _ => {
+                trace!(
+                    n,
+                    rps = %format!("{:.1}", rps),
+                    z = %format!("{:.2}", z),
+                    delta_h = %format!("{:.2}", delta_h),
+                    threat = %format!("{:.2}", threat),
+                    cusum_alarm,
+                    "forecast tick: below all hypothesis gates"
+                );
+            }
         }
 
         // ── Legacy fallback: EWMA peak alarm (transitional, remove in v0.4) ─
