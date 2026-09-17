@@ -13,9 +13,13 @@
 
 use crate::{EnforcementError, ReconciliationState, XdpApplier, XdpDropEvent};
 use aya::Ebpf;
-use aya::maps::{HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues, RingBuf};
+use aya::maps::{
+    HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues, RingBuf,
+    lpm_trie::{Key as LpmKey, LpmTrie},
+};
 use aya::programs::Xdp;
 use aya::programs::xdp::XdpMode;
+use ramshield_types::IpNetwork;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, AsRawFd};
 use uuid::Uuid;
@@ -102,6 +106,22 @@ fn xdp_map_for(ip: IpAddr) -> &'static str {
         IpAddr::V4(_) => "BLOCKLIST",
         IpAddr::V6(_) => "BLOCKLIST6",
     }
+}
+
+fn cidr_map_for(network: IpNetwork) -> &'static str {
+    match network.addr {
+        IpAddr::V4(_) => "BLOCKCIDR",
+        IpAddr::V6(_) => "BLOCKCIDR6",
+    }
+}
+
+fn cidr_key(network: IpNetwork) -> LpmKey<[u64; 2]> {
+    let bytes = BlocklistKey::from_ip(network.addr).0;
+    let mut data = [0u64; 2];
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_mut_ptr() as *mut u8, 16);
+    }
+    LpmKey::new(u32::from(network.prefix_len), data)
 }
 
 /// Task 5: split expected blocks per map, keyed. Pure — reconcile() keeps
@@ -255,6 +275,22 @@ impl AyaXdpApplier {
         f(&mut m).map_err(map_err)
     }
 
+    fn with_cidr_map<R>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut LpmTrie<&mut aya::maps::MapData, [u64; 2], u8>) -> Result<R, MapError>,
+    ) -> Result<R, EnforcementError> {
+        let bpf = self
+            .bpf
+            .as_mut()
+            .ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
+        let map = bpf
+            .map_mut(name)
+            .ok_or_else(|| EnforcementError::Xdp(format!("{name} map missing")))?;
+        let mut trie = LpmTrie::try_from(map).map_err(map_err)?;
+        f(&mut trie).map_err(map_err)
+    }
+
     /// Read XDP per-CPU drop counters. Returns [v4_drop, v6_drop, pass, parse_fail]
     /// summed across all CPUs.
     pub fn counters(&mut self) -> Result<[u64; 4], EnforcementError> {
@@ -350,6 +386,25 @@ impl XdpApplier for AyaXdpApplier {
 
     fn apply_unblock(&mut self, ip: IpAddr, _decision_id: Uuid) -> Result<(), EnforcementError> {
         self.with_map(xdp_map_for(ip), |m| m.remove(&BlocklistKey::from_ip(ip)))
+    }
+
+    fn apply_cidr_block(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+        _ttl_seconds: u64,
+    ) -> Result<(), EnforcementError> {
+        let key = cidr_key(network);
+        self.with_cidr_map(cidr_map_for(network), |m| m.insert(&key, 1u8, 0))
+    }
+
+    fn apply_cidr_unblock(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+    ) -> Result<(), EnforcementError> {
+        let key = cidr_key(network);
+        self.with_cidr_map(cidr_map_for(network), |m| m.remove(&key))
     }
 
     fn reconcile(

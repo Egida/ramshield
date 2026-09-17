@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+
+use crate::IpNetwork;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +17,8 @@ pub struct EnforceCommand {
     pub ttl_seconds: u64,
     pub reason: String,
     pub ip: IpAddr,
+    #[serde(default)]
+    pub cidr: Option<IpNetwork>,
     pub action: EnforceAction,
 }
 
@@ -46,4 +50,15 @@ pub enum EnforcementError {
     Duplicate(Uuid),
     #[error("Invalid command: {0}")]
     InvalidCommand(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cidr_target_preserves_normalized_network() {
+        let cidr = IpNetwork::new("192.0.2.17".parse().unwrap(), 24).unwrap();
+        assert_eq!(cidr.addr.to_string(), "192.0.2.0");
+    }
 }

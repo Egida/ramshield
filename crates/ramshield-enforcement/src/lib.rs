@@ -16,7 +16,7 @@ use ramshield_storage::{
     wal::{Wal, WalEntry},
 };
 use ramshield_types::{
-    BlockReason, EnforceAction, EnforceCommand, EnforceResult, EnforcementError,
+    BlockReason, EnforceAction, EnforceCommand, EnforceResult, EnforcementError, IpNetwork,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::net::IpAddr;
@@ -54,6 +54,25 @@ pub trait XdpApplier: Send + Sync {
         ttl_seconds: u64,
     ) -> Result<(), EnforcementError>;
     fn apply_unblock(&mut self, ip: IpAddr, decision_id: Uuid) -> Result<(), EnforcementError>;
+    fn apply_cidr_block(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+        _ttl_seconds: u64,
+    ) -> Result<(), EnforcementError> {
+        Err(EnforcementError::Xdp(format!(
+            "CIDR enforcement unsupported: {network}"
+        )))
+    }
+    fn apply_cidr_unblock(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+    ) -> Result<(), EnforcementError> {
+        Err(EnforcementError::Xdp(format!(
+            "CIDR enforcement unsupported: {network}"
+        )))
+    }
     fn reconcile(
         &mut self,
         expected_blocks: &[IpAddr],
@@ -128,6 +147,7 @@ pub struct EnforcementService {
     /// sub-second TTL precision ever matters, switch buckets to a ms-grained
     /// ring over a fixed horizon.
     expirations: HashMap<IpAddr, (u64, usize)>,
+    cidr_expirations: HashMap<IpNetwork, Instant>,
     buckets: BTreeMap<u64, Vec<IpAddr>>,
     epoch: Instant,
     shutdown: Arc<AtomicBool>,
@@ -155,6 +175,7 @@ impl EnforcementService {
             processed_order: VecDeque::with_capacity(65_536),
             blocked_ips: HashSet::new(),
             expirations: HashMap::new(),
+            cidr_expirations: HashMap::new(),
             buckets: BTreeMap::new(),
             epoch: Instant::now(),
             shutdown,
@@ -283,10 +304,35 @@ impl EnforcementService {
                 ttl_seconds: 0,
                 reason: "ttl_expired".into(),
                 ip,
+                cidr: None,
                 action: EnforceAction::Unblock,
             };
             if let Err(e) = self.enforce(cmd).await {
                 warn!(%ip, "TTL unblock failed: {}", e);
+            }
+        }
+        let now = Instant::now();
+        let cidrs: Vec<IpNetwork> = self
+            .cidr_expirations
+            .iter()
+            .filter_map(|(network, &deadline)| (deadline <= now).then_some(*network))
+            .collect();
+        for network in cidrs {
+            self.cidr_expirations.remove(&network);
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 0,
+                source: "ttl".into(),
+                actor: "system".into(),
+                timestamp_utc: epoch_seconds(),
+                ttl_seconds: 0,
+                reason: "ttl_expired".into(),
+                ip: network.addr,
+                cidr: Some(network),
+                action: EnforceAction::Unblock,
+            };
+            if let Err(e) = self.enforce(cmd).await {
+                warn!(cidr=?network, "CIDR TTL unblock failed: {}", e);
             }
         }
     }
@@ -348,6 +394,24 @@ impl EnforcementService {
                 continue;
             }
             self.schedule_expiration(ip, Instant::now() + Duration::from_secs(remaining_secs));
+        }
+    }
+
+    pub fn restore_cidr_blocks(&mut self, pairs: impl IntoIterator<Item = (IpNetwork, u64)>) {
+        for (network, remaining_secs) in pairs {
+            if let Err(e) = self
+                .xdp
+                .apply_cidr_block(network, Uuid::new_v4(), remaining_secs)
+            {
+                warn!(cidr=?network, "WAL CIDR restore failed: {}", e);
+                continue;
+            }
+            if remaining_secs > 0 {
+                self.cidr_expirations.insert(
+                    network,
+                    Instant::now() + Duration::from_secs(remaining_secs),
+                );
+            }
         }
     }
 
@@ -413,15 +477,29 @@ impl EnforcementService {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
             let entry = match cmd.action {
-                EnforceAction::Block => WalEntry::BlockIp {
-                    ip: cmd.ip.to_string(),
-                    reason: cmd.reason.clone(),
-                    ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
-                    ts_ns: now_ns,
+                EnforceAction::Block => match cmd.cidr {
+                    Some(cidr) => WalEntry::BlockCidr {
+                        cidr,
+                        reason: cmd.reason.clone(),
+                        ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
+                        ts_ns: now_ns,
+                    },
+                    None => WalEntry::BlockIp {
+                        ip: cmd.ip.to_string(),
+                        reason: cmd.reason.clone(),
+                        ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
+                        ts_ns: now_ns,
+                    },
                 },
-                EnforceAction::Unblock => WalEntry::UnblockIp {
-                    ip: cmd.ip.to_string(),
-                    ts_ns: now_ns,
+                EnforceAction::Unblock => match cmd.cidr {
+                    Some(cidr) => WalEntry::UnblockCidr {
+                        cidr,
+                        ts_ns: now_ns,
+                    },
+                    None => WalEntry::UnblockIp {
+                        ip: cmd.ip.to_string(),
+                        ts_ns: now_ns,
+                    },
                 },
             };
             let lsn = wal
@@ -497,23 +575,33 @@ impl EnforcementService {
                         .unwrap_or_else(|| {
                             Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
                         });
-                    self.schedule_expiration(cmd.ip, at);
+                    if let Some(network) = cmd.cidr {
+                        self.cidr_expirations.insert(network, at);
+                    } else {
+                        self.schedule_expiration(cmd.ip, at);
+                    }
                 } else {
                     self.detach_expiration(cmd.ip);
+                    if let Some(network) = cmd.cidr {
+                        self.cidr_expirations.remove(&network);
+                    }
                 }
 
                 // Step 3: dataplane.
-                let xdp_applied =
-                    match self
+                let xdp_applied = match cmd.cidr {
+                    Some(network) => {
+                        self.xdp
+                            .apply_cidr_block(network, cmd.decision_id, cmd.ttl_seconds)
+                    }
+                    None => self
                         .xdp
-                        .apply_block(cmd.ip, cmd.decision_id, cmd.ttl_seconds)
-                    {
-                        Ok(()) => true,
-                        Err(e) => {
-                            warn!(ip=%cmd.ip, "XDP block failed: {}", e);
-                            false
-                        }
-                    };
+                        .apply_block(cmd.ip, cmd.decision_id, cmd.ttl_seconds),
+                }
+                .map(|()| true)
+                .unwrap_or_else(|e| {
+                    warn!(ip=%cmd.ip, cidr=?cmd.cidr, "XDP block failed: {}", e);
+                    false
+                });
                 self.remember_decision(cmd.decision_id);
                 self.metrics.inc_blocks();
                 trace!(
@@ -556,13 +644,18 @@ impl EnforcementService {
                 }
                 // Purge any pending TTL so a later re-block starts clean.
                 self.detach_expiration(cmd.ip);
-                let xdp_applied = match self.xdp.apply_unblock(cmd.ip, cmd.decision_id) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(ip=%cmd.ip, "XDP unblock failed: {}", e);
-                        false
-                    }
-                };
+                if let Some(network) = cmd.cidr {
+                    self.cidr_expirations.remove(&network);
+                }
+                let xdp_applied = match cmd.cidr {
+                    Some(network) => self.xdp.apply_cidr_unblock(network, cmd.decision_id),
+                    None => self.xdp.apply_unblock(cmd.ip, cmd.decision_id),
+                }
+                .map(|()| true)
+                .unwrap_or_else(|e| {
+                    warn!(ip=%cmd.ip, cidr=?cmd.cidr, "XDP unblock failed: {}", e);
+                    false
+                });
                 self.remember_decision(cmd.decision_id);
                 trace!(
                     ip = %cmd.ip,
@@ -697,6 +790,44 @@ pub fn replay_wal_into_store(store: &Arc<Store>, wal: &Wal) -> anyhow::Result<Ve
     Ok(restored)
 }
 
+pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut blocked: std::collections::HashMap<IpNetwork, (u64, Option<u64>)> =
+        std::collections::HashMap::new();
+    for entry in Wal::replay(&wal_dir(wal))? {
+        match entry {
+            WalEntry::BlockCidr {
+                cidr,
+                ttl_secs,
+                ts_ns,
+                ..
+            } => {
+                blocked.insert(cidr, (ts_ns, ttl_secs));
+            }
+            WalEntry::UnblockCidr { cidr, .. } => {
+                blocked.remove(&cidr);
+            }
+            _ => {}
+        }
+    }
+    Ok(blocked
+        .into_iter()
+        .filter_map(|(cidr, (ts_ns, ttl))| {
+            let remaining = ttl.map(|seconds| {
+                seconds.saturating_sub(now_ns.saturating_sub(ts_ns) / 1_000_000_000)
+            });
+            if remaining == Some(0) {
+                None
+            } else {
+                Some((cidr, remaining.unwrap_or(0)))
+            }
+        })
+        .collect())
+}
+
 fn wal_dir(wal: &Wal) -> String {
     wal.base_dir().to_string()
 }
@@ -782,6 +913,7 @@ mod tests {
             ttl_seconds: ttl,
             reason: "high_rps".into(),
             ip,
+            cidr: None,
             action: EnforceAction::Block,
         }
     }
@@ -795,6 +927,7 @@ mod tests {
             ttl_seconds: 0,
             reason: "manual".into(),
             ip,
+            cidr: None,
             action: EnforceAction::Unblock,
         }
     }
