@@ -371,15 +371,17 @@ fn bench_shm_in_cache_hit(n: usize) -> f64 {
 }
 
 fn bench_cgnat_classify(n: usize) -> f64 {
-    let shm = ramshield_cgnat::ShmTableManager::open_or_create(
-        &ramshield_cgnat::ShmTableManager::default_path(),
-    )
-    .expect("SHM open for bench");
-    let guard = ramshield_cgnat::CgnatGuard::new(std::sync::Arc::new(shm), 2.8);
-    let fp: Vec<u8> = (0..64).map(|i| (i * 7) as u8).collect();
+    let guard = ramshield_cgnat::CgnatGuard::new();
     let t0 = Instant::now();
-    for _ in 0..n {
-        std::hint::black_box(guard.classify(&fp));
+    for i in 0..n {
+        // Deterministic RFC 6598 classifier: public CGNAT addr → ALLOW,
+        // non-CGNAT volumetric → BLOCK (host-density × rate gates).
+        let ip = if i % 2 == 0 {
+            std::net::IpAddr::from([100, 64, 0, 1]) // 100.64.0.1 — CGNAT
+        } else {
+            std::net::IpAddr::from([192, 0, 2, 1]) // 192.0.2.1 — public
+        };
+        std::hint::black_box(guard.classify_subnet(ip, 100, 60_000));
     }
     t0.elapsed().as_nanos() as f64 / n as f64
 }
