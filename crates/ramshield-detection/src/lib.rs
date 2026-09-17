@@ -1014,7 +1014,7 @@ impl DetectionEngine {
                     // P2: CGNAT graduated clamp — shared-infra subnets get
                     // Challenge (429+JS) rather than hard Block (blackhole).
                     let fp_bytes = (r.ip.to_string() + &sk.to_string()).as_bytes().to_vec();
-                    let tier = self.cgnat_guard.classify(&fp_bytes);
+                    let tier = self.cgnat_guard.classify(&fp_bytes, sk as u64);
                     self.metrics.inc_cgnat_classify();
                     match tier {
                         ramshield_cgnat::CGNAT_TIER_ALLOW => self.metrics.inc_cgnat_allow(),
