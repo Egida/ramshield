@@ -162,8 +162,6 @@ pub struct DetectionEngine {
     cgnat_guard: ramshield_cgnat::CgnatGuard,
     /// P2: Shared memory rule table for proxy lookups (<15ns).
     shm_table: Arc<ramshield_cgnat::ShmTableManager>,
-    /// P2: Cluster blocklist CRDT for fleet-fenced gossip.
-    mesh_blocklist: Arc<ramshield_mesh::aworset::AworsetBlocklist>,
 }
 
 /// Releases the single-flusher gate even on early return/panic.
@@ -229,19 +227,12 @@ impl DetectionEngine {
             worker_handles: std::sync::Mutex::new(Vec::new()),
             // P2: one SHM open shared by proxy and CGNAT guard.
             shm_table: shm_table.clone(),
-            // ponytail: threshold 2.8 is JA4 shared-IP heuristic; lift to
-            // Config.detection.cgnat_entropy_threshold when profiling diverges.
-            cgnat_guard: ramshield_cgnat::CgnatGuard::new(shm_table.clone(), 2.8),
-            mesh_blocklist: Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(0)),
+            cgnat_guard: ramshield_cgnat::CgnatGuard::new(),
         })
     }
 
     pub fn event_sender(&self) -> Sender<ConnectionEvent> {
         self.event_tx.clone()
-    }
-
-    fn purge_mesh_state(&self, now_ms: u64) {
-        self.mesh_blocklist.purge_expired(now_ms);
     }
 
     /// P1-8: real ingest-channel depth for the dashboard/healthz backpressure
@@ -989,25 +980,34 @@ impl DetectionEngine {
             // The CIDR is one decision. Exact-IP expansion leaves rotating
             // hosts uncovered; the XDP LPM map enforces the complete prefix.
             let now = now_ns();
-            let cmd = EnforceCommand {
-                decision_id: Uuid::new_v4(),
-                policy_version: 1,
-                source: "detection".into(),
-                actor: "system".into(),
-                timestamp_utc: (now / 1_000_000_000) as i64,
-                ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
-                reason: "subnet_burst".into(),
-                ip: cidr.addr,
-                cidr: Some(cidr),
-                action: EnforceAction::Block,
-            };
-            if self.enforcement_tx.try_send(cmd).is_err() {
-                rejected_q += 1;
-                warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
-            } else {
-                self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
+            let subnet_tier = self.cgnat_guard.classify_subnet(cidr.addr);
+            if subnet_tier == ramshield_cgnat::CGNAT_TIER_BLOCK {
+                let cmd = EnforceCommand {
+                    decision_id: Uuid::new_v4(),
+                    policy_version: 1,
+                    source: "detection".into(),
+                    actor: "system".into(),
+                    timestamp_utc: (now / 1_000_000_000) as i64,
+                    ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
+                    reason: "subnet_burst".into(),
+                    ip: cidr.addr,
+                    cidr: Some(cidr),
+                    action: EnforceAction::Block,
+                };
+                if self.enforcement_tx.try_send(cmd).is_err() {
+                    rejected_q += 1;
+                    warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
+                } else {
+                    self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
+                }
             }
 
+            let shm_key = match cidr.addr {
+                std::net::IpAddr::V4(network) => {
+                    ramshield_cgnat::shm::subnet_key(u32::from(network), cidr.prefix_len)
+                }
+                std::net::IpAddr::V6(_) => sk as u64,
+            };
             let ips_in_subnet = self
                 .store
                 .get_ips_in_subnet_windowed(sk, 2 * 1_000_000_000, now);
@@ -1015,10 +1015,7 @@ impl DetectionEngine {
                 if let Some(e) = self.store.inner().get(&key)
                     && let Value::IpRecord(ref r) = e.value().value
                 {
-                    // P2: CGNAT graduated clamp — shared-infra subnets get
-                    // Challenge (429+JS) rather than hard Block (blackhole).
-                    let fp_bytes = (r.ip.to_string() + &sk.to_string()).as_bytes().to_vec();
-                    let tier = self.cgnat_guard.classify(&fp_bytes, sk as u64);
+                    let tier = subnet_tier;
                     self.metrics.inc_cgnat_classify();
                     match tier {
                         ramshield_cgnat::CGNAT_TIER_ALLOW => self.metrics.inc_cgnat_allow(),
@@ -1029,7 +1026,7 @@ impl DetectionEngine {
                     }
                     if tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
                         self.shm_table.publish_rule(
-                            sk as u64,
+                            shm_key,
                             cfg.detection.subnet_burst_ttl_secs * 1000,
                             tier,
                             0,
@@ -1037,13 +1034,6 @@ impl DetectionEngine {
                         );
                         self.metrics.inc_shm_publish();
                     }
-                    // P2: fleet-fenced gossip.
-                    self.mesh_blocklist.record_ban(
-                        r.ip,
-                        cfg.detection.subnet_burst_ttl_secs * 1000,
-                        tier,
-                    );
-                    self.metrics.inc_mesh_record_ban();
                     self.metrics
                         .record_block_ip(&r.ip, "subnet_batch", "detection");
                     self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
@@ -1051,7 +1041,6 @@ impl DetectionEngine {
             }
             self.store.reset_subnet_window(sk);
         }
-        self.purge_mesh_state(now_ns() / 1_000_000);
     }
 }
 
@@ -1184,15 +1173,6 @@ mod tests {
             sent,
             "F1 loss: ingested={ingested} left={left} sent={sent}"
         );
-    }
-
-    #[test]
-    fn mesh_state_purge_is_callable_from_detection_owner() {
-        let eng = engine();
-        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
-        let delta = eng.mesh_blocklist.record_ban(ip, 60_000, 2);
-        eng.purge_mesh_state(delta.expires_at_ms + 5_000);
-        assert!(eng.mesh_blocklist.is_empty());
     }
 
     #[test]

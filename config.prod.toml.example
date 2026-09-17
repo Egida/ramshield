@@ -40,7 +40,7 @@ dir = "/var/lib/ramshield/wal"
 durability = "Fsync"
 compress = true
 seg_max_bytes = 67108864    # 64 MiB
-retention_max_bytes = 0     # unbounded
+retention_max_bytes = 536870912 # 512 MiB; bounds replay and disk growth
 
 [forecasting]
 enabled = true

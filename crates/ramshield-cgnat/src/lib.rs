@@ -1,8 +1,7 @@
 //! High-Performance Shared Memory Rule Table with OS Fallback
 //!
-//! Provides a memory-mapped rule table for sub-20ns reverse-proxy
-//! lookups and Shannon-entropy analysis to prevent blackholing
-//! shared infrastructure (CGNAT / corporate proxy).
+//! Provides a memory-mapped rule table for reverse-proxy lookups and
+//! deterministic RFC 6598 shared-infrastructure protection.
 //!
 //! Designed for integration with the ramshield-analytics crate
 //! (SubnetHll for IPv6 cardinality, host_bitmap for IPv4).
