@@ -465,7 +465,11 @@ impl Store {
             loop {
                 if current + net_growth > ram_limit_bytes {
                     self.inner.remove(&key);
-                    tracing::warn!("Store::insert - CapacityExceeded for key: {}", key);
+                    tracing::warn!(
+                        key = %key,
+                        limit_mb = ram_limit_bytes / (1024 * 1024),
+                        "store insert rejected: capacity exceeded"
+                    );
                     return Err(RsError::CapacityExceeded {
                         limit_mb: ram_limit_bytes / (1024 * 1024),
                     });
@@ -519,9 +523,10 @@ impl Store {
         if tracing::enabled!(tracing::Level::TRACE) {
             let current = self.ram_bytes.load(Ordering::Relaxed);
             tracing::trace!(
-                "Store::insert - current ram_bytes: {}, net_growth: {}",
-                current,
-                net_growth
+                ram_bytes = current,
+                net_growth,
+                key = %key,
+                "store insert accounted"
             );
         }
 
@@ -541,7 +546,7 @@ impl Store {
             // Per-event insert trace: high-cardinality flood under load.
             // TRACE = opt-in low-level channel; RUST_LOG=debug stays batch-
             // summary-only (metric deltas, not per-event lines).
-            tracing::trace!("Store::insert - OK key: {}", key);
+            tracing::trace!(key = %key, total_inserts = self.total_inserts.load(Ordering::Relaxed), "store insert committed");
         }
         Ok(())
     }

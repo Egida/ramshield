@@ -10,7 +10,7 @@ use tokio::{
     sync::Semaphore,
     time::{Duration, Instant, timeout},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use super::{Request, Response};
@@ -283,7 +283,15 @@ impl IpcServer {
                 )
                 .await
                 {
-                    debug!("conn {} closed: {}", remote, e);
+                    // Connection churn is expected under attack (one line per
+                    // close is a flood vector): keep every close at TRACE and
+                    // sample DEBUG 1/256.
+                    static CLOSE_SEQ: AtomicU64 = AtomicU64::new(0);
+                    let seq = CLOSE_SEQ.fetch_add(1, Ordering::Relaxed);
+                    trace!(remote = %remote, error = %e, close_seq = seq, "connection closed");
+                    if seq.is_multiple_of(256) {
+                        debug!(remote = %remote, error = %e, close_seq = seq, "connection closed (sampled)");
+                    }
                 }
                 active.fetch_sub(1, Ordering::Relaxed);
             });
@@ -418,6 +426,11 @@ async fn handle_connection(
                     Ok(v) => match serde_json::from_value::<Request>(v) {
                         Ok(req) => req,
                         Err(e) => {
+                            trace!(
+                                error = %e,
+                                frame_bytes = frame.len(),
+                                "frame rejected: auth-stripped payload does not match Request"
+                            );
                             let resp = Response::Error {
                                 code: 1,
                                 message: format!("parse: {e}"),
@@ -451,6 +464,11 @@ async fn handle_connection(
                 match serde_json::from_slice(&frame) {
                     Ok(req) => req,
                     Err(e) => {
+                        trace!(
+                            error = %e,
+                            frame_bytes = frame.len(),
+                            "frame rejected: unparseable Request"
+                        );
                         let resp = Response::Error {
                             code: 1,
                             message: format!("parse: {e}"),
@@ -721,6 +739,14 @@ fn process_request(
             let is_low_signal = is_low_signal(status_code, proto_fp, bytes);
             if event_tx.len() >= SHED_WATERMARK && is_low_signal {
                 engine.metrics.inc_shed(1);
+                trace!(
+                    ip = %ip,
+                    status_code,
+                    proto_fp,
+                    bytes,
+                    chan_depth = event_tx.len(),
+                    "event shed: low-signal at watermark"
+                );
                 return Response::BatchOk {
                     accepted: 0,
                     rejected: 0,
@@ -766,6 +792,14 @@ fn process_request(
                 {
                     engine.metrics.inc_shed(1);
                     shed += 1;
+                    trace!(
+                        ip = %cr.ip,
+                        status_code = cr.status_code,
+                        proto_fp = cr.proto_fp,
+                        bytes = cr.bytes,
+                        chan_depth = event_tx.len(),
+                        "batch event shed: low-signal at watermark"
+                    );
                     continue; // shed: do not enqueue
                 }
                 match event_tx.try_send(ev) {
@@ -775,6 +809,12 @@ fn process_request(
                         rejected += 1;
                         dropped_events.fetch_add(1, Ordering::Relaxed);
                         engine.metrics.inc_rejected(1); // F2
+                        trace!(
+                            ip = %cr.ip,
+                            rejected,
+                            chan_depth = event_tx.len(),
+                            "batch event rejected: channel full"
+                        );
                         // Sampled: per-event debug here floods under
                         // backpressure (this was one line per rejected event).
                         if rejected & 0x3FF == 1 {
@@ -792,18 +832,33 @@ fn process_request(
                     tail_dropped = dropped;
                     dropped_events.fetch_add(dropped as u64, Ordering::Relaxed);
                     engine.metrics.inc_rejected(dropped as u64); // F2
+                    trace!(
+                        tail_dropped = dropped,
+                        processed = accepted + rejected - dropped,
+                        total,
+                        "batch tail dropped at BATCH_MAX"
+                    );
                     break;
                 }
             }
-            debug!(
-                events = total,
-                accepted,
-                rejected,
-                shed,
-                tail_dropped,
-                chan_depth = event_tx.len(),
-                "report_connections batch"
-            );
+            // One DEBUG line per frame is a flood vector under attack
+            // (measured: 382/s during a 120-frame barrage). Log every 64th
+            // batch and always log when the batch lost events — anomalies must
+            // never be sampled away.
+            static BATCH_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = BATCH_LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+            if seq.is_multiple_of(64) || shed > 0 || tail_dropped > 0 || rejected > 0 {
+                debug!(
+                    batch_seq = seq,
+                    samples = total,
+                    accepted,
+                    rejected,
+                    shed,
+                    tail_dropped,
+                    chan_depth = event_tx.len(),
+                    "report_connections batch"
+                );
+            }
             Response::BatchOk { accepted, rejected }
         }
         Request::Flush => Response::Ok {

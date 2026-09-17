@@ -27,7 +27,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 // ── Bloom filter — 2-hash, no false negatives for inserted IPs ───────────────
@@ -574,6 +574,14 @@ impl DetectionEngine {
             if agg.count < det.promote_min_events && !subnet_hot && !bloom_hit {
                 cold_skipped += 1;
                 cold_skipped_events += agg.count;
+                trace!(
+                    ip = %ip,
+                    events = agg.count,
+                    bytes = agg.bytes,
+                    proto_fp = agg.proto_fp,
+                    cold_skipped,
+                    "ip cold-skipped: below promote gate"
+                );
                 continue;
             }
 
@@ -613,6 +621,15 @@ impl DetectionEngine {
 
             promoted += 1;
             promoted_events += agg.count;
+            trace!(
+                ip = %ip,
+                events = agg.count,
+                bytes = agg.bytes,
+                threat,
+                should_block,
+                promoted,
+                "ip promoted to store: gate passed"
+            );
 
             if threat > 0.5 {
                 threat_sample.push((ip, threat));
