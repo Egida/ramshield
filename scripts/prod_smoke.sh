@@ -11,17 +11,22 @@
 set -euo pipefail
 
 BIN="${BIN:-./target/release/ramshield}"
-CFG="${CFG:-./config.prod.toml}"
+CFG="${CFG:-./config.prod.toml.example}"
 WAL_DIR="${WAL_DIR:-/tmp/ramshield-prod-smoke-wal}"
 LOG="${LOG:-/tmp/ramshield-prod-smoke.log}"
-DASH="${DASH:-127.0.0.1:9999}"
+DASH_ADDR="${DASH_ADDR:-127.0.0.1:19999}"
 IPC_HOST="${IPC_HOST:-127.0.0.1}"
-IPC_PORT="${IPC_PORT:-7890}"
+IPC_PORT="${IPC_PORT:-17890}"
 
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 fail()  { red "FAIL: $*"; cleanup; exit 1; }
-cleanup() { pkill -9 -f "ramshield --config" 2>/dev/null || true; }
+cleanup() {
+    if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
+        kill "$PID" 2>/dev/null || true
+        wait "$PID" 2>/dev/null || true
+    fi
+}
 
 # Reset state
 rm -rf "$WAL_DIR"
@@ -34,8 +39,9 @@ sleep 0.5
 # rewrite binds to loopback and point the WAL at the scratch dir. The
 # fail-closed rule itself is covered by ramshield-config unit tests.
 SMOKE_CFG="${SMOKE_CFG:-/tmp/ramshield-prod-smoke.toml}"
-sed -e 's/^tcp_addr = "0\.0\.0\.0/tcp_addr = "127.0.0.1/' \
-    -e 's/^http_addr = "0\.0\.0\.0/http_addr = "127.0.0.1/' \
+DASH_PORT="${DASH_ADDR##*:}"
+sed -e "s|^[[:space:]]*tcp_addr = .*|tcp_addr = \"127.0.0.1:$IPC_PORT\"|" \
+    -e "s|^[[:space:]]*http_addr = .*|http_addr = \"127.0.0.1:$DASH_PORT\"|" \
     -e "s|^dir = \"/var/lib/ramshield/wal\"|dir = \"$WAL_DIR\"|" \
     "$CFG" > "$SMOKE_CFG"
 
@@ -47,7 +53,7 @@ trap cleanup EXIT
 
 # Wait for health
 for i in {1..20}; do
-    if curl -sf -m 1 "http://$DASH/healthz" >/dev/null 2>&1; then break; fi
+    if curl -sf -m 1 "http://$DASH_ADDR/healthz" >/dev/null 2>&1; then break; fi
     sleep 0.3
     if [ "$i" = "20" ]; then fail "binary never became healthy"; fi
 done
@@ -73,24 +79,24 @@ echo "$RESP" | grep -q "block queued" || fail "block_ip did not respond: $RESP"
 green "✓ IPC: block_ip queued"
 
 sleep 1
-H=$(curl -sf -m 3 "http://$DASH/api/history/blocks" || true)
+H=$(curl -sf -m 3 "http://$DASH_ADDR/api/history/blocks" || true)
 echo "$H" | grep -q "203.0.113.7" || fail "block not in /api/history/blocks: $H"
 green "✓ DASH: block visible in history"
 
 # Snapshot
-S=$(curl -sf -m 3 "http://$DASH/api/snapshot")
+S=$(curl -sf -m 3 "http://$DASH_ADDR/api/snapshot")
 echo "$S" | grep -q '"blocked_total":' || fail "/api/snapshot missing blocked_total"
 BT=$(echo "$S" | grep -oE '"blocked_total":[0-9]+' | head -1 | grep -oE '[0-9]+')
 [ "$BT" -ge 1 ] || fail "blocked_total = $BT, expected ≥ 1"
 green "✓ DASH: snapshot reports blocked_total=$BT"
 
 # Status modules
-M=$(curl -sf -m 3 "http://$DASH/api/status/modules")
+M=$(curl -sf -m 3 "http://$DASH_ADDR/api/status/modules")
 echo "$M" | grep -q '"label"' || fail "/api/status/modules missing label"
 green "✓ DASH: status/modules ok"
 
 # Metrics
-MT=$(curl -sf -m 3 "http://$DASH/metrics")
+MT=$(curl -sf -m 3 "http://$DASH_ADDR/metrics")
 echo "$MT" | grep -q "ramshield_blocks_total" || fail "Prometheus metrics missing blocks_total"
 green "✓ DASH: /metrics serves Prometheus format"
 
@@ -100,7 +106,7 @@ echo "$RESP" | grep -q "unblock queued" || fail "unblock_ip did not respond: $RE
 green "✓ IPC: unblock_ip queued"
 
 # Hot subnets
-HS=$(curl -sf -m 3 "http://$DASH/api/hot-subnets" || echo "[]")
+HS=$(curl -sf -m 3 "http://$DASH_ADDR/api/hot-subnets" || echo "[]")
 green "✓ DASH: /api/hot-subnets reachable ($(echo "$HS" | wc -c) bytes)"
 
 # WAL
