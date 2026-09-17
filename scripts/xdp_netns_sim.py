@@ -13,6 +13,9 @@ Run: sudo python3 scripts/xdp_netns_sim.py [--vms N] [--duration SEC]
 from __future__ import annotations
 import argparse, json, socket, struct, subprocess, time, urllib.request
 
+IPC = ("127.0.0.1", 7890)
+DASH = "http://127.0.0.1:9999"
+
 SUBNET = "192.0.2"
 BASE_IP = 100          # VMs get 192.0.2.100+, .1 is xdp_test0
 BRIDGE = "br_xdp_sim"
@@ -80,8 +83,18 @@ os._exit(0)
     return {"sent": sent, "elapsed": duration}
 
 
+def block_cidr(cidr: str) -> dict:
+    with socket.create_connection(IPC, timeout=3) as sock:
+        body = json.dumps({
+            "type": "block_cidr", "cidr": cidr,
+            "reason": "xdp-cidr-verify", "ttl_secs": 30,
+        }) + "\n"
+        sock.sendall(body.encode())
+        return json.loads(sock.recv(65536).split(b"\n", 1)[0])
+
+
 def xdp_counters() -> dict:
-    req = urllib.request.Request("http://127.0.0.1:9999/api/stream")
+    req = urllib.request.Request(f"{DASH}/api/stream")
     with urllib.request.urlopen(req, timeout=4) as r:
         buf = b""
         deadline = time.monotonic() + 4
@@ -98,7 +111,14 @@ def main() -> int:
     parser.add_argument("--vms", type=int, default=5)
     parser.add_argument("--duration", type=float, default=5.0, help="flood seconds per VM")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--cidr", help="block this CIDR through IPC before flooding")
+    parser.add_argument("--ipc", default="127.0.0.1:7890")
+    parser.add_argument("--dashboard", default="http://127.0.0.1:9999")
     args = parser.parse_args()
+    global IPC, DASH
+    host, port = args.ipc.rsplit(":", 1)
+    IPC = (host, int(port))
+    DASH = args.dashboard
 
     print(f"=== xdp_netns_sim: {args.vms} VMs, {args.duration}s each ===")
     print(f"    Subnet: {SUBNET}.0/24  Bridge: {BRIDGE}  XDP target: 192.0.2.1")
@@ -127,6 +147,12 @@ def main() -> int:
     # Baseline
     before = xdp_counters()
     print(f"\nBaseline: wire_pass={before['wire_pass_total']} v4_drops={before['v4_drops_total']}")
+    if args.cidr:
+        response = block_cidr(args.cidr)
+        if response.get("type") != "ok":
+            raise RuntimeError(f"CIDR block rejected: {response}")
+        time.sleep(1)  # enforcement actor applies the queued LPM update
+        print(f"CIDR installed: {args.cidr}")
 
     # Sequential flood (parallel subprocesses on same netns conflict)
     total_sent = 0
@@ -147,10 +173,13 @@ def main() -> int:
     print(f"  v4_drops:  {before['v4_drops_total']} → {after['v4_drops_total']} (+{drop_delta})")
     print(f"  Throughput: {total_sent / (args.vms * args.duration):.0f} pps")
 
-    if pass_delta > 0 or drop_delta > 0:
-        print("\nPASS: VM traffic flowing through XDP eBPF")
+    if args.cidr:
+        ok = total_sent > 0 and drop_delta > 0
+        print("\nPASS: CIDR traffic dropped by XDP" if ok else "\nFAIL: CIDR drop counter unchanged")
     else:
-        print("\nFAIL: no counter change")
+        ok = pass_delta > 0 or drop_delta > 0
+        print("\nPASS: VM traffic flowing through XDP eBPF" if ok else "\nFAIL: no counter change")
+    if not ok:
         return 1
 
     # Teardown

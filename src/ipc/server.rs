@@ -70,6 +70,14 @@ fn sanitize_ttl(ttl: Option<u64>) -> Result<u64, String> {
         None => Ok(0),
     }
 }
+
+fn parse_cidr(value: &str) -> Result<ramshield_types::IpNetwork, &'static str> {
+    let (addr, prefix) = value.split_once('/').ok_or("CIDR requires prefix")?;
+    let addr = addr.parse().map_err(|_| "invalid address")?;
+    let prefix = prefix.parse().map_err(|_| "invalid prefix")?;
+    ramshield_types::IpNetwork::new(addr, prefix)
+}
+
 // Ingest channel capacity — single source of truth: the detection engine's
 // bounded channel (64k ConnectionEvents, ~4MB; fills in ~64ms at 1M eps).
 pub use ramshield_detection::CHANNEL_CAPACITY;
@@ -632,6 +640,56 @@ fn process_request(
                 },
             }
         }
+        Request::BlockCidr {
+            cidr,
+            reason,
+            ttl_secs,
+        } => {
+            let network = match parse_cidr(&cidr) {
+                Ok(network) => network,
+                Err(_) => {
+                    return Response::Error {
+                        code: 400,
+                        message: format!("invalid CIDR: {}", cidr),
+                    };
+                }
+            };
+            let ttl_secs = match sanitize_ttl(ttl_secs) {
+                Ok(ttl) => ttl,
+                Err(msg) => {
+                    return Response::Error {
+                        code: 400,
+                        message: msg,
+                    };
+                }
+            };
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "ipc".into(),
+                actor: "admin".into(),
+                timestamp_utc: now_ms() as i64 / 1000,
+                ttl_seconds: ttl_secs,
+                reason: if reason.is_empty() {
+                    "manual_cidr_block".into()
+                } else {
+                    reason
+                },
+                ip: network.addr,
+                cidr: Some(network),
+                action: EnforceAction::Block,
+            };
+            match enforcement_tx.try_send(cmd) {
+                Ok(()) => Response::Ok {
+                    message: format!("CIDR block queued for {}", network),
+                    state: Some("pending".into()),
+                },
+                Err(_) => Response::Error {
+                    code: 503,
+                    message: "enforcement queue full".into(),
+                },
+            }
+        }
         Request::UnblockIp { ip } => {
             let ip_addr = match ip.parse() {
                 Ok(addr) => addr,
@@ -914,7 +972,7 @@ fn verify_frame_auth(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_ttl;
+    use super::{parse_cidr, sanitize_ttl};
 
     #[test]
     fn sanitize_ttl_clamps_overflow_class() {
@@ -925,5 +983,13 @@ mod tests {
         assert_eq!(sanitize_ttl(Some(31_536_000)), Ok(31_536_000));
         assert_eq!(sanitize_ttl(Some(60)), Ok(60));
         assert_eq!(sanitize_ttl(None), Ok(0));
+    }
+
+    #[test]
+    fn parse_cidr_normalizes_and_rejects_invalid_prefixes() {
+        let net = parse_cidr("192.0.2.123/24").unwrap();
+        assert_eq!(net.to_string(), "192.0.2.0/24");
+        assert!(parse_cidr("192.0.2.1/33").is_err());
+        assert!(parse_cidr("not-cidr").is_err());
     }
 }
