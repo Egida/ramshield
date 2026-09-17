@@ -26,6 +26,19 @@ START_EPOCH=$(date +%s)
 RC=${PIPESTATUS[0]}
 FINISH_EPOCH=$(date +%s)
 DURATION=$((FINISH_EPOCH - START_EPOCH))
+
+# cargo replaces the binary inode, so the XDP capabilities must be re-applied on
+# every successful build. Silent loss is what makes XDP quietly fall back.
+if [[ "$RC" = 0 ]]; then
+  CAPS='cap_net_admin,cap_perfmon,cap_bpf+eip'
+  if setcap "$CAPS" "$ROOT/target/release/ramshield" 2>/dev/null \
+    || sudo -n setcap "$CAPS" "$ROOT/target/release/ramshield" 2>/dev/null; then
+    printf 'capabilities=%s\n' "$CAPS" | tee -a "$LOG"
+  else
+    printf 'capabilities=NOT_APPLIED\n' | tee -a "$LOG"
+    printf "warn: run manually — sudo setcap '%s' target/release/ramshield\n" "$CAPS"
+  fi
+fi
 printf '\nresult=%s\nduration_secs=%s\nfinished_utc=%s\n' \
   "$RC" "$DURATION" "$(date -u -d @"$FINISH_EPOCH" +%Y%m%dT%H%M%SZ 2>/dev/null || date -u +%Y%m%dT%H%M%SZ)" >>"$LOG"
 
