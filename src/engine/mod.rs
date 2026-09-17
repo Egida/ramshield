@@ -154,6 +154,7 @@ impl Engine {
             ipc_requests: metrics.requests_total.load(Ordering::Relaxed),
             events_ingested: ingested,
             events_rejected: metrics.events_rejected.load(Ordering::Relaxed),
+            frames_rejected_total: metrics.frames_rejected.load(Ordering::Relaxed),
             channel_depth,
             events_shed: metrics.events_shed.load(Ordering::Relaxed),
             batches_total: batches,

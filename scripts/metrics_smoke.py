@@ -171,6 +171,7 @@ def verify_all_metrics() -> int:
     # SSE nested telemetry.
     ipc_d = sse.get("ipc", {})
     c.ok(ipc_d.get("ingest_total", 0) > 0, "SSE ipc.ingest_total > 0", str(ipc_d.get("ingest_total")))
+    c.ok(ipc_d.get("frames_rejected_total", 0) >= 10, "SSE ipc.frames_rejected_total >= 10 (malformed frames)", str(ipc_d.get("frames_rejected_total")))
     det = sse.get("detection", {})
     modules = {m.get("label"): m.get("detail", {}) for m in det.get("modules", [])}
     c.ok(modules.get("IPC", {}).get("ingested", 0) > 0, "SSE detection IPC ingested > 0")

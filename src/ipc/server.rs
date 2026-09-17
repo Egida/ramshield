@@ -431,6 +431,7 @@ async fn handle_connection(
                                 frame_bytes = frame.len(),
                                 "frame rejected: auth-stripped payload does not match Request"
                             );
+                            engine.metrics.inc_frames_rejected();
                             let resp = Response::Error {
                                 code: 1,
                                 message: format!("parse: {e}"),
@@ -469,6 +470,7 @@ async fn handle_connection(
                             frame_bytes = frame.len(),
                             "frame rejected: unparseable Request"
                         );
+                        engine.metrics.inc_frames_rejected();
                         let resp = Response::Error {
                             code: 1,
                             message: format!("parse: {e}"),

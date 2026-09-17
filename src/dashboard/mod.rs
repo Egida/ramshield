@@ -357,12 +357,12 @@ async fn api_stream(
         let snapshot = state.engine.dashboard_snapshot();
         let modules = state.engine.get_module_stats();
         let pipeline_stages = vec![
-            serde_json::json!({"stage":"wire","ingress":snapshot.events_ingested+snapshot.events_rejected+snapshot.events_shed,"drops":0}),
-            serde_json::json!({"stage":"xdp","ingress":state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),"drops":state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed)}),
-            serde_json::json!({"stage":"ipc","ingress":snapshot.events_ingested,"drops":snapshot.events_rejected+snapshot.events_shed}),
-            serde_json::json!({"stage":"cold","ingress":snapshot.pipeline.batched,"drops":snapshot.cold_skipped}),
-            serde_json::json!({"stage":"detection","ingress":snapshot.pipeline.promoted+snapshot.pipeline.merged+snapshot.pipeline.blocked,"drops":snapshot.cold_skipped}),
-            serde_json::json!({"stage":"enforcement","ingress":snapshot.pipeline.blocked,"drops":0}),
+            serde_json::json!({"stage":"wire","unit":"events","ingress":snapshot.events_ingested+snapshot.events_rejected+snapshot.events_shed,"drops":0}),
+            serde_json::json!({"stage":"xdp","unit":"packets","ingress":state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),"drops":state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed)}),
+            serde_json::json!({"stage":"ipc","unit":"events","ingress":snapshot.events_ingested,"drops":snapshot.events_rejected+snapshot.events_shed}),
+            serde_json::json!({"stage":"cold","unit":"IPs","ingress":snapshot.pipeline.batched,"drops":snapshot.cold_skipped}),
+            serde_json::json!({"stage":"detection","unit":"IPs","ingress":snapshot.pipeline.promoted+snapshot.pipeline.merged+snapshot.pipeline.blocked,"drops":0}),
+            serde_json::json!({"stage":"enforcement","unit":"blocks","ingress":snapshot.pipeline.blocked,"drops":0}),
         ];
         let payload = serde_json::json!({
             "ts": snapshot.ts_ms,
@@ -378,6 +378,7 @@ async fn api_stream(
             "ipc": {
                 "ingest_total": snapshot.events_ingested,
                 "rejected_total": snapshot.events_rejected,
+                "frames_rejected_total": snapshot.frames_rejected_total,
                 "shed_total": snapshot.events_shed,
                 "active_connections": 0,
                 "ring_depth": snapshot.channel_depth,
