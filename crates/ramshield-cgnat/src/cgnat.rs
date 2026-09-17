@@ -9,6 +9,12 @@ pub const CGNAT_TIER_BLOCK: u8 = 3;
 
 pub struct CgnatGuard;
 
+impl Default for CgnatGuard {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl CgnatGuard {
     pub fn new() -> Self {
         Self

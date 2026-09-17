@@ -24,41 +24,6 @@ pub fn subnet_key(network: u32, prefix_len: u8) -> u64 {
     u64::from(h)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn publish_ends_with_even_seqlock_and_open_never_shrinks_file() {
-        let path = std::env::temp_dir().join(format!(
-            "ramshield-shm-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let total = SHM_TABLE_CAPACITY * std::mem::size_of::<ShmRuleEntry>();
-        {
-            let manager = ShmTableManager::open_or_create(&path).unwrap();
-            manager.publish_rule(7, 60_000, 3, 0, false);
-            assert_eq!(manager.get_slot(7).seq.load(Ordering::Acquire) % 2, 0);
-        }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len((total + 4096) as u64)
-            .unwrap();
-        let _manager = ShmTableManager::open_or_create(&path).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            (total + 4096) as u64
-        );
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 pub const FLAG_SHARED_INFRA: u8 = 0x01;
 
 #[repr(C, align(64))]
@@ -150,5 +115,40 @@ impl ShmTableManager {
         slot.expires_at_ms.store(now_ms + ttl_ms, Ordering::Relaxed);
         slot.client_hash.store(client_hash, Ordering::Relaxed);
         slot.seq.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_ends_with_even_seqlock_and_open_never_shrinks_file() {
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let total = SHM_TABLE_CAPACITY * std::mem::size_of::<ShmRuleEntry>();
+        {
+            let manager = ShmTableManager::open_or_create(&path).unwrap();
+            manager.publish_rule(7, 60_000, 3, 0, false);
+            assert_eq!(manager.get_slot(7).seq.load(Ordering::Acquire) % 2, 0);
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((total + 4096) as u64)
+            .unwrap();
+        let _manager = ShmTableManager::open_or_create(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            (total + 4096) as u64
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
