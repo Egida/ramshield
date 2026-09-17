@@ -19,8 +19,9 @@ DASH = "http://127.0.0.1:9999"
 SUBNET = "192.0.2"
 BASE_IP = 100          # VMs get 192.0.2.100+, .1 is xdp_test0
 BRIDGE = "br_xdp_sim"
+PEER = "xdp_test1"     # enslaved to BRIDGE; veth peer of the XDP iface
+DST_IP = "192.0.2.1"   # address of the XDP-attached iface
 IP = "/usr/sbin/ip"
-XDP_MAC = bytes([0xc6, 0x97, 0x93, 0xa2, 0x7b, 0x2d])  # xdp_test0 MAC
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -52,15 +53,15 @@ def teardown_netns(vm_id: int) -> None:
 
 
 def flood_vm(vm_id: int, duration: float, pps_target: int = 10000) -> dict:
-    """Flood UDP packets from netns to xdp_test0. Returns {sent, elapsed}."""
+    """Flood UDP packets from netns to the XDP iface. Returns {sent, elapsed}."""
     ns = f"vm{vm_id}"
     # Python inside netns: send raw UDP packets via AF_INET
-    # Packets go through the namespace's veth → bridge → xdp_test1 → xdp_test0
+    # Packets go through the namespace's veth → bridge → peer → XDP iface
     flood_script = f'''
 import socket, time, os
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setblocking(False)
-dest = ("192.0.2.1", 9999)
+dest = ("{DST_IP}", 9999)
 sent = 0
 end = time.monotonic() + {duration}
 while time.monotonic() < end:
@@ -69,7 +70,7 @@ while time.monotonic() < end:
         sent += 1
     except BlockingIOError:
         pass
-print(f"SENT={{sent}}")
+print(f"SENT={{sent}}", flush=True)
 os._exit(0)
 '''
     result = subprocess.run(
@@ -80,6 +81,9 @@ os._exit(0)
     for line in (result.stdout + result.stderr).splitlines():
         if line.startswith("SENT="):
             sent = int(line.split("=")[1])
+    if sent == 0:
+        print(f"    [flood vm{vm_id} raw stdout: {result.stdout.strip()!r}]")
+        print(f"    [flood vm{vm_id} raw stderr: {result.stderr.strip()!r}]")
     return {"sent": sent, "elapsed": duration}
 
 
@@ -114,14 +118,25 @@ def main() -> int:
     parser.add_argument("--cidr", help="block this CIDR through IPC before flooding")
     parser.add_argument("--ipc", default="127.0.0.1:7890")
     parser.add_argument("--dashboard", default="http://127.0.0.1:9999")
+    parser.add_argument("--subnet", default="192.0.2", help="VM subnet (first 3 octets)")
+    parser.add_argument("--base-ip", type=int, default=100, help="first VM host octet")
+    parser.add_argument("--bridge", default="br_xdp_sim")
+    parser.add_argument("--peer", default="xdp_test1", help="iface enslaved to bridge (veth peer of XDP iface)")
+    parser.add_argument("--dst-ip", default="192.0.2.1", help="address of the XDP-attached iface")
     args = parser.parse_args()
-    global IPC, DASH
+    global IPC, DASH, SUBNET, BASE_IP, BRIDGE, PEER, DST_IP
     host, port = args.ipc.rsplit(":", 1)
     IPC = (host, int(port))
     DASH = args.dashboard
+    if args.subnet != "192.0.2":
+        SUBNET = args.subnet
+    BASE_IP = args.base_ip
+    BRIDGE = args.bridge
+    PEER = args.peer
+    DST_IP = args.dst_ip
 
     print(f"=== xdp_netns_sim: {args.vms} VMs, {args.duration}s each ===")
-    print(f"    Subnet: {SUBNET}.0/24  Bridge: {BRIDGE}  XDP target: 192.0.2.1")
+    print(f"    Subnet: {SUBNET}.0/24  Bridge: {BRIDGE}  XDP target: {DST_IP} (peer {PEER})")
 
     # Verify XDP active
     snap_req = urllib.request.Request("http://127.0.0.1:9999/api/snapshot")
@@ -131,13 +146,12 @@ def main() -> int:
         print("FAIL: xdp_active=false")
         return 1
 
-    # Create bridge (L2 only, no IP — VMs and xdp_test0 share 192.0.2.0/24)
+    # Create bridge (L2 only, no IP — VMs and the XDP iface share the subnet)
     run([IP, "link", "add", BRIDGE, "type", "bridge"])
     run([IP, "link", "set", BRIDGE, "up"])
-    # Enslave xdp_test1 to bridge — this is the path to xdp_test0's RX
-    run([IP, "link", "set", "xdp_test1", "nomaster"])
-    run([IP, "link", "set", "xdp_test1", "master", BRIDGE])
-    print(f"Bridge {BRIDGE}: xdp_test1 enslaved")
+    # Enslave the peer to bridge — this is the path to the XDP iface's RX
+    run([IP, "link", "set", PEER, "nomaster"])
+    run([IP, "link", "set", PEER, "master", BRIDGE])
 
     # Create VMs (all on 192.0.2.{100+}, same L2 as xdp_test0)
     for i in range(args.vms):
@@ -186,11 +200,11 @@ def main() -> int:
     if not args.keep:
         for i in range(args.vms):
             teardown_netns(i)
-        run([IP, "link", "set", "xdp_test1", "nomaster"])
+        run([IP, "link", "set", PEER, "nomaster"])
         run([IP, "link", "del", BRIDGE])
         print("Teardown complete")
     else:
-        print(f"Kept. Cleanup: for i in $(seq 0 {args.vms-1}); do ip netns del vm$i; done; ip link del {BRIDGE}; ip link set xdp_test1 nomaster")
+        print(f"Kept. Cleanup: for i in $(seq 0 {args.vms-1}); do ip netns del vm$i; done; ip link del {BRIDGE}; ip link set {PEER} nomaster")
     return 0
 
 
