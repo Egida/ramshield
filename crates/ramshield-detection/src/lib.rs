@@ -980,7 +980,7 @@ impl DetectionEngine {
             // The CIDR is one decision. Exact-IP expansion leaves rotating
             // hosts uncovered; the XDP LPM map enforces the complete prefix.
             let now = now_ns();
-            let subnet_tier = self.cgnat_guard.classify_subnet(cidr.addr);
+            let subnet_tier = self.cgnat_guard.classify_subnet(cidr.addr, uniq, count);
             if subnet_tier == ramshield_cgnat::CGNAT_TIER_BLOCK {
                 let cmd = EnforceCommand {
                     decision_id: Uuid::new_v4(),
@@ -1274,9 +1274,10 @@ mod tests {
             metrics,
             Arc::new(AtomicBool::new(false)),
         ));
-        // 60 distinct hosts in 2001:db8:abcd::/64, 3 events each =
-        // 60 uniq / 180 events >= (50, 100) dual gate.
-        let hosts: Vec<IpAddr> = (1..=60u16)
+        // 65 distinct hosts in 2001:db8:abcd::/64, 800 events each =
+        // 65 uniq / 52,000 events — crosses the deterministic classifier
+        // gate (hosts > 64 && rate > 50_000) → one CIDR block decision.
+        let hosts: Vec<IpAddr> = (1..=65u16)
             .map(|o| {
                 IpAddr::V6(std::net::Ipv6Addr::new(
                     0x2001, 0xdb8, 0xabcd, 0, 0, 0, 0, o,
@@ -1287,7 +1288,7 @@ mod tests {
             .iter()
             .flat_map(|ip| {
                 let base = now_ns();
-                (0..3u64).map(move |i| ev_at(*ip, base + i))
+                (0..800u64).map(move |i| ev_at(*ip, base + i))
             })
             .collect();
         eng.flush_events(&events);
