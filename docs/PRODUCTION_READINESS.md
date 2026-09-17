@@ -284,9 +284,15 @@ and rollback reference.
 ### F1 — production `.expect()` in detection SHM boot path
 
 - **Date**: 2026-09-17
-- **Evidence**: `audit_static` no-unwrap gate flags
-  `crates/ramshield-detection/src/lib.rs:196 .expect("P2: SHM rule table must open at boot")`.
-- **Status**: open. Remove or convert to typed error per roadmap P1-6.
+- **Evidence**: `audit_static` no-unwrap gate flagged two boot opens at
+  `crates/ramshield-detection/src/lib.rs`.
+- **Fix**: `DetectionEngine::try_new` now returns `std::io::Result<Self>`;
+  boot propagates SHM initialization failure. The second SHM open was removed;
+  both consumers share one initialized `Arc<ShmTableManager>`. Test-only
+  compatibility constructor remains outside the production boot path.
+- **Verified**: `final_integration.py` audit_static 13/13; release build;
+  full integration SUCCESS.
+- **Status**: closed in commit `2f55ea9`.
 
 ## Verification matrix
 
