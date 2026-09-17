@@ -240,6 +240,10 @@ impl DetectionEngine {
         self.event_tx.clone()
     }
 
+    fn purge_mesh_state(&self, now_ms: u64) {
+        self.mesh_blocklist.purge_expired(now_ms);
+    }
+
     /// P1-8: real ingest-channel depth for the dashboard/healthz backpressure
     /// signal (was a hardcoded 0 stub). tokio mpsc len() is O(1) atomic.
     pub fn event_queue_depth(&self) -> usize {
@@ -1047,6 +1051,7 @@ impl DetectionEngine {
             }
             self.store.reset_subnet_window(sk);
         }
+        self.purge_mesh_state(now_ns() / 1_000_000);
     }
 }
 
@@ -1179,6 +1184,15 @@ mod tests {
             sent,
             "F1 loss: ingested={ingested} left={left} sent={sent}"
         );
+    }
+
+    #[test]
+    fn mesh_state_purge_is_callable_from_detection_owner() {
+        let eng = engine();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let delta = eng.mesh_blocklist.record_ban(ip, 60_000, 2);
+        eng.purge_mesh_state(delta.expires_at_ms + 5_000);
+        assert!(eng.mesh_blocklist.is_empty());
     }
 
     #[test]

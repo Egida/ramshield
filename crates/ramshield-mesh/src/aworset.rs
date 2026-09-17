@@ -227,6 +227,15 @@ mod tests {
     }
 
     #[test]
+    fn expired_entries_are_removed_after_tombstone_horizon() {
+        let mesh = AworsetBlocklist::new(1);
+        let ip = IpAddr::from([203, 0, 113, 196]);
+        let delta = mesh.record_ban(ip, 60_000, 2);
+        mesh.purge_expired(delta.expires_at_ms + 5_000);
+        assert!(mesh.is_empty(), "expired mesh state must be bounded");
+    }
+
+    #[test]
     fn delta_merge_wins_by_counter() {
         let a = AworsetBlocklist::new(1);
         let ip = IpAddr::from([198, 51, 100, 7]);
