@@ -202,4 +202,4 @@ Containerfile            OCI build definition
 
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`DOC_STANDARD.md`](DOC_STANDARD.md) before changing the project. Report vulnerabilities through [`SECURITY.md`](SECURITY.md), not public issues.
 
-License: Apache-2.0 OR MIT.
+License: MIT.
