@@ -50,25 +50,48 @@ def wait_ready(deadline=30.0) -> bool:
     return False
 
 class Server:
+    SCRATCH_CFG = "/tmp/ramshield-final-int.toml"
+    SCRATCH_LOG = "/tmp/ramshield-final-int.log"
+    WAL_DIR = "/tmp/ramshield-final-int-wal"
+
     def __init__(s, extra_env=None):
         s.proc = None; s.extra = extra_env or {}
+        # Scratch config: loopback binds + scratch WAL + XDP off. Never the
+        # live config.toml (dev binds 7890/9999; XDP iface "lo" would attach
+        # a program to the loopback the prod daemon and IPC share).
+        src = open(REPO + "/config.prod.toml.example").read()
+        src = src.replace('tcp_addr = "0.0.0.0:7890"', f'tcp_addr = "{IPC_HOST}:{IPC_PORT}"')
+        src = src.replace('http_addr = "0.0.0.0:9999"', f'http_addr = "127.0.0.1:{DASH_PORT}"')
+        src = src.replace('dir = "/var/lib/ramshield/wal"', f'dir = "{s.WAL_DIR}"')
+        subprocess.run(["rm", "-rf", s.WAL_DIR], check=True)
+        open(s.SCRATCH_CFG, "w").write(src)
+
     def __enter__(s):
-        env = dict(os.environ, RAMSHIELD_IPC__TCP_ADDR=f"{IPC_HOST}:{IPC_PORT}",
-                   RAMSHIELD_DASHBOARD__HTTP_ADDR=f"127.0.0.1:{DASH_PORT}",
-                   RAMSHIELD_DASHBOARD__ENABLED="true", **s.extra)
-        s.proc = subprocess.Popen([BIN, "--config", "config.toml"], cwd=REPO,
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env = dict(os.environ, **s.extra)
+        s.logf = open(s.SCRATCH_LOG, "wb")
+        s.proc = subprocess.Popen([BIN, "--config", s.SCRATCH_CFG], cwd=REPO,
+            env=env, stdout=s.logf, stderr=subprocess.STDOUT,
             start_new_session=True)
         if not wait_ready():
             s.__exit__(None, None, None)
-            raise SystemExit("server never healthy")
+            tail = open(s.SCRATCH_LOG, errors="replace").read()[-2000:]
+            raise SystemExit("server never healthy:\n" + tail)
         return s
+
     def __exit__(s, *e):
         if s.proc:
             try: os.killpg(s.proc.pid, signal.SIGTERM)
             except ProcessLookupError: pass
             try: s.proc.wait(timeout=5)
             except subprocess.TimeoutExpired: os.killpg(s.proc.pid, signal.SIGKILL)
+        s.logf.close()
+
+    @staticmethod
+    def log_tail():
+        try:
+            return open(Server.SCRATCH_LOG, errors="replace").read()[-2000:]
+        except OSError:
+            return "(no log)"
 
 class C:
     def __init__(s, n): s.n, s.p, s.f = n, 0, []
