@@ -52,6 +52,11 @@ pub enum Request {
         reason: String,
         ttl_secs: Option<u64>,
     },
+    BlockCidr {
+        cidr: String,
+        reason: String,
+        ttl_secs: Option<u64>,
+    },
     UnblockIp {
         ip: String,
     },
