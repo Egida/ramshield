@@ -206,6 +206,13 @@ pub struct Metrics {
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fp, >64 KiB).
     pub events_shed: Arc<AtomicU64>,
+    /// Instantaneous bounded ingest-queue occupancy (gauge; written by the
+    /// engine snapshot path — see Engine::dashboard_snapshot / get_module_stats).
+    pub ingest_channel_depth: Arc<AtomicU64>,
+    /// Userspace mirror of active CIDR LPM blocks (gauge; written by the
+    /// enforcement tick). Kernel BLOCKCIDR maps are authoritative; mirror
+    /// exists for cheap telemetry without per-tick map iteration.
+    pub active_cidr_blocks: Arc<AtomicU64>,
     pub batches_total: Arc<AtomicU64>,
     pub promotions_total: Arc<AtomicU64>,
     pub cold_skipped_total: Arc<AtomicU64>,
@@ -287,6 +294,8 @@ impl Metrics {
             events_rejected: Arc::new(AtomicU64::new(0)),
             frames_rejected: Arc::new(AtomicU64::new(0)),
             events_shed: Arc::new(AtomicU64::new(0)),
+            ingest_channel_depth: Arc::new(AtomicU64::new(0)),
+            active_cidr_blocks: Arc::new(AtomicU64::new(0)),
             batches_total: Arc::new(AtomicU64::new(0)),
             promotions_total: Arc::new(AtomicU64::new(0)),
             cold_skipped_total: Arc::new(AtomicU64::new(0)),
@@ -357,6 +366,17 @@ impl Metrics {
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
     pub fn inc_shed(&self, n: u64) {
         self.events_shed.fetch_add(n, Ordering::Relaxed);
+    }
+    /// Gauge: bounded ingest-queue occupancy. Written by the engine snapshot
+    /// path (dashboard refresh + SSE), same source value on both writers.
+    pub fn set_channel_depth(&self, depth: usize) {
+        self.ingest_channel_depth
+            .store(depth as u64, Ordering::Relaxed);
+    }
+    /// Gauge: userspace mirror of active CIDR LPM blocks. Written by the
+    /// enforcement 250 ms tick from EnforcementService::active_cidrs.
+    pub fn set_active_cidr_blocks(&self, n: usize) {
+        self.active_cidr_blocks.store(n as u64, Ordering::Relaxed);
     }
     pub fn set_xdp_counters(&self, v4_drop: u64, v6_drop: u64, pass: u64, parse_fail: u64) {
         self.xdp_v4_drops.store(v4_drop, Ordering::Relaxed);
@@ -710,6 +730,18 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_ingest_channel_depth",
+            self.ingest_channel_depth.load(Ordering::Relaxed),
+            "Current buffered events in the bounded ingest queue.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_active_cidr_blocks",
+            self.active_cidr_blocks.load(Ordering::Relaxed),
+            "Active IPv4/IPv6 CIDR prefixes applied to the kernel LPM trie (userspace mirror).",
+            "gauge"
+        ));
+        out.push_str(&emit!(
             "ramshield_batches_total",
             self.batches_total.load(Ordering::Relaxed),
             "Total detection batches processed.",
@@ -1046,6 +1078,18 @@ mod cache_tests {
         // stray stdout writes happened (println! would not appear here, but
         // the old bug also added nothing to `out`; assert clean termination).
         assert!(a.ends_with('\n') && !a.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn prometheus_renders_ingest_gauges_with_writers() {
+        let m = Metrics::new();
+        m.set_channel_depth(12_345);
+        m.set_active_cidr_blocks(7);
+        let text = m.render_prometheus();
+        assert!(text.contains("ramshield_ingest_channel_depth 12345"));
+        assert!(text.contains("# TYPE ramshield_ingest_channel_depth gauge"));
+        assert!(text.contains("ramshield_active_cidr_blocks 7"));
+        assert!(text.contains("# TYPE ramshield_active_cidr_blocks gauge"));
     }
 }
 

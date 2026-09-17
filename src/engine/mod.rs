@@ -139,6 +139,7 @@ impl Engine {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map_or(0, |d| d.event_queue_depth());
+        metrics.set_channel_depth(channel_depth);
 
         DashboardSnapshot {
             ts_ms: crate::metrics::now_ms(),
@@ -270,6 +271,7 @@ impl Engine {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map_or(0, |d| d.event_queue_depth());
+        self.metrics.set_channel_depth(channel_depth);
         self.metrics.get_module_stats_data(
             stats.uptime_secs,
             ingested,
