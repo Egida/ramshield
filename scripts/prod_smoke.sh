@@ -74,7 +74,7 @@ s.close()
 }
 
 # Block via IPC
-RESP=$(ipc_send '{"type":"block_ip","ip":"203.0.113.7","reason":"prod_smoke","ttl_secs":300}')
+RESP=$(ipc_send '{"type":"block_ip","ip":"203.0.113.7","reason":"manual","ttl_secs":300}')
 echo "$RESP" | grep -q "block queued" || fail "block_ip did not respond: $RESP"
 green "✓ IPC: block_ip queued"
 
