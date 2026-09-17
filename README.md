@@ -1,358 +1,205 @@
-<div align="center">
-
-<p align="center"><img src="logos/ramshield-logo.svg" width="120" alt="RamShield logo"></p>
-
 # RamShield
 
-**Autonomous, Sub-Microsecond L3/L7 Rate Limiter & Mathematical Threat Shield**
+Kernel-assisted IP/CIDR enforcement with bounded-memory traffic detection, a local control API, WAL-backed state, and an operator dashboard.
 
-*Drop malicious volumetric floods in the kernel. Neutralize application-layer anomalies out-of-band.*
+Status: controlled single-node pilot. The production-readiness review still lists external-exposure, supervision, capacity, OCI, and operational gaps. Do not treat this repository as a turnkey internet-facing deployment.
 
-[![Rust 2024](https://img.shields.io/badge/Rust-1.85%2B%20(Ed.%202024)-orange?logo=rust)](https://www.rust-lang.org/)
-[![eBPF/XDP](https://img.shields.io/badge/Kernel-eBPF%20%2F%20XDP-blue?logo=linux)](https://en.wikipedia.org/wiki/Express_Data_Path)
-[![CI Status](https://img.shields.io/badge/CI-Passing%20(190%20tests)-brightgreen?logo=githubactions)](https://github.com/grep999/ramshield/actions)
-[![Benchmark](https://img.shields.io/badge/SHM%20Lookup-%3C15ns-success?logo=speedtest)](benches/)
-[![License](https://img.shields.io/badge/License-Apache--2.0%20OR%20MIT-blue.svg)](LICENSE)
-[![Security Policy](https://img.shields.io/badge/Security-Policy%20Enforced-red.svg)](SECURITY.md)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
+[![CI](https://img.shields.io/badge/CI-review%20pipeline-blue?logo=githubactions)](https://github.com/grep999/ramshield/actions)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](LICENSE)
 
-[Overview](#-overview) • [Features](#-core-innovations) • [Architecture](#️-architecture) • [Benchmarks](#-performance--benchmarks) • [Quickstart](#-quickstart-in-60-seconds) • [Configuration](#️-configuration) • [Comparison](#-competitive-matrix)
+## What it does
 
-</div>
+RamShield separates telemetry ingestion, detection, enforcement, and observation:
 
----
+- Ingests single or batched connection reports over a JSON/TCP IPC protocol.
+- Tracks IPv4 `/24` and IPv6 `/64` subnet activity with bounded structures.
+- Detects per-IP and subnet anomalies using EWMA/forecasting, rate windows, pulse-wave detection, and dual-gate swarm detection.
+- Applies temporary IP blocks and CIDR blocks.
+- Loads IPv4/IPv6 block prefixes into the eBPF/XDP dataplane when XDP is enabled.
+- Persists enforcement state in a compressed, checksummed WAL and replays it at startup.
+- Exposes health, metrics, snapshots, history, active blocks, subnet traffic, module status, configuration, and an SSE stream.
+- Serves a browser dashboard through Axum.
+- Keeps XDP optional: the daemon can run in no-XDP/degraded mode for local integration and development.
 
-## ⚡ Overview
+## Current release facts
 
-Traditional web rate limiters force a compromise: **inline proxies introduce latency bottlenecks and risk thread starvation**, while **L3 firewalls lack the application-layer context** needed to detect sophisticated bots, pulse-wave evaders, and low-and-slow creeping attacks.
+| Item | Current value |
+|---|---|
+| Workspace version | `0.2.0` |
+| Rust edition | 2024 |
+| Workspace crates | 13 |
+| Rust tests listed | 253 |
+| Final integration suite | 48/48 passed |
+| Review pipeline | Passed: format, check, Clippy `-D warnings`, tests, metric validation |
+| WAL restart test | Passed: one live IP block restored after SIGKILL/restart |
+| CIDR XDP verification | 919,408/919,408 packets dropped for `203.0.113.0/24` |
+| CIDR test rate | 114,926 packets/s in the isolated netns test |
+| Production-like smoke | Passed on isolated ports; live daemon left untouched |
 
-**RamShield decouples packet filtering from behavioral anomaly evaluation:**
+The packet figure is an isolated verification result, not a universal throughput guarantee. Hardware, driver, XDP mode, kernel, packet size, and configuration change capacity.
 
-Your reverse proxies (Envoy, Nginx, Pingora) process traffic at full wire speed while asynchronously streaming lightweight connection metadata to the RamShield daemon. Volumetric floods are dropped directly in the **Linux kernel NIC ring buffer via eBPF/XDP**, while L7 soft-throttling rules are delivered back to edge proxies in **under 15 nanoseconds** via dual-buffer POSIX shared memory.
-
----
-
-## 🚀 Core Innovations
-
-<table>
-  <tr>
-    <td width="50%">
-      <h3>⚡ Kernel-Bypass Line-Rate Drops</h3>
-      <p>Terminates volumetric attacks at Layer 3 using <b>eBPF / XDP</b>. Uses in-kernel <code>LruHashMap</code> tables that automatically evict stale entries under flood pressure, eliminating <code>-E2BIG</code> map saturation.</p>
-    </td>
-    <td width="50%">
-      <h3>🧠 Multi-Brain Anomaly Ensemble</h3>
-      <p>Replaces static <code>requests/sec</code> counters with an ensemble of online statistical estimators: <b>EWMA</b> (velocity), <b>CUSUM</b> (sub-threshold creep), <b>Pulse-Wave</b> (burst evaders), and <b>Swarm Correlation</b>.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <h3>🏢 CGNAT & Shared IP Protection</h3>
-      <p>Uses Shannon-entropy analysis on protocol fingerprints and port distributions to classify multi-tenant gateways (mobile towers, universities, corporate proxies), <b>downgrading bans to interactive challenges</b> to prevent collateral damage.</p>
-    </td>
-    <td width="50%">
-      <h3>🏎️ Sub-15ns Proxy Fast-Path</h3>
-      <p>2-way set-associative lock-free <b>POSIX Shared Memory (SHM)</b> table (<code>/dev/shm/ramshield_rules</code>) allows edge proxies to check rate-limit status in <b>12–14 nanoseconds</b> with zero IPC context switches or network syscalls.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <h3>💾 Crash-Resilient Append-Only WAL</h3>
-      <p>Zero data loss across reboots. High-throughput Write-Ahead Log featuring <b>LZ4 compression</b>, <b>CRC32C per-frame validation</b>, cold-start TTL re-arming, and corrupt-tail quarantine, verified via <code>proptest</code> suites.</p>
-    </td>
-    <td width="50%">
-      <h3>🌐 Zero-Leader Fleet Mesh</h3>
-      <p>Edge nodes federate threat intelligence asynchronously via <b>Zenoh P2P gossip</b> and <b>AWORSet CRDTs</b> with Hybrid Logical Clocks (HLC) and causal tombstone horizons, guaranteeing fleet-wide immunity in &lt;30ms.</p>
-    </td>
-  </tr>
-</table>
-
----
-
-## 🏛️ Architecture
-
-RamShield operates across three strictly decoupled planes: **Kernel Fast-Path (L3)**, **Proxy Read-Local Fast-Path (L7)**, and the **Out-of-Band Threat Engine (Control Plane)**.
-
-### Closed-Loop Architecture Diagram
+## Architecture
 
 ```text
- ┌─────────────────────────────────────────────────────────────┐
- │            1. INGRESS DATA PLANE (Kernel L3 XDP)            │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ Incoming Ethernet Frames
-                                ▼
-                       [ eBPF / XDP Hook ]
-                                │
-                 Matched? ──────┴────── Not Matched?
-                    │                        │
-                    ▼                        ▼
-        ┌───────────────────────┐   ┌──────────────────────────┐
-        │  XDP_DROP (Line Rate) │   │  Pass to Linux Netstack  │
-        │  via LruHashMap       │   └────────────┬─────────────┘
-        └───────────────────────┘                │
-                                                 ▼
- ┌─────────────────────────────────────────────────────────────┐
- │             2. EDGE PROXY PLANE (L7 Fast-Path)              │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ HTTP / TLS Client Request
-                                ▼
-                   [ Reverse Proxy: Envoy/Pingora ]
-                                │
-                    Checks /dev/shm (<15ns)
-                                │
-                 Rule Found? ───┴─── No Rule / Allow?
-                    │                        │
-           ┌────────┴────────┐               ▼
-           ▼                 ▼      [ Forward to Backend ]
-     ┌───────────┐     ┌───────────┐         │
-     │ Tier 1:   │     │ Tier 2:   │         │ Async Telemetry
-     │ HTTP 429  │     │ PoW Solve │         ▼
-     └───────────┘     └───────────┘ [ Semantic Shedding ]
-                                             │ (Keep 25% Headroom)
-                                             ▼
- ┌─────────────────────────────────────────────────────────────┐
- │       3. CONTROL & THREAT ENGINE (Userspace Daemon)         │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ Ingested Telemetry
-                                ▼
-                 [ Bounded Subnet Cardinality ]
-                 ├─ IPv4: 32-Byte HostBitmap (/24)
-                 └─ IPv6: 1024-Byte SubnetHll (/64)
-                                │
-                                ▼
-                 [ Multi-Brain Statistical Math ]
-                 ├─ EWMA (Velocity) & CUSUM (Drift)
-                 └─ Pulse-Wave (Burst Evaders)
-                                │
-                                ▼
-                 [ CGNAT Shannon-Entropy Guard ]
-                                │
-                 Shared IP? ────┴──── Dedicated IP?
-                    │                        │
-             (H >= 2.8)                 (H < 2.8)
-                    ▼                        ▼
-           [ Clamp: Tier 1/2 ]       [ Escalate: Tier 3 ]
-                    │                        │
-                    ▼                        ▼
-           ┌─────────────────┐       ┌─────────────────┐
-           │ Write /dev/shm  │       │ Insert BPF Map  │
-           │ (Proxy Updates) │       │ (Kernel Drops)  │
-           └────────┬────────┘       └────────┬────────┘
-                    │                         │
-                    └───────────┬─────────────┘
-                                │
-                                ▼
-                 [ Fleet Federation & Durability ]
-                 ├─ Broadcast AWORSet CRDT (Zenoh)
-                 └─ Append LZ4 Write-Ahead Log
+reverse proxy / client telemetry
+              |
+              v
+       JSON/TCP IPC server
+              |
+              v
+   bounded ingest + pre-aggregation
+              |
+              v
+ detection: IP, /24, /64, forecast, swarm
+              |
+       +------+------+
+       |             |
+       v             v
+     WAL       enforcement
+                     |
+          +----------+----------+
+          |                     |
+          v                     v
+   shared runtime state     eBPF/XDP maps
+   and dashboard APIs       IP/CIDR drops
 ```
 
----
+XDP is an enforcement boundary, not the detector. Detection decisions originate in userspace, then enforcement updates the kernel maps. Without XDP, userspace blocking and dashboard/API behavior remain available; the kernel drop path does not.
 
-### Step-by-Step Lifecycle of a Request
+## Enforcement
 
-1. **Layer 3 Inspection (Kernel Driver Bypass)**:
-   * Every incoming Ethernet frame hits the NIC driver ring buffer.
-   * The **eBPF/XDP hook** queries the kernel `LruHashMap`. If matched (**Tier 3**), it executes `XDP_DROP` in hardware/driver space in **0 nanoseconds of userspace time**. If the map saturates during massive DRDoS floods, the kernel atomically evicts the least recently seen ban.
+The IPC request contract is defined in [`crates/ramshield-protocol/src/message.rs`](crates/ramshield-protocol/src/message.rs).
 
-2. **Layer 7 Inspection (Reverse Proxy Fast-Path)**:
-   * Packets that pass the kernel hook reach the reverse proxy (Envoy, Nginx, Pingora).
-   * Before parsing request bodies or proxying upstream, the proxy checks the local memory-mapped table at `/dev/shm/ramshield_rules` using 2-way set-associative probing.
-   * **Lookup takes 12–14 ns**. If an active rule exists:
-     * **Tier 1**: The proxy immediately returns `HTTP 429 Too Many Requests` with a `Retry-After` header.
-     * **Tier 2**: The proxy serves an interactive Proof-of-Work (PoW) or JS challenge.
-   * If no rule exists, the request immediately proceeds to the origin backend.
+Supported requests include:
 
-3. **Asynchronous Telemetry & Semantic Pre-Enqueue Shedding**:
-   * After request dispatch, the proxy fires an asynchronous `ConnectionEvent` over an IPC channel.
-   * **Headroom Invariant:** If the channel occupancy reaches $\ge 75\%$ ($49{,}152$ items), routine `200 OK` events are shed *before* enqueuing. This guarantees buffer headroom so high-signal attack indicators (`4xx`, `5xx`, anomalous `proto_fingerprint`, large payloads) are never dropped.
+```json
+{"type":"check_ip","ip":"203.0.113.10"}
+{"type":"block_ip","ip":"203.0.113.10","reason":"manual","ttl_secs":300}
+{"type":"block_cidr","cidr":"203.0.113.0/24","reason":"manual","ttl_secs":300}
+{"type":"unblock_ip","ip":"203.0.113.10"}
+{"type":"get_ip_stats","ip":"203.0.113.10"}
+{"type":"get_stats"}
+{"type":"get_status"}
+{"type":"report_connections","events":[{"ip":"203.0.113.10","bytes":512,"status_code":200,"proto_fp":1}]}
+{"type":"flush"}
+```
 
-4. **Multi-Brain Threat Evaluation**:
-   * The RamShield daemon processes telemetry batches:
-     * **Cardinality Shield**: Updates the 32-byte `HostBitmap` (IPv4 `/24`) or `SubnetHll` (IPv6 `/64`) to prevent heap-exhaustion OOM attacks.
-     * **Statistical Ensemble**: Evaluates traffic across **EWMA** velocity, **CUSUM** drift, and **Pulse-Wave** estimators.
-     * **CGNAT Guard**: Computes Shannon entropy on protocol fingerprints and port diversity. If the IP is a mobile gateway or corporate proxy ($H \ge 2.8$), **Tier 3 drops are strictly vetoed**.
+`ttl_secs` is optional. Requests reject unknown JSON fields. Batch responses report `accepted` and `rejected`; the pipeline invariant is `accepted + rejected == report_connections.events`.
 
-5. **Actuation & Fleet Propagation (Closing the Loop)**:
-   * **Tier 1 / Tier 2**: Written to `/dev/shm/ramshield_rules` using Seqlock versioning, allowing edge proxies to intercept the next request instantly.
-   * **Tier 3**: Programmed into the kernel `LruHashMap`, dropping subsequent packets at line rate.
-   * **Fleet Convergence**: Broadcasts an **AWORSet CRDT delta** over Zenoh gossip, updating all edge nodes in $<30\text{ ms}$.
-   * **Durability**: Appends the ban to the LZ4-compressed Write-Ahead Log (WAL).
+CIDR blocks use longest-prefix matching in the XDP maps. IPv4 and IPv6 prefixes are handled separately. The isolated test uses `203.0.113.0/24` so it cannot collide with the live test topology.
 
----
+## Dashboard and metrics
 
-## 📊 Performance & Benchmarks
+Default production-like listeners:
 
-Benchmarked on an AWS `c6i.4xlarge` (16 vCPU, 32GB RAM, Intel Xeon Platinum 8375C, Ubuntu 24.04 LTS, Linux Kernel 6.8):
+- IPC: `0.0.0.0:7890`
+- Dashboard: `0.0.0.0:9999`
 
-| Pipeline Stage | Metric / Operation | Throughput / Latency | Implementation Mechanism |
-|---|---|---|---|
-| **L3 Kernel Filter** | XDP Packet Dropping | **14.8 Million pkts/sec** (Line rate) | Kernel driver bypass (`XDP_DROP` + `LruHashMap`) |
-| **Proxy Interception** | Rule Status Lookup | **12.4 nanoseconds** | 2-Way Set-Associative Seqlock SHM (`/dev/shm`) |
-| **Telemetry Ingestion** | Event Parsing & Math | **154,200 events/sec / core** | Zero-alloc scalar parsing (`proto_fingerprint: u32`) |
-| **Subnet Cardinality** | IPv4 `/24` Host Tracking | **1.8 nanoseconds** / lookup | Exact 256-bit `HostBitmap` (32 bytes RAM) |
-| **Fleet Convergence** | Multi-Region State Sync | **&lt; 28 milliseconds** | Asynchronous Zenoh Gossip + AWORSet CRDT |
-| **Daemon Footprint** | Resident Set Size (RSS) | **&lt; 14 MB (Strictly bounded)** | Zero heap allocations on critical hot paths |
+Important HTTP routes:
 
----
+| Route | Purpose |
+|---|---|
+| `/healthz` | Health status and XDP state |
+| `/metrics` | Prometheus exposition |
+| `/api/snapshot` | Current pipeline and resource snapshot |
+| `/api/stream` | Server-sent event stream |
+| `/api/history/batches` | Batch history |
+| `/api/history/blocks` | Block history |
+| `/api/blocks/active` | Active blocks |
+| `/api/traffic/subnets` | Current subnet rows |
+| `/api/status/modules` | Module health/status |
+| `/api/config` | Redacted configuration; POST is CSRF-checked |
 
-## 🥊 Competitive Matrix
+Public binds require configured dashboard authentication and IPC HMAC keys. Keep both services on loopback or behind a trusted authenticated transport during development.
 
-| Capability | RamShield | Traditional Fail2Ban | Envoy Global Ratelimit | Cloudflare Edge |
-| :--- | :---: | :---: | :---: | :---: |
-| **Mitigation Point** | **L3 NIC (XDP) + L7 (SHM)** | L3/L4 (iptables) | L7 HTTP Ingress | L3/L7 Edge Anycast |
-| **Hot-Path Overhead** | **&lt; 15 nanoseconds** | 0 (post-log scan) | 2–5 milliseconds (gRPC) | External network hop |
-| **Detection Philosophy** | **Statistical Multi-Brain** | Log Regex Scans | Static Leaky-Bucket | Proprietary ML |
-| **CGNAT Safety** | **Entropy Disambiguation** | ❌ (Bans entire IP) | ⚠️ (IP-only limits) | ✅ (Managed Rules) |
-| **Self-Hosted / Air-Gapped**| **✅ Full Independence** | ✅ Independent | ✅ Requires Redis | ❌ Cloud-only vendor lock |
-| **Memory Invariance** | **$O(1)$ Bounded Sketches** | ❌ Unbounded logs | ⚠️ Redis dependent | N/A |
-| **Distributed Mesh** | **AWORSet CRDT (P2P)** | ❌ Single host | ⚠️ Centralized Redis | Proprietary |
+## Quick start
 
----
-
-## ⚡ Quickstart in 60 Seconds
-
-### Prerequisites
-* Linux OS with Kernel $\ge 6.0$
-* Capabilities: `CAP_NET_ADMIN`, `CAP_BPF`, `CAP_PERFMON`
-
-### 1. Build and Run
+Requirements: Linux, Rust 1.85+, and a locked dependency tree. XDP additionally requires the host capabilities `CAP_NET_ADMIN`, `CAP_BPF`, and `CAP_PERFMON`.
 
 ```bash
-# Clone repository
 git clone https://github.com/grep999/ramshield.git
 cd ramshield
 
-# Verify workspace standards and build release binary
-./verify.sh
-cargo build --release
+# Review gate
+scripts/review_pipeline.sh
 
-# Run RamShield daemon with XDP on eth0
-sudo ./target/release/ramshield-daemon --config config.prod.toml.example
+# Release binary
+cargo build --release --locked --features full
+
+# Local/no-XDP run; copy and edit the config first
+cp config.prod.toml.example config.prod.toml
+./target/release/ramshield --config config.prod.toml
 ```
 
-### 2. Reverse Proxy Hook (Envoy / Nginx / Pingora / Custom)
+`config.prod.toml.example` is deliberately fail-closed for public binds. Set an Argon2 dashboard password hash and an IPC HMAC key before exposing listeners. Never commit the resulting secret-bearing config.
 
-Include the C header in your proxy build to perform $<15\text{ns}$ rate-limit lookups:
+For host-NIC XDP, set `[xdp].enabled = true`, choose the target interface and mode, then run with the required capabilities. Verify `xdp_active` through `/healthz` or `/api/snapshot`.
 
-```c
-#include "ramshm.h"
+## Configuration baseline
 
-// 1. Attach during proxy startup (read-only mapping)
-const ShmRuleEntry* table = ramshm_attach("/dev/shm/ramshield_rules");
+The tracked production-like template uses:
 
-// 2. Hot-path request inspection (<15ns)
-void on_http_request(uint64_t client_hash) {
-    uint64_t now_ms = get_epoch_ms();
-    RuleSnapshot rule;
+- 256 engine shards and an 8 GiB RAM budget.
+- 5,000 per-IP RPS threshold over a 10-second rate window.
+- Subnet dual gate: 50 unique IPv4 hosts and 100 events.
+- 300-second IP block TTL and 600-second subnet-burst TTL.
+- 50 ms batch window and 100 ms pre-aggregation flush interval.
+- WAL enabled with fsync durability and compression.
+- XDP disabled by default in the template; enable only after host capability and interface validation.
 
-    if (ramshm_lookup(table, client_hash, now_ms, &rule)) {
-        if (rule.tier == 1) {
-            send_http_429("Retry-After: 60");
-            return;
-        } else if (rule.tier == 2) {
-            serve_proof_of_work_challenge(rule.challenge_seed);
-            return;
-        }
-    }
-    
-    // Normal pass-through: Forward to upstream backend
-}
-```
+See [`config.prod.toml.example`](config.prod.toml.example) and [`crates/ramshield-config/src/lib.rs`](crates/ramshield-config/src/lib.rs).
 
----
-
-## ⚙️ Configuration
-
-RamShield uses a transparent, fail-closed `config.toml` specification:
-
-```toml
-[daemon]
-node_id = 1
-log_level = "info"
-http_metrics_addr = "127.0.0.1:9999"
-
-[xdp]
-interface = "eth0"
-mode = "driver"               # "driver" (native NIC) or "generic" (SKB)
-max_blocklist_entries = 262144
-
-[ipc]
-listen_addr = "127.0.0.1:8443"
-max_frame_size_bytes = 65536
-channel_capacity = 65536
-shedding_watermark = 49152    # 75% capacity: shed low-signal 200 OKs to preserve attack headroom
-hmac_secret_env = "RAMSHIELD_IPC_SECRET"
-nonce_window_ms = 5000
-
-[cgnat]
-entropy_threshold = 2.8       # Shannon-entropy threshold for shared NAT classification
-downgrade_to_challenge = true
-
-[detection.multi_brain]
-ewma_alpha = 0.05
-cusum_threshold = 8.5
-pulse_wave_window_sec = 5
-swarm_unique_ip_threshold = 50
-ban_threshold_score = 90.0
-ban_ttl_ms = 60000
-
-[storage.wal]
-enabled = true
-path = "/var/lib/ramshield/wal.log"
-sync_mode = "async_background" # Decouples disk fsync from packet loops
-compression = "lz4"
-```
-
----
-
-## 🔬 Testing, Soundness & Verification
+## Verification
 
 ```bash
-# Run full automated workspace lint and test suite
-./verify.sh
+# Full review gate
+scripts/review_pipeline.sh
 
-# Run generative property tests for WAL power-loss corruption & TTL recovery
-cargo test -p ramshield-storage --test proptests -- --nocapture
+# Workspace tests
+cargo test --workspace --locked --features full
 
-# Validate atomic ordering and memory safety with Miri (zero data-races)
-cargo miri test -p ramshield-mesh
+# Isolated production-like smoke
+CFG=config.prod.toml.example \
+IPC_PORT=17890 DASH_ADDR=127.0.0.1:19999 \
+WAL_DIR=/tmp/ramshield-release-wal \
+bash scripts/prod_smoke.sh
 
-# Run line-rate micro-benchmarks
-cargo bench
+# Final integration suite
+python3 scripts/final_integration.py
+
+# Privileged isolated XDP/CIDR test
+python3 scripts/xdp_netns_sim.py --cidr 203.0.113.0/24
 ```
 
-* **Zero Panic Policy**: Library paths strictly forbid unchecked `.unwrap()` and `.expect()`.
-* **Rust 2024 Strictness**: Compiles under `#![deny(unsafe_op_in_unsafe_fn)]` and `#![deny(static_mut_refs)]`.
-* **Memory Invariance**: All cardinality estimators operate in fixed, stack-bounded structures.
+Release procedure: [`docs/PRODUCTION_RELEASE_PROCESS.md`](docs/PRODUCTION_RELEASE_PROCESS.md). Readiness ledger: [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
 
----
+## Known boundaries
 
-## 🗺️ Roadmap
+The current readiness review does not claim:
 
-- [x] **v0.1.0**: Core eBPF/XDP driver, basic EWMA/CUSUM engines, single-node WAL.
-- [x] **v0.2.0**: In-kernel `LruHashMap`, 2-way Seqlock SHM, stratified telemetry pre-shedding, 32-byte `HostBitmap`.
-- [ ] **v0.3.0**: Native Kubernetes eBPF CNI plugin & dynamic Envoy WASM sidecar filters.
-- [ ] **v0.4.0**: Hardware offload (SmartNIC / Netronome / Mellanox XDP offload mode).
-- [ ] **v0.5.0**: Automatic TLS JA4X fingerprint clustering using streaming hyperbolic embedding.
+- authenticated external control without deployment-specific TLS/trusted-proxy setup;
+- systemd or orchestration supervision and restart policy;
+- periodic enforcement reconciliation after runtime map loss;
+- a documented capacity envelope or latency SLO;
+- a verified immutable OCI digest, signed artifact, SBOM, or rollback image;
+- general production readiness for unattended public deployment.
 
----
+These are release requirements, not hidden features. Keep them visible when promoting a build.
 
-## 🤝 Contributing
+## Repository layout
 
-Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`DOC_STANDARD.md`](DOC_STANDARD.md) before submitting pull requests. All commits must pass `./verify.sh` with zero warnings under Rust 1.85+.
-
----
-
-## 🔒 Security & Vulnerability Reporting
-
-If you discover a security vulnerability, please review our [`SECURITY.md`](SECURITY.md) policy. Do **not** open public issues for security exploits. Send disclosures directly to **`security@ramshield.dev`**.
-
----
-
-<div align="center">
-
-**Built for mission-critical edge infrastructure.**  
-Distributed under the **Apache-2.0 OR MIT** License.
-
-</div>
+```text
+crates/                  workspace libraries and protocol types
+src/                     daemon, engine, IPC, dashboard, enforcement
+crates/ramshield-xdp/    userspace XDP loader and eBPF program
+scripts/                 review, smoke, integration, audit, and netns tests
+docs/                    readiness, release, metrics, and operational records
+Containerfile            OCI build definition
 ```
+
+## Contributing and security
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`DOC_STANDARD.md`](DOC_STANDARD.md) before changing the project. Report vulnerabilities through [`SECURITY.md`](SECURITY.md), not public issues.
+
+License: Apache-2.0 OR MIT.
