@@ -122,6 +122,7 @@ pub struct DashboardSnapshot {
     pub ipc_requests: u64,
     pub events_ingested: u64,
     pub events_rejected: u64,
+    pub frames_rejected_total: u64,
     pub channel_depth: usize,
     pub events_shed: u64,
     pub batches_total: u64,
@@ -156,6 +157,7 @@ impl Default for DashboardSnapshot {
             ipc_requests: 0,
             events_ingested: 0,
             events_rejected: 0,
+            frames_rejected_total: 0,
             channel_depth: 0,
             events_shed: 0,
             batches_total: 0,
@@ -200,6 +202,7 @@ pub struct Metrics {
     pub blocks_total: Arc<AtomicU64>,
     pub events_ingested: Arc<AtomicU64>,
     pub events_rejected: Arc<AtomicU64>,
+    pub frames_rejected: Arc<AtomicU64>,
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fp, >64 KiB).
     pub events_shed: Arc<AtomicU64>,
@@ -282,6 +285,7 @@ impl Metrics {
             blocks_total: Arc::new(AtomicU64::new(0)),
             events_ingested: Arc::new(AtomicU64::new(0)),
             events_rejected: Arc::new(AtomicU64::new(0)),
+            frames_rejected: Arc::new(AtomicU64::new(0)),
             events_shed: Arc::new(AtomicU64::new(0)),
             batches_total: Arc::new(AtomicU64::new(0)),
             promotions_total: Arc::new(AtomicU64::new(0)),
@@ -345,6 +349,9 @@ impl Metrics {
     }
     pub fn inc_rejected(&self, n: u64) {
         self.events_rejected.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_frames_rejected(&self) {
+        self.frames_rejected.fetch_add(1, Ordering::Relaxed);
     }
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
@@ -682,6 +689,12 @@ impl Metrics {
             "ramshield_events_ingested_total",
             self.events_ingested.load(Ordering::Relaxed),
             "Total events ingested.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_frames_rejected_total",
+            self.frames_rejected.load(Ordering::Relaxed),
+            "IPC frames rejected at parse or auth-stripped decode.",
             "counter"
         ));
         out.push_str(&emit!(

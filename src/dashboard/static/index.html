@@ -257,6 +257,7 @@
         <div class="ops-title">L7 Event Processing</div>
         <div class="ops-row"><span class="ops-label">Processed</span><span class="ops-value" id="od-ingest">0</span></div>
         <div class="ops-row"><span class="ops-label">Rejected</span><span class="ops-value" id="od-reject">0</span></div>
+        <div class="ops-row"><span class="ops-label">Bad frames</span><span class="ops-value" id="od-badframe">0</span></div>
         <div class="ops-row"><span class="ops-label">Shed</span><span class="ops-value" id="od-shed">0</span></div>
         <div class="ops-row"><span class="ops-label">Channel</span><span class="ops-value" id="od-chan">0 / 64000</span></div>
         <div class="ops-bar-track"><div class="ops-bar-fill ok" id="od-chan-bar" style="width:0%"></div></div>
@@ -486,16 +487,17 @@
   async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const [snap,mods,subs]=await Promise.all(['/api/snapshot','/api/status/modules','/api/traffic/subnets'].map(u=>fetch(u).then(r=>{if(!r.ok)throw Error(u+' '+r.status);return r.json()})));latestSubnets=subs||[];renderTelemetry(snap,mods,latestSubnets);await loadBlocks()}catch(e){$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='DISCONNECTED';console.error('dashboard refresh:',e)}finally{refreshInFlight=false}}
   function renderPipeline(p){
     if(!Array.isArray(p))return;
-    const get=k=>{const st=p.find(s=>s.stage===k);return st?{ingest:+st.ingress||0,egress:+st.egress||0,drop:+st.drops||0}:null;};
+    const get=k=>{const st=p.find(s=>s.stage===k);return st?{ingest:+st.ingress||0,egress:+st.egress||0,drop:+st.drops||0,unit:st.unit||''}:null;};
     const stages={
       'wire':get('wire'),'xdp':get('xdp'),'ipc':get('ipc'),'cold':get('cold'),'detect':get('detection'),'enforce':get('enforcement')
     };
+    // Stages carry independent units (events/packets/IPs/blocks); never derive one from another.
     const wire=stages['wire']||{ingest:0,drop:0};
     const xdp=stages['xdp']||{ingest:wire.ingest,drop:0};
-    const ipc=stages['ipc']||{ingest:xdp.ingest-xdp.drop,drop:0};
-    const cold=stages['cold']||{ingest:ipc.ingest-ipc.drop,drop:0};
-    const dt=stages['detect']||{ingest:cold.ingest-cold.drop,drop:0};
-    const enf=stages['enforce']||{ingest:dt.ingest-dt.drop,drop:dt.drop};
+    const ipc=stages['ipc']||{ingest:0,drop:0};
+    const cold=stages['cold']||{ingest:0,drop:0};
+    const dt=stages['detect']||{ingest:0,drop:0};
+    const enf=stages['enforce']||{ingest:0,drop:0};
     $('pl-wire-in').textContent=fmt(wire.ingest,0); $('pl-wire-drop').textContent=fmt(wire.drop,0);
     $('pl-xdp-pass').textContent=fmt(xdp.egress||xdp.ingest-xdp.drop,0); $('pl-xdp-drop').textContent=fmt(xdp.drop,0);
     $('pl-ipc-in').textContent=fmt(ipc.ingest,0); $('pl-ipc-drop').textContent=fmt(ipc.drop,0);
@@ -536,7 +538,7 @@
     $('kpi-hlc').textContent=fmt(mesh.hlc_ticks,0)+' HLC ticks';
     $('od-v4').textContent=fmt(dSlots.drops_pps,0)+' pps ('+fmt(x.v4_drops_total,0)+')'; $('od-v6').textContent='0 pps ('+fmt(x.v6_drops_total,0)+')'; $('od-pass').textContent=fmt(x.wire_pass_total,0); $('od-fail').textContent=fmt(x.parse_fails_total,0);
     $('od-blcap').textContent=fmt(snap.blocked_total,0)+' / '+fmt(x.map_capacity,0); $('od-bar').style.width=Math.min(100,(snap.blocked_total||0)/(x.map_capacity||1)*100)+'%';
-    $('od-ingest').textContent=fmt(dSlots.ingest_pps,1)+' events/s ('+fmt(dSlots.ingest_total,0)+' total)'; $('od-reject').textContent=fmt(ipc.rejected_total,0); $('od-shed').textContent=fmt(dSlots.shed_pps,1)+' /s'; $('od-chan').textContent=fmt(ipc.ring_depth,0)+' / '+fmt(ipc.ring_capacity,0); $('od-chan-bar').style.width=Math.min(100,(ipc.ring_depth||0)/(ipc.ring_capacity||1)*100)+'%';
+    $('od-ingest').textContent=fmt(dSlots.ingest_pps,1)+' events/s ('+fmt(dSlots.ingest_total,0)+' total)'; $('od-reject').textContent=fmt(ipc.rejected_total,0); $('od-badframe').textContent=fmt(ipc.frames_rejected_total||0,0); $('od-shed').textContent=fmt(dSlots.shed_pps,1)+' /s'; $('od-chan').textContent=fmt(ipc.ring_depth,0)+' / '+fmt(ipc.ring_capacity,0); $('od-chan-bar').style.width=Math.min(100,(ipc.ring_depth||0)/(ipc.ring_capacity||1)*100)+'%';
     const fc=d.forecasting||{},cg=d.cgnat||{},an=d.analytics||{},mh=d.mesh||{},sy=d.system||{};
     $('od-promo').textContent=fmt(det.promotions_total,1); $('od-cold').textContent=fmt(det.cold_skipped_total,1); $('od-bdet').textContent=fmt(det.blocks_detection||0,0); $('od-bsub').textContent=fmt(det.subnet_blocks||0,0); $('od-bfc').textContent=fmt(det.forecast_blocks||0,0); $('od-capex').textContent='n/a'; $('od-submap').textContent='n/a';
     $('od-fcst').textContent=fmt(fc.hw_forecast,1); $('od-zscore').textContent=fmt(fc.hw_zscore,2); $('od-baseline').textContent=fmt(fc.hw_rps,1); $('od-ent').textContent=fmt(fc.entropy,2); $('od-entt').textContent=fmt(fc.entropy_ticks,0); $('od-fctt').textContent=fmt(fc.forecast_ticks,0);
