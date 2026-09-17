@@ -29,8 +29,8 @@ RamShield separates telemetry ingestion, detection, enforcement, and observation
 | Workspace version | `0.2.0` |
 | Rust edition | 2024 |
 | Workspace crates | 13 |
-| Rust tests listed | 253 |
-| Final integration suite | 48/48 passed |
+| Rust tests listed | 257 (244 passed, 13 ignored) |
+| Final integration suite | 48/48 passed (`scripts/final_integration.py`) |
 | Review pipeline | Passed: format, check, Clippy `-D warnings`, tests, metric validation |
 | WAL restart test | Passed: one live IP block restored after SIGKILL/restart |
 | CIDR XDP verification | 919,408/919,408 packets dropped for `203.0.113.0/24` |

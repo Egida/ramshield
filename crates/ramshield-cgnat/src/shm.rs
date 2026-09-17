@@ -33,7 +33,7 @@ pub struct ShmRuleEntry {
     pub client_hash: AtomicU64,   // 0 = Empty
     pub expires_at_ms: AtomicU64, // Absolute Unix epoch (ms)
     pub max_rps: AtomicU16,       // 0 = Block, >0 = Rate Limit
-    pub tier: AtomicU8,           // 0: Allow, 1: 429, 2: Challenge, 3: XDP Drop
+    pub tier: AtomicU8,           // 0: Allow, 1: Challenge (429+JS), 2: XDP Drop, 3: Block
     pub flags: AtomicU8,          // Bit 0: Shared Infrastructure / CGNAT
     pub challenge_seed: [u8; 16],
     pub _padding: [u8; 26], // Exact 128-byte slot alignment

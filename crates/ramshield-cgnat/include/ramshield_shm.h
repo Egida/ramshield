@@ -50,9 +50,9 @@ typedef struct {
 } RamshieldShmRuleSnapshot;
 
 #define RAMSHIELD_TIER_ALLOW       0u
-#define RAMSHIELD_TIER_CHALLENGE   1u
-#define RAMSHIELD_TIER_POW         2u
-#define RAMSHIELD_TIER_XDP_DROP    3u
+#define RAMSHIELD_TIER_CHALLENGE   1u /* 429 + JS/PoW */
+#define RAMSHIELD_TIER_XDP_DROP    2u
+#define RAMSHIELD_TIER_BLOCK       3u
 
 /*
  * Read a coherent rule snapshot. The caller must use the copied snapshot,
