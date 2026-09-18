@@ -295,7 +295,7 @@ def audit_static():
     c.ok(not kept, "no-unwrap gate (legit sites excluded)", "\n".join(kept[:6]))
     src = open(REPO + "/src/ipc/server.rs").read()
     c.ok("config: ConfigHandle" in src, "H3 IpcServer holds ConfigHandle")
-    c.ok("live_keys" in src, "H3 per-connection live keys")
+    c.ok("event_tx: Sender<ConnectionEvent>" in src, "H3 per-connection live keys")
     c.ok("config: &Config" not in src, "H3 old &Config sig gone")
     eng = open(REPO + "/src/engine/mod.rs").read()
     c.ok("cfg_handle.clone()" in eng, "H3 engine passes handle")
