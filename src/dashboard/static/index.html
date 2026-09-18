@@ -569,7 +569,13 @@
   function connectStream(){
     stream=new EventSource('/api/stream');
     stream.onmessage=e=>{try{queueTelemetry(JSON.parse(e.data))}catch(err){console.error('telemetry event:',err)}};
-    stream.onerror=()=>{$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='RECONNECTING';};
+    stream.onerror=()=>{$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='RECONNECTING';
+      // EventSource auto-retries transport drops, but a response that is not
+      // 200 + text/event-stream (e.g. the 503 that /api/stream serves while the
+      // engine is degraded, or a non-SSE error page) closes it permanently and
+      // it never retries. Re-arm by hand or the dashboard stays RECONNECTING.
+      if(stream.readyState===EventSource.CLOSED)setTimeout(connectStream,2000);
+    };
   }
   function switchTab(tab){
     document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
@@ -586,6 +592,12 @@
   }
   refresh(); connectStream();
   setInterval(loadBlocks,10000);
+  // Subnets + config have no SSE channel. Without a periodic refresh() the
+  // subnet matrix and orchestration panel freeze at first paint — first fetch
+  // usually lands before any traffic, so the grid reads "0 / 256 ACTIVE"
+  // forever while the SSE-driven KPIs keep moving. 5s is fast enough to look
+  // live and 20x cheaper than the 100ms telemetry stream.
+  setInterval(refresh,5000);
   function filterTable() { const q = $('tableSearch').value.toLowerCase(); document.querySelectorAll('#quarantineBody tr').forEach(r => { r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none'; }); }
 
 </script>
