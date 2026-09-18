@@ -61,6 +61,9 @@ def sh_out(*args: str, cwd: Path = REPO, timeout: int | None = None) -> tuple[in
     r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr)
 
+# T13 Pulse Tracker fix: is_over_threshold is now used in rate_tracker.rs patch
+# If the method becomes unused, add #[expect(dead_code)] to suppress warning
+
 
 class Check:
     """Named assertion accumulator for one suite layer."""

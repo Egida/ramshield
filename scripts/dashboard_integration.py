@@ -200,6 +200,7 @@ def fetch_sse_frame(timeout=2):
 
 # ── layers ────────────────────────────────────────────────────────────────────
 
+
 def layer_lint() -> int:
     c = Check("lint")
     c.ok(sh("cargo", "fmt", "--all", "--check", timeout=120) == 0, "cargo fmt --check")

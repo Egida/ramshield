@@ -424,7 +424,8 @@ async fn handle_connection(
                     }
                 }
             };
-            let req: Request = if !live_keys.is_empty() {
+            let auth_enforced = !live_keys.is_empty();
+            let req = if auth_enforced {
                 // HMAC auth gate: enforced only when keys configured. The auth
                 // object rides OUTSIDE the Request enum so deny_unknown_fields
                 // on the wire contract stays intact.
@@ -470,6 +471,7 @@ async fn handle_connection(
                     }
                 }
             } else {
+                // No auth keys configured - accept all frames
                 match serde_json::from_slice(&frame) {
                     Ok(req) => req,
                     Err(e) => {

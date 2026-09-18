@@ -251,6 +251,8 @@ mod tests {
     ///
     /// Rust: `BlocklistKey::from_ip` copies `v4.octets()` into key bytes
     /// [0..4] verbatim (zero conversion, rest zeroed).
+    /// This uses to_ne_bytes equivalent via std::net::Ipv4Addr::octets()
+    /// which returns network-order bytes (big-endian wire format).
     ///
     /// Both produce identical memory. This test pins the contract.
     #[test]
