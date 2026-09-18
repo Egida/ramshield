@@ -167,9 +167,25 @@ impl IpcServer {
             let cfg = config.load();
             let addr = cfg.ipc.tcp_addr.clone();
             info!("IPC server binding to {}", addr);
-            let auth_enabled = parse_ipc_keys(&cfg).map(|k| !k.is_empty()).unwrap_or(false);
-            if auth_enabled {
-                info!("IPC HMAC auth ENABLED");
+            // Fail closed: malformed keys must not silently disable auth.
+            let keys = match parse_ipc_keys(&cfg) {
+                Ok(k) => k,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "IPC auth key parse failed at bind: {e}"
+                    )));
+                }
+            };
+            let _auth_enabled = !keys.is_empty() || cfg.ipc.require_auth;
+            if cfg.ipc.require_auth && keys.is_empty() {
+                return Err(std::io::Error::other(
+                    "ipc.require_auth=true but no usable auth_keys after parse",
+                ));
+            }
+            if !keys.is_empty() {
+                info!("IPC HMAC auth ENABLED ({} keys)", keys.len());
+            } else {
+                info!("IPC HMAC auth disabled (loopback / no keys)");
             }
             (
                 addr,

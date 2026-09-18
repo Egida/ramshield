@@ -220,10 +220,30 @@ impl EnforcementService {
 
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Continuous store→XDP reconcile: every 40 ticks ≈ 10s. Closes map-loss
+        // drift after driver reload or external map wipe without waiting for restart.
+        let mut reconcile_ticks: u32 = 0;
+        const RECONCILE_EVERY_TICKS: u32 = 40;
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     self.expire_due().await;
+                    reconcile_ticks = reconcile_ticks.wrapping_add(1);
+                    if reconcile_ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                        let expected = self.store.get_all_blocked_ips();
+                        match self.xdp.reconcile(&expected) {
+                            Ok(_) => {
+                                self.blocked_ips = expected.into_iter().collect();
+                                debug!(
+                                    n = self.blocked_ips.len(),
+                                    "periodic XDP reconcile ok"
+                                );
+                            }
+                            Err(e) => {
+                                error!("periodic XDP reconciliation failed: {e}");
+                            }
+                        }
+                    }
                     // XDP kernel counters: drain ringbuf events, read counters
                     let drops = self.xdp.drain_drop_events();
                     if !drops.is_empty() {

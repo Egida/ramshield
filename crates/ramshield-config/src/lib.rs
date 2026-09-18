@@ -192,6 +192,10 @@ pub struct IpcConfig {
     /// (see protocol::auth). Empty = open server (loopback dev default).
     #[serde(default)]
     pub auth_keys: Vec<String>,
+    /// When true, refuse to start (and reject frames) even on loopback if
+    /// `auth_keys` is empty. Use in CI/staging to force auth coverage.
+    #[serde(default)]
+    pub require_auth: bool,
 }
 
 fn default_max_connection_bytes() -> Option<usize> {
@@ -217,6 +221,7 @@ impl Default for IpcConfig {
             connection_idle_timeout_ms: None,
             max_line_length: None,
             auth_keys: Vec::new(),
+            require_auth: false,
         }
     }
 }
@@ -635,6 +640,11 @@ impl Config {
                 self.ipc.tcp_addr
             );
         }
+        if self.ipc.require_auth && self.ipc.auth_keys.is_empty() {
+            anyhow::bail!(
+                "ipc.require_auth=true but auth_keys is empty — set HMAC keys or disable require_auth"
+            );
+        }
 
         // P1e: validate auth_keys shape (key_id:hex) + PHC hash format,
         // before any IPC server binds with them. No new deps — std hex check.
@@ -955,6 +965,25 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.dashboard.http_addr, "127.0.0.1:9999");
         assert_eq!(cfg.ipc.tcp_addr, "127.0.0.1:7890");
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn require_auth_on_loopback_without_keys_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.ipc.require_auth = true;
+        cfg.ipc.auth_keys.clear();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("require_auth"), "{err}");
+    }
+
+    #[test]
+    fn require_auth_with_valid_key_validates() {
+        let mut cfg = Config::default();
+        cfg.ipc.require_auth = true;
+        cfg.ipc.auth_keys = vec![
+            "k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into(),
+        ];
         cfg.validate().unwrap();
     }
 
