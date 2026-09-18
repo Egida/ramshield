@@ -1,0 +1,30 @@
+{
+  "ok": false,
+  "checks": [
+    {
+      "file": "COMMIT",
+      "present": true,
+      "pass": true
+    },
+    {
+      "file": "review_pipeline.log",
+      "present": false,
+      "pass": false
+    },
+    {
+      "file": "auth_e2e.log",
+      "present": true,
+      "pass": true
+    },
+    {
+      "file": "wal_kill_restart.log",
+      "present": false,
+      "pass": false
+    },
+    {
+      "file": "xdp_reconcile.log",
+      "present": false,
+      "pass": false
+    }
+  ]
+}

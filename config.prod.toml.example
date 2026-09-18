@@ -27,6 +27,7 @@ ram_limit_mb = 8192
 tcp_addr = "0.0.0.0:7890"
 max_connections = 1000000
 # auth_keys = ["k1:<64-hex-hmac-key>"]
+# require_auth = true  # force HMAC even on loopback (CI/staging)
 
 [dashboard]
 enabled = true
@@ -37,7 +38,7 @@ block_log_size = 1024
 [wal]
 enabled = true
 dir = "/var/lib/ramshield/wal"
-durability = "Fsync"
+durability = "GroupCommit"  # 100ms durability window; use Fsync for strictest
 compress = true
 seg_max_bytes = 67108864    # 64 MiB
 retention_max_bytes = 536870912 # 512 MiB; bounds replay and disk growth
