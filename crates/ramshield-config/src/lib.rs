@@ -981,9 +981,8 @@ mod tests {
     fn require_auth_with_valid_key_validates() {
         let mut cfg = Config::default();
         cfg.ipc.require_auth = true;
-        cfg.ipc.auth_keys = vec![
-            "k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into(),
-        ];
+        cfg.ipc.auth_keys =
+            vec!["k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into()];
         cfg.validate().unwrap();
     }
 

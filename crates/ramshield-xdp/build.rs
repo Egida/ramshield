@@ -26,6 +26,13 @@ fn main() {
          Install bpf-linker: https://github.com/aya-rs/bpf-linker/releases\n\
          Then: PATH=\"$HOME/.local/bin:$PATH\" cargo build"
     );
+
+    // Write minimal placeholder so include_bytes! succeeds on hosts without bpf-linker.
+    // Real attach path must check ELF validity / feature flags.
+    if !dest.exists() {
+        std::fs::write(&dest, b"\0").expect("write placeholder BPF ELF");
+        eprintln!("cargo:warning=wrote placeholder BPF ELF (bpf-linker missing)");
+    }
 }
 
 fn try_aya_build(dest: &Path) -> bool {
