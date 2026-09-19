@@ -752,6 +752,39 @@ fn process_request(
                 },
             }
         }
+        Request::UnblockCidr { cidr } => {
+            let network = match parse_cidr(&cidr) {
+                Ok(network) => network,
+                Err(e) => {
+                    return Response::Error {
+                        code: 400,
+                        message: format!("invalid CIDR: {} ({e})", cidr),
+                    };
+                }
+            };
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "ipc".into(),
+                actor: "admin".into(),
+                timestamp_utc: now_ms() as i64 / 1000,
+                ttl_seconds: 0,
+                reason: "manual_unblock".into(),
+                ip: network.addr,
+                cidr: Some(network),
+                action: EnforceAction::Unblock,
+            };
+            match enforcement_tx.try_send(cmd) {
+                Ok(()) => Response::Ok {
+                    message: format!("CIDR unblock queued for {network}"),
+                    state: Some("pending".into()),
+                },
+                Err(_) => Response::Error {
+                    code: 503,
+                    message: "enforcement queue full".into(),
+                },
+            }
+        }
         Request::GetIpStats { ip } => {
             let ip_addr = match ip.parse() {
                 Ok(addr) => addr,

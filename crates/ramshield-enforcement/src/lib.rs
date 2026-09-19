@@ -1300,6 +1300,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn cidr_block_registers_then_unblock_clears_shared_set() {
+        // The shared set is the one clock: the actor writes it on BlockCidr
+        // and clears it on UnblockCidr, and check_ip reads it. A member host
+        // has no IpRecord, so this set is the only place the block exists.
+        let store = Arc::new(Store::new(16));
+        store.traffic.ram_limit_mb.store(512, Ordering::Relaxed);
+        let mut s = EnforcementService::new(
+            store.clone(),
+            Arc::new(Metrics::new()),
+            Box::new(RecordingApplier::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let net = IpNetwork::new("198.51.100.0".parse().unwrap(), 24).unwrap();
+        let member: IpAddr = "198.51.100.42".parse().unwrap();
+
+        let mut block = block_cmd(net.addr, 600);
+        block.cidr = Some(net);
+        s.enforce(block).await.unwrap();
+
+        assert_eq!(
+            store.is_blocked_by_cidr(&member),
+            Some(net),
+            "block must register in the shared set the query reads"
+        );
+        assert!(store.get(&member).is_none(), "no per-member IpRecord");
+
+        let mut unblock = unblock_cmd(net.addr);
+        unblock.cidr = Some(net);
+        s.enforce(unblock).await.unwrap();
+
+        assert!(
+            store.is_blocked_by_cidr(&member).is_none(),
+            "unblock must clear the shared set"
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]

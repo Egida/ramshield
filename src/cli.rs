@@ -33,6 +33,9 @@ enum Cmd {
     Unblock {
         ip: String,
     },
+    UnblockCidr {
+        cidr: String,
+    },
     Stats,
     Status {
         #[arg(long)]
@@ -52,6 +55,9 @@ fn main() -> Result<()> {
                 .to_string()
         }
         Cmd::Unblock { ip } => serde_json::json!({"type": "unblock_ip", "ip": ip}).to_string(),
+        Cmd::UnblockCidr { cidr } => {
+            serde_json::json!({"type": "unblock_cidr", "cidr": cidr}).to_string()
+        }
         Cmd::Stats => r#"{"type":"get_stats"}"#.into(),
         Cmd::Status { .. } => r#"{"type":"get_status"}"#.into(),
         Cmd::Info { ip } => serde_json::json!({"type": "get_ip_stats", "ip": ip}).to_string(),
