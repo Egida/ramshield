@@ -370,6 +370,9 @@ async fn handle_connection(
     config: ConnectionConfig,
     dropped_events: Arc<AtomicU64>,
 ) -> Result<(), std::io::Error> {
+    // STEP 2: Hard 2MB ceiling for incoming stream to prevent OOM from malformed clients
+    let mut socket = socket.take(2 * 1024 * 1024);
+
     let mut buf = BytesMut::with_capacity(8192);
     let mut chunk = [0u8; 8192];
     let mut total_bytes_read = 0usize;

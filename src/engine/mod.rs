@@ -36,7 +36,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(cfg: Config, store: Arc<Store>, metrics: Arc<Metrics>) -> Self {
-        let (enforcement_tx, enforcement_rx) = mpsc::channel(4096);
+        let (enforcement_tx, enforcement_rx) = mpsc::channel(8192);
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             config: Arc::new(ArcSwap::from_pointee(cfg)),
