@@ -578,20 +578,30 @@ fn process_request(
                 }
             };
 
-            let status = store.get(&ip_addr);
-            let (blocked, threat, ewma_rps, reason) = match status {
-                Some(crate::storage::Value::IpRecord(rec)) => (
-                    rec.block_state != crate::storage::BlockState::Clean,
-                    rec.threat_score,
-                    rec.ewma_rps,
-                    match rec.block_state {
+            // The CIDR decision is the block; per-IP records are views of it. A member
+            // of an active /24 has no IpRecord of its own (subnet_batch enforces
+            // at the prefix level), so per-IP state alone reports clean for an
+            // address the dataplane is dropping. Same store, same clock the
+            // enforcement actor writes — not a second source of truth.
+            let cidr_hit = store.is_blocked_by_cidr(&ip_addr);
+            let (blocked, threat, ewma_rps, reason) = match store.get(&ip_addr) {
+                Some(crate::storage::Value::IpRecord(rec)) => {
+                    let per_ip_reason = match rec.block_state {
                         crate::storage::BlockState::Blocked { ref reason, .. } => {
                             Some(reason.as_str().to_string())
                         }
                         _ => None,
-                    },
+                    };
+                    let reason =
+                        per_ip_reason.or_else(|| cidr_hit.map(|net| format!("cidr_block({net})")));
+                    (reason.is_some(), rec.threat_score, rec.ewma_rps, reason)
+                }
+                _ => (
+                    cidr_hit.is_some(),
+                    0.0,
+                    0.0,
+                    cidr_hit.map(|net| format!("cidr_block({net})")),
                 ),
-                _ => (false, 0.0, 0.0, None),
             };
             Response::IpStatus {
                 ip,
