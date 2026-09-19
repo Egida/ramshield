@@ -739,6 +739,7 @@ impl DetectionEngine {
                     .record_block_ip(&b.0, b.1.as_str(), "detection");
             } else {
                 rejected += 1;
+                self.metrics.inc_enforcement_dropped();
                 if rejected & 0x3FF == 1 {
                     warn!(ip=%b.0, rejected, "enforcement queue full; dropping {} block commands (sampled warn)", rejected);
                 }
@@ -1064,6 +1065,7 @@ impl DetectionEngine {
                 };
                 if self.enforcement_tx.try_send(cmd).is_err() {
                     rejected_q += 1;
+                    self.metrics.inc_enforcement_dropped();
                     warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
                 } else {
                     self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
@@ -1540,6 +1542,44 @@ mod tests {
         assert!(
             v6_blocks.len() < 50,
             "dual gate must not pass on 60 lifetime members + 5 fresh",
+        );
+    }
+
+    /// A block command that cannot reach enforcement must be COUNTED. The
+    /// CIDR shape is taken from `subnet_decision_is_one_block_not_one_per_member`
+    /// (proven to emit exactly one command with a live receiver); here the
+    /// receiver is dropped, so that same emit fails — the exact end state of
+    /// the review's burst-vs-small-queue scenario.
+    #[test]
+    fn enforcement_drop_is_counted_not_silent() {
+        use tokio::sync::mpsc;
+        let cfg = Config::default().into_handle();
+        let metrics = Arc::new(Metrics::new());
+        let (etx, erx) = mpsc::channel(64);
+        drop(erx); // permanently saturated: every try_send is a hard drop
+        let eng = Arc::new(DetectionEngine::new(
+            Arc::new(Store::new(16)),
+            cfg,
+            etx,
+            metrics.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        // CGNAT_TIER_BLOCK needs hosts > 64 AND rate > 50_000: 65 x 800.
+        let t = now_ns();
+        let events: Vec<_> = (1..=65u8)
+            .flat_map(|h| {
+                let ip = IpAddr::V4(Ipv4Addr::new(172, 16, 30, h));
+                (0..800).map(move |i| ev_at(ip, t + i))
+            })
+            .collect();
+        eng.flush_events(&events);
+        eng.subnet_batch_scan();
+
+        assert!(
+            metrics.enforcement_dropped.load(Ordering::Relaxed) > 0,
+            "a block command that never reached enforcement must be counted — \
+             otherwise the operator sees a healthy engine while the attacker floods"
         );
     }
 

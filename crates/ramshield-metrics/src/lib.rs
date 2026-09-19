@@ -219,6 +219,11 @@ pub struct Metrics {
     pub blocks_detection: Arc<AtomicU64>,
     pub blocks_subnet: Arc<AtomicU64>,
     pub blocks_forecast: Arc<AtomicU64>,
+    /// Block commands dropped because the detection→enforcement channel was
+    /// full. A dropped security command means the attacker keeps flooding
+    /// while the engine believes the IP is blocked; this counter is the only
+    /// operator-visible signal that happened.
+    pub enforcement_dropped: Arc<AtomicU64>,
     /// Track when detection updates fail due to capacity exceeded
     pub capacity_exceeded_count: Arc<AtomicU64>,
     /// Track how many IPs fail due to capacity exceeded
@@ -312,6 +317,7 @@ impl Metrics {
             blocks_detection: Arc::new(AtomicU64::new(0)),
             blocks_subnet: Arc::new(AtomicU64::new(0)),
             blocks_forecast: Arc::new(AtomicU64::new(0)),
+            enforcement_dropped: Arc::new(AtomicU64::new(0)),
             capacity_exceeded_count: Arc::new(AtomicU64::new(0)),
             capacity_exceeded_ips: Arc::new(AtomicU64::new(0)),
             forecast_ticks: Arc::new(AtomicU64::new(0)),
@@ -374,6 +380,12 @@ impl Metrics {
     }
     pub fn inc_frames_rejected(&self) {
         self.frames_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A block command was dropped because the detection→enforcement channel
+    /// was full. Distinct from `capacity_exceeded_*` (store RAM refusal):
+    /// here the IP WAS blocked in memory but the kernel never learned.
+    pub fn inc_enforcement_dropped(&self) {
+        self.enforcement_dropped.fetch_add(1, Ordering::Relaxed);
     }
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
@@ -802,6 +814,12 @@ impl Metrics {
             "ramshield_blocks_subnet",
             self.blocks_subnet.load(Ordering::Relaxed),
             "Blocks from subnet module.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_enforcement_dropped_total",
+            self.enforcement_dropped.load(Ordering::Relaxed),
+            "Block commands dropped on a full detection-to-enforcement channel (attacker unblocked in kernel).",
             "counter"
         ));
         out.push_str(&emit!(
@@ -1254,6 +1272,20 @@ mod cache_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enforcement_drops_counter_is_exported() {
+        let m = Metrics::new();
+        m.inc_enforcement_dropped();
+        m.inc_enforcement_dropped();
+        assert_eq!(m.enforcement_dropped.load(Ordering::Relaxed), 2);
+        let out = m.render_prometheus();
+        assert!(
+            out.contains("ramshield_enforcement_dropped_total 2"),
+            "enforcement drops must be scrapeable — a silently dropped security \
+             command is otherwise invisible to the operator"
+        );
+    }
 
     #[test]
     fn block_log_evicts_at_configured_cap() {
