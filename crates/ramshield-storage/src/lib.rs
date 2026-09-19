@@ -252,6 +252,13 @@ pub struct Store {
     /// to make `get_all_blocked_ips` O(B) instead of O(N) on XDP reconcile.
     /// B = number of blocked IPs (typically 50-200), N = total store size (100k+).
     blocked_set: Arc<DashSet<IpAddr>>,
+    /// Active CIDR blocks (network prefixes enforced at the prefix level).
+    /// Written ONLY by the enforcement actor — the single owner of block
+    /// state. Read by `check_ip` and the dashboard so a query never reports
+    /// `blocked:false` for an IP the dataplane is dropping: a member of a
+    /// blocked /24 has no `IpRecord.block_state` of its own (the CIDR is the
+    /// decision; members are views of it), so per-IP state alone lies.
+    pub active_cidrs: Arc<DashSet<IpNetwork>>,
     ram_bytes: Arc<AtomicUsize>,
     /// O(1) blocked count — updated on BlockState transitions in insert().
     /// ponytail: does not track pre-existing blocked IPs from WAL replay unless
@@ -297,6 +304,10 @@ impl Store {
                 32,
             )),
             blocked_set: Arc::new(DashSet::with_hasher_and_shard_amount(
+                ahash::RandomState::new(),
+                32,
+            )),
+            active_cidrs: Arc::new(DashSet::with_hasher_and_shard_amount(
                 ahash::RandomState::new(),
                 32,
             )),
@@ -685,6 +696,24 @@ impl Store {
         Some(entry.value.clone())
     }
 
+    /// Is this IP blocked by an active CIDR rule?
+    ///
+    /// The CIDR decision is the block; member hosts are views of it. A member
+    /// of a blocked /24 has no `IpRecord.block_state` of its own, so a query
+    /// that reads only per-IP state reports `blocked:false` for an address the
+    /// dataplane is dropping. `active_cidrs` is written solely by the
+    /// enforcement actor, so this is the same clock that gates the kernel.
+    ///
+    /// ponytail: linear scan over active CIDR blocks — the set is bounded by
+    /// subnet decisions (tens, not thousands). Upgrade to an LPM trie if a
+    /// deployment ever holds thousands of concurrent prefix blocks.
+    pub fn is_blocked_by_cidr(&self, ip: &IpAddr) -> Option<IpNetwork> {
+        self.active_cidrs
+            .iter()
+            .map(|e| *e.key())
+            .find(|net| net.contains(*ip))
+    }
+
     pub fn evict_batch(&self, keys: &[IpAddr]) {
         // ponytail: `entry()` gives exclusive shard lock once per key
         for key in keys {
@@ -923,6 +952,31 @@ mod tests {
     /// denied blocked-insert permanently inflated blocked_count and
     /// blocked_set — phantom IPs that `get_all_blocked_ips` (and downstream
     /// unblock-all) would act on.
+    /// The decision is the block; members are views of it. A member of an
+    /// active CIDR block has no IpRecord of its own (256 records for one
+    /// decision is the wrong shape), so a query that reads only per-IP state
+    /// lies. This asserts the shared clock: the same `active_cidrs` the
+    /// enforcement actor writes is what the query path must consult.
+    #[test]
+    fn cidr_block_visible_to_ip_query() {
+        let store = Store::new(16);
+        let net = IpNetwork::new("172.16.30.0".parse().unwrap(), 24).unwrap();
+        store.active_cidrs.insert(net, ());
+
+        let member: IpAddr = "172.16.30.44".parse().unwrap();
+        // Precondition: no per-IP record exists for the member.
+        assert!(store.get(&member).is_none(), "member has no IpRecord");
+        // The CIDR clock must answer for it.
+        assert_eq!(
+            store.is_blocked_by_cidr(&member),
+            Some(net),
+            "member of active /24 must read as blocked"
+        );
+        // Outsiders stay clean.
+        let outside: IpAddr = "172.16.31.1".parse().unwrap();
+        assert!(store.is_blocked_by_cidr(&outside).is_none());
+    }
+
     #[test]
     fn capacity_denial_does_not_pollute_blocked_indexes() {
         let store = Store::new(16);
