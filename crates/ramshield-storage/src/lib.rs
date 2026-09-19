@@ -22,6 +22,25 @@ use std::time::{Duration, Instant};
 
 pub const INLINE_MAX: usize = 64;
 
+/// Patch B: subnet dual-gate accumulation window (ns).
+///
+/// One owner for a value three modules must agree on: the merge reset in
+/// `merge_subnet_window` and both windowed-cardinality legs of the dual gate
+/// in `ramshield-detection`. The defect this closes: at 2s, a swarm pacing
+/// its pulses just past the flush cadence never held the dual gate (at least
+/// `subnet_batch_threshold` hosts AND `subnet_batch_min_events` events)
+/// across a boundary, because each merge landed after the previous window
+/// had already been zeroed — so the detector saw only the current pulse,
+/// never the aggregate.
+///
+/// 4s = 2x the 2s flush cadence, giving every pulse at least one full
+/// window to accumulate against. Watch the upper bound when raising this:
+/// the prune policy evicts on staleness (see `subnet_batch_scan`), and the
+/// gate must stay comfortably shorter than that or live swarms get pruned
+/// mid-attack. ponytail: fixed const, not per-subnet config — plumb to
+/// Config.detection only if traffic profiles actually diverge.
+pub const SUBNET_WINDOW_NS: u64 = 4 * 1_000_000_000;
+
 /// Incremental traffic counters — updated on batch flush, read by forecasting
 /// without scanning the full store (Kafka-style consumer lag / Prometheus counters).
 #[derive(Debug)]
@@ -331,7 +350,7 @@ impl Store {
         members: Option<&[std::net::IpAddr]>,
         now_ns: u64,
     ) {
-        const WINDOW_NS: u64 = 2 * 1_000_000_000; // ponytail: fixed 2s window vs config plumbing — matches pre_aggs flush cadence; add per-subnet window cfg when justified.
+        const WINDOW_NS: u64 = SUBNET_WINDOW_NS; // Patch B: one owner — see the const's doc for the 2s->4s rationale.
         // P0 fix: hold the shard lock for the full read-modify-write.
         // The old get().map(|e| e.value().clone()) → mutate → insert pattern
         // dropped the lock between read and write, so two concurrent
@@ -920,6 +939,65 @@ pub struct StoreStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Patch B: a pulsed swarm must not reset mid-attack. Two merges 3s
+    /// apart (inside the widened window) must accumulate, not zero out.
+    #[test]
+    fn subnet_window_survives_pulsed_swarm_within_window() {
+        let store = Store::new(16);
+        let t0 = 1_000_000_000u64;
+        let mk = |o: u8| IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, o));
+        let any = mk(1);
+        let net = IpNetwork::of_ip(any);
+        let sk = subnet_key_u128(any).unwrap();
+
+        let first: Vec<IpAddr> = (1..=30u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 60, Some(&first), t0);
+        // Second pulse 3s later: 30 new hosts, 60 more events.
+        let second: Vec<IpAddr> = (31..=60u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 60, Some(&second), t0 + 3_000_000_000);
+
+        let rec = store.subnet_table().get(&sk).unwrap();
+        assert_eq!(
+            rec.unique_ips(),
+            60,
+            "host bitmap must accumulate across a 3s pulse gap"
+        );
+        assert_eq!(
+            rec.total_rps, 120,
+            "event volume must accumulate across a 3s pulse gap"
+        );
+    }
+
+    /// Patch B boundary: accumulation must still end past the widened window.
+    /// A never-resetting window would let a once-hot /24 block forever.
+    #[test]
+    fn subnet_window_resets_beyond_widened_boundary() {
+        let store = Store::new(16);
+        let t0 = 1_000_000_000u64;
+        let mk = |o: u8| IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, o));
+        let any = mk(1);
+        let net = IpNetwork::of_ip(any);
+        let sk = subnet_key_u128(any).unwrap();
+
+        let hosts: Vec<IpAddr> = (1..=60u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 480, Some(&hosts), t0);
+        // Well past the widened boundary: signal must be gone.
+        store.merge_subnet_window(
+            sk,
+            net,
+            3,
+            Some(&[mk(200)]),
+            t0 + SUBNET_WINDOW_NS + 1_000_000_000,
+        );
+        let rec = store.subnet_table().get(&sk).unwrap();
+        assert_eq!(
+            rec.unique_ips(),
+            1,
+            "stale swarm signal must not survive past the window"
+        );
+        assert_eq!(rec.total_rps, 3);
+    }
 
     /// Test helper: create an IpRecord with `block_state = Blocked`.
     fn blocked_record(ip: IpAddr) -> IpRecord {
