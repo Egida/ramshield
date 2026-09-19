@@ -14,7 +14,7 @@ IPC_HOST = "127.0.0.1"
 IPC_PORT = 7890
 BATCH_SIZE = 50       # events per frame
 FRAME_INTERVAL = 0.01 # 100 frames/s → 5k events/s per sender
-DURATION = 60         # seconds
+DURATION = 40         # seconds
 NUM_SENDERS = 4       # parallel senders
 SUBNET_BASE = 1       # starting subnet counter
 
@@ -86,7 +86,7 @@ def monitor_dashboard(duration):
     print(f"\n{'='*70}")
     print(f" Monitoring dashboard for {duration}s")
     print(f"{'='*70}")
-    print(f"{'time':>5} {'ips_tracked':>12} {'ingested':>10} {'cpu':>6} {'subnet_ones':>11} {'hot_subnets':>11} {'health':>7}")
+    print(f"{'time':>5} {'ips_tracked':>12} {'ingested':>10} {'cpu':>6} {'blocks':>11} {'cold_skip':>11} {'health':>7}")
     print(f"{'-'*70}")
 
     for i in range(duration):
@@ -96,13 +96,16 @@ def monitor_dashboard(duration):
                 f"http://{IPC_HOST}:9999/api/snapshot", timeout=2
             ).read())
 
+            def num(v):
+                return int(v) if isinstance(v, (int, float)) else 0
+
             print(f"  t+{i+1:3d}s "
-                  f"{snapshot.get('ips_tracked', '?'):>12,} "
-                  f"{snapshot.get('events_ingested', '?'):>10,} "
-                  f"{snapshot.get('cpu_usage_pct', 0):>5.1f}% "
-                  f"{snapshot.get('subnet_bitmap_ones', '?'):>11,} "
-                  f"{snapshot.get('hot_subnets_count', '?'):>11,} "
-                  f"{snapshot.get('is_healthy', '?'):>7}")
+                  f"{num(snapshot.get('ips_tracked')):>12,} "
+                  f"{num(snapshot.get('events_ingested')):>10,} "
+                  f"{float(snapshot.get('cpu_usage', 0) or 0):>5.1f}% "
+                  f"{num(snapshot.get('blocks_applied')):>11,} "
+                  f"{num(snapshot.get('cold_skipped')):>11,} "
+                  f"{str(snapshot.get('is_healthy', '?')):>7}")
         except Exception as e:
             print(f"  t+{i+1:3d}s error: {e}")
 
@@ -157,11 +160,14 @@ try:
     snapshot = json.loads(urllib.request.urlopen(
         f"http://{IPC_HOST}:9999/api/snapshot", timeout=2
     ).read())
+    def num(v):
+        return int(v) if isinstance(v, (int, float)) else 0
+
     print(f"\nFinal Dashboard State:")
-    print(f"  IPs tracked: {snapshot.get('ips_tracked', '?'):,}")
-    print(f"  Events ingested: {snapshot.get('events_ingested', '?'):,}")
-    print(f"  Subnet bitmap ones: {snapshot.get('subnet_bitmap_ones', '?'):,}")
-    print(f"  Hot subnets: {snapshot.get('hot_subnets_count', '?'):,}")
+    print(f"  IPs tracked: {num(snapshot.get('ips_tracked')):,}")
+    print(f"  Events ingested: {num(snapshot.get('events_ingested')):,}")
+    print(f"  Cold skipped: {num(snapshot.get('cold_skipped')):,}")
+    print(f"  Blocks applied: {num(snapshot.get('blocks_applied')):,}")
     print(f"  Health: {snapshot.get('is_healthy', '?')}")
     print(f"  XDP active: {snapshot.get('xdp_active', '?')}")
 except Exception as e:

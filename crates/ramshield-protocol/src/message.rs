@@ -60,6 +60,9 @@ pub enum Request {
     UnblockIp {
         ip: String,
     },
+    UnblockCidr {
+        cidr: String,
+    },
     GetIpStats {
         ip: String,
     },
