@@ -12,7 +12,9 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use dashmap::DashMap;
 use ramshield_config::{ConfigHandle, DetectionConfig};
 use ramshield_metrics::Metrics;
-use ramshield_storage::{BlockState, IpRecord, Store, SubnetKey, subnet_key_u128};
+use ramshield_storage::{
+    BlockState, IpRecord, SUBNET_WINDOW_NS, Store, SubnetKey, subnet_key_u128,
+};
 use ramshield_types::BlockReason;
 use ramshield_types::{ConnectionEvent, EnforceAction, EnforceCommand, IpNetwork};
 use rate_tracker::{
@@ -591,7 +593,7 @@ impl DetectionEngine {
                             r.unique_ips()
                         } else {
                             self.store
-                                .subnet_member_count_windowed(k, 2_000_000_000, now)
+                                .subnet_member_count_windowed(k, SUBNET_WINDOW_NS, now)
                         };
                         uniq >= det.subnet_batch_threshold as u64
                             && r.total_rps >= det.subnet_batch_min_events
@@ -1020,7 +1022,7 @@ impl DetectionEngine {
                     // batch-block ~55 innocent IPs (review P1-2).
                     let now = now_ns();
                     self.store
-                        .subnet_member_count_windowed(*e.key(), 2 * 1_000_000_000, now)
+                        .subnet_member_count_windowed(*e.key(), SUBNET_WINDOW_NS, now)
                 };
                 if uniq >= ip_threshold && r.total_rps >= ev_threshold {
                     Some((*e.key(), uniq, r.total_rps, r.network))
@@ -1742,6 +1744,45 @@ mod tests {
         );
     }
 
+    /// Patch B RED (detection seam): a swarm pacing its pulses ~3s apart must
+    /// still satisfy the store dual gate. Under the old 2s window each pulse
+    /// landed after the previous counters were zeroed, so `store_dual_gate_met`
+    /// stayed false and the swarm never promoted.
+    #[test]
+    fn pulsed_swarm_meets_store_dual_gate_across_window() {
+        let store = Store::new(16);
+        let t0 = 1_000_000_000u64;
+        let mk = |o: u8| IpAddr::V4(Ipv4Addr::new(198, 18, 0, o));
+        let any = mk(1);
+        let net = crate::IpNetwork::of_ip(any);
+        let sk = subnet_key_u128(any).unwrap();
+        // Gate thresholds used by the assertions below.
+        let host_threshold = 50u64;
+        let event_min = 100u64;
+
+        // Pulse 1: 30 hosts / 60 events.
+        let p1: Vec<IpAddr> = (1..=30u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 60, Some(&p1), t0);
+        let after_p1 = store.subnet_table().get(&sk).unwrap().unique_ips();
+        assert!(
+            after_p1 < host_threshold,
+            "pulse 1 alone must be below the host gate (got {after_p1})"
+        );
+
+        // Pulse 2, 3s later — inside a 4s window, past a 2s one.
+        let p2: Vec<IpAddr> = (31..=60u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 60, Some(&p2), t0 + 3_000_000_000);
+
+        let rec = store.subnet_table().get(&sk).unwrap();
+        assert!(
+            rec.unique_ips() >= host_threshold && rec.total_rps >= event_min,
+            "pulsed swarm must hold the dual gate across the window \
+             (hosts={}, events={})",
+            rec.unique_ips(),
+            rec.total_rps
+        );
+    }
+
     /// F1: window rollover de-arms — quiet subnet resets both counters.
     #[test]
     fn window_rollover_resets_counters() {
@@ -1755,8 +1796,16 @@ mod tests {
         let hosts: Vec<std::net::IpAddr> = (1..=60u8).map(mk).collect();
         store.merge_subnet_window(sk, net, 480, Some(&hosts), t0);
         assert_eq!(store.subnet_table().get(&sk).unwrap().unique_ips(), 60);
-        // next window (>2s later): fresh attacker or benign traffic starts clean
-        store.merge_subnet_window(sk, net, 3, Some(&[mk(200)]), t0 + 3_000_000_000);
+        // next window (past SUBNET_WINDOW_NS): fresh attacker or benign traffic
+        // starts clean. The gap must exceed the window or the merge lands
+        // inside it and accumulates instead of resetting.
+        store.merge_subnet_window(
+            sk,
+            net,
+            3,
+            Some(&[mk(200)]),
+            t0 + SUBNET_WINDOW_NS + 1_000_000_000,
+        );
         let rec = store.subnet_table().get(&sk).unwrap();
         assert_eq!(
             rec.unique_ips(),
