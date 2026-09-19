@@ -196,6 +196,10 @@ impl DetectionEngine {
         shutdown: Arc<AtomicBool>,
     ) -> std::io::Result<Self> {
         let bloom_bits = config.load().detection.bloom_bits;
+        // Patch A: publish capacity up front so bloom_fp_ppm has a
+        // denominator before the first flush (otherwise the gauge reads 0
+        // and the FP estimate is silently disabled).
+        metrics.set_bloom_bits(bloom_bits as u64);
         // 64k cap ≈ 4MB RSS, fills in ~64ms at 1M eps — keeps the batch
         // processor honest without megabytes of dead head-of-line buffer.
         // Exported so IPC telemetry can't drift from the real size (F3).
@@ -548,6 +552,7 @@ impl DetectionEngine {
         }
 
         let mut blocks = Vec::new();
+        let mut promoted_ips: Vec<IpAddr> = Vec::with_capacity(64);
         let mut threat_sample = Vec::with_capacity(64);
         let mut promoted = 0u32;
         let mut cold_skipped = 0u32;
@@ -651,6 +656,11 @@ impl DetectionEngine {
 
             promoted += 1;
             promoted_events += agg.count;
+            // Patch A: the bloom is an advisory revisit cache over PROMOTED
+            // IPs. Recording here (after merge_record succeeded) means a
+            // promote-without-block host — the common case — is still
+            // revisitable next epoch, which is what the cache is for.
+            promoted_ips.push(ip);
             trace!(
                 ip = %ip,
                 events = agg.count,
@@ -672,14 +682,26 @@ impl DetectionEngine {
         }
 
         // Batch bloom insert — ArcSwap clone+insert+store.
-        if !blocks.is_empty() {
+        // Patch A: the insert set is PROMOTED IPs, not blocked ones. The
+        // bloom is a revisit cache whose whole purpose is to let a host seen
+        // last epoch skip the cold path this epoch. Blocked IPs are already
+        // resident in the store carrying a BlockState, so caching them
+        // duplicates state the store owns — while promote-without-block,
+        // the common case, left the cache cold and made cold-skip fire on
+        // hosts that had just been seen. Over-promoting is the intended
+        // failure mode: a bloom FP opens the gate, never rejects.
+        if !promoted_ips.is_empty() {
             let mut bf = (*self.bloom.load_full()).clone();
-            for &(ip, _, _) in &blocks {
+            for &ip in &promoted_ips {
                 let (a, b) = BloomFilter::slots(&ip);
                 bf.insert_hashed(a, b);
             }
             self.bloom.store(Arc::new(bf));
         }
+        // n for the FP estimate: distinct promotes this epoch. Approximate
+        // across flushes (an IP promoted in two flushes counts twice), which
+        // only makes the reported FP conservative — it never understates fill.
+        self.metrics.record_bloom_inserts(promoted_ips.len() as u64);
         threat_sample.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         threat_sample.truncate(128);
         self.store.traffic.push_threat_samples(threat_sample);
@@ -900,9 +922,13 @@ impl DetectionEngine {
             if now_ns().saturating_sub(last_bloom_clear_ns) >= bloom_clear_ns {
                 // ponytail: atomic swap — no lock held during clear.
                 // Old bloom is reclaimed when last reader releases its guard.
-                self.bloom.store(Arc::new(BloomFilter::new(
-                    self.config.load().detection.bloom_bits,
-                )));
+                let bits = self.config.load().detection.bloom_bits;
+                self.bloom.store(Arc::new(BloomFilter::new(bits)));
+                // Patch A: the epoch ended, so n resets and fp_ppm drops to
+                // 0. Without this the gauge would report the peak fill of a
+                // filter that no longer holds those entries — a permanent
+                // false alarm.
+                self.metrics.bloom_epoch_clear();
                 last_bloom_clear_ns = now_ns();
             }
             // P1-6: sweep expired entries every 60s.
@@ -1213,6 +1239,78 @@ mod tests {
             ingested + left,
             sent,
             "F1 loss: ingested={ingested} left={left} sent={sent}"
+        );
+    }
+
+    /// Patch A RED: the bloom is documented as an advisory revisit cache for
+    /// PROMOTED IPs, but insert ran over `blocks` — so a host promoted
+    /// without being blocked (the common case) left the cache cold, and
+    /// cold-skip fired on hosts seen one flush earlier. Asserts the promoted
+    /// set is what lands in the filter.
+    #[test]
+    fn bloom_caches_promoted_ips_not_just_blocked() {
+        use tokio::sync::mpsc;
+        let mut cfg = Config::default();
+        // Promotes freely, but the RPS threshold sits far above this traffic
+        // so nothing blocks. Promote-without-block is exactly the case the
+        // old insert set missed (blocks was empty, so nothing was cached).
+        cfg.detection.promote_min_events = 8;
+        cfg.detection.rps_threshold = 1_000_000;
+        let cfg = cfg.into_handle();
+        let metrics = Arc::new(Metrics::new());
+        let (etx, _erx) = mpsc::channel(64);
+        let eng = Arc::new(DetectionEngine::new(
+            Arc::new(Store::new(16)),
+            cfg,
+            etx,
+            metrics.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+        let events: Vec<_> = (0..12).map(|i| ev_at(ip, i)).collect();
+        eng.flush_events(&events);
+
+        assert!(
+            eng.store.get(&ip).is_some(),
+            "IP with 12 events must be promoted"
+        );
+        let (a, b) = BloomFilter::slots(&ip);
+        assert!(
+            eng.bloom.load().contains_hashed(a, b),
+            "promoted-without-block IP must be in the bloom revisit cache"
+        );
+        assert!(
+            metrics.bloom_inserts_epoch.load(Ordering::Relaxed) >= 1,
+            "bloom_inserts_epoch must count promoted IPs"
+        );
+        assert_eq!(
+            metrics.blocks_total.load(Ordering::Relaxed),
+            0,
+            "test premise: no blocks issued, so the old insert set was empty"
+        );
+    }
+
+    /// Patch A RED, second half: capacity must be published at construction,
+    /// or fp_ppm has no denominator and silently reads 0 forever.
+    #[test]
+    fn bloom_capacity_published_at_construction() {
+        use tokio::sync::mpsc;
+        let mut cfg = Config::default();
+        cfg.detection.bloom_bits = 1_234_567;
+        let metrics = Arc::new(Metrics::new());
+        let (etx, _erx) = mpsc::channel(64);
+        let _eng = Arc::new(DetectionEngine::new(
+            Arc::new(Store::new(16)),
+            cfg.into_handle(),
+            etx,
+            metrics.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+        assert_eq!(
+            metrics.bloom_bits.load(Ordering::Relaxed),
+            1_234_567,
+            "constructor must publish bloom capacity for the FP estimate"
         );
     }
 
