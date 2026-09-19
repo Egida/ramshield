@@ -4,12 +4,31 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// IP network prefix with configurable CIDR length.
 /// Supports both IPv4 and IPv6 with normalized byte order (network byte order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct IpNetwork {
     /// Network address in network byte order (big-endian)
     pub addr: IpAddr,
     /// CIDR prefix length (0-32 for IPv4, 0-128 for IPv6)
     pub prefix_len: u8,
+}
+
+/// Deserialize through `new()` instead of deriving, so a hand-crafted frame
+/// or an edited WAL record cannot inject an out-of-range prefix (/33, /129).
+/// The BPF LPM trie rejects those with EINVAL and the block silently fails
+/// open. Wire format is unchanged: `{"addr":..,"prefix_len":..}`.
+impl<'de> Deserialize<'de> for IpNetwork {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            addr: IpAddr,
+            prefix_len: u8,
+        }
+        let Raw { addr, prefix_len } = Raw::deserialize(de)?;
+        Self::new(addr, prefix_len).map_err(serde::de::Error::custom)
+    }
 }
 
 impl IpNetwork {
@@ -225,6 +244,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ipv6_net.prefix_bytes().len(), 8);
+    }
+
+    #[test]
+    fn test_deserialize_rejects_out_of_range_prefix() {
+        // A /33 (IPv4) or /129 (IPv6) deserialized straight into the struct
+        // bypassed new()'s validation and reached the BPF LPM trie, where the
+        // kernel rejects it with EINVAL and the block silently fails open.
+        for bad in [
+            r#"{"addr":"192.0.2.1","prefix_len":33}"#,
+            r#"{"addr":"2001:db8::1","prefix_len":129}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<IpNetwork>(bad).is_err(),
+                "out-of-range prefix must be rejected at deserialization: {bad}"
+            );
+        }
+        // Valid prefixes still round-trip unchanged.
+        let ok: IpNetwork =
+            serde_json::from_str(r#"{"addr":"10.20.30.0","prefix_len":24}"#).unwrap();
+        assert_eq!(ok.prefix_len, 24);
+        assert_eq!(ok.addr, "10.20.30.0".parse::<IpAddr>().unwrap());
     }
 
     #[test]
