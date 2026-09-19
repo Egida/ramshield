@@ -559,18 +559,46 @@ impl DetectionEngine {
 
         for &(ip, ref agg) in ip_aggs {
             let sk = subnet_key_u128(ip);
-            let subnet_hot = sk
-                .and_then(|k| subnet_counts.get(&k))
-                .is_some_and(|&(ev, _)| ev as u64 >= det.subnet_window_threshold);
 
             let (a, b) = BloomFilter::slots(&ip);
-            // ponytail: poison-recovery — bloom is advisory (false-positive
-            // cache); a panic mid-hold leaves valid data, so recover instead
-            // of panicking every future request. Upgrade: parking_lot.
-            // ponytail: ArcSwap::load is lock-free, no poison risk.
             let bloom_hit = self.bloom.load().contains_hashed(a, b);
 
-            if agg.count < det.promote_min_events && !subnet_hot && !bloom_hit {
+            // Swarm hint (sparse /24 deadlock fix): Phase A above already
+            // merged this batch's subnet window, so an IP with agg.count < 8
+            // can still be part of an attack. Three independent legs:
+            //   1. in-batch distinct hosts  — 60 IPs x 1 event is a swarm
+            //   2. in-batch event volume    — matches the old subnet_hot leg
+            //   3. cumulative store dual gate — swarm split across flushes
+            // Without these, `agg.count < promote_min && !bloom_hit` dropped
+            // every sparse host before the subnet aggregator ever saw it, so
+            // subnet_hot could never become true (circular cold-skip).
+            let (in_batch_events, in_batch_hosts) = sk
+                .and_then(|k| subnet_counts.get(&k))
+                .map(|(ev, members)| (*ev as u64, members.len() as u64))
+                .unwrap_or((0, 0));
+
+            let store_dual_gate_met = sk
+                .and_then(|k| {
+                    self.store.subnet_table().get(&k).map(|r| {
+                        // v4: 256-bit host bitmap; v6 /64: windowed index
+                        // cardinality (same split as subnet_batch_scan).
+                        let uniq = if r.network.family() == 4 {
+                            r.unique_ips()
+                        } else {
+                            self.store
+                                .subnet_member_count_windowed(k, 2_000_000_000, now)
+                        };
+                        uniq >= det.subnet_batch_threshold as u64
+                            && r.total_rps >= det.subnet_batch_min_events
+                    })
+                })
+                .unwrap_or(false);
+
+            let swarm_hint = in_batch_hosts >= det.subnet_batch_threshold as u64
+                || in_batch_events >= det.subnet_window_threshold
+                || store_dual_gate_met;
+
+            if agg.count < det.promote_min_events && !swarm_hint && !bloom_hit {
                 cold_skipped += 1;
                 cold_skipped_events += agg.count;
                 trace!(
@@ -578,6 +606,9 @@ impl DetectionEngine {
                     events = agg.count,
                     bytes = agg.bytes,
                     proto_fp = agg.proto_fp,
+                    in_batch_hosts,
+                    in_batch_events,
+                    store_dual_gate_met,
                     cold_skipped,
                     "ip cold-skipped: below promote gate"
                 );
@@ -889,6 +920,16 @@ impl DetectionEngine {
             // before the batch_block_enabled `continue` so pruning cannot
             // be skipped when batch blocking is off. DashMap::len() is a
             // per-shard sum — cheap enough for the 500ms tick.
+            // P2 fix: scan before prune - this ensures freshly promoted subnets
+            // from the current tick are evaluated for blocking before they
+            // might be pruned in the following iteration. This fixes the
+            // scenario where a new `/24` swarm meets the dual gate in the
+            // current scan but would be evicted before the next scan.
+            self.subnet_batch_scan();
+
+            // After scanning, prune subnet_table for stale entries. This order
+            // prevents active hot subnets from being incorrectly evicted
+            // during the same scan cycle.
             let st = self.store.subnet_table();
             if st.len() > 100_000 {
                 // P2 fix (F6): the old predicate (total_rps==0 &&
@@ -918,7 +959,6 @@ impl DetectionEngine {
                     st.remove(&key);
                 }
             }
-            self.subnet_batch_scan();
         }
     }
 
@@ -1476,6 +1516,71 @@ mod tests {
         assert_eq!(rec.total_rps, 180);
         // dual-gate predicate (same as subnet_batch_loop) now true:
         assert!(rec.unique_ips() >= 50 && rec.total_rps >= 100);
+    }
+
+    /// P0 regression (sparse swarm deadlock): 60 hosts x 1 event in one /24.
+    /// `agg.count` (1) is below `promote_min_events` (8) for every host, so the
+    /// old gate (`count < min && !subnet_hot && !bloom_hit`) cold-skipped all
+    /// of them BEFORE `merge_subnet_window` could accumulate host cardinality —
+    /// subnet_hot could never become true. `swarm_hint` reads in-batch host
+    /// cardinality, so the same batch now promotes every participant.
+    #[test]
+    fn swarm_hint_promotes_sparse_hosts_in_one_slash24() {
+        let eng = engine();
+        let events: Vec<_> = (1..=60u8)
+            .map(|h| ev_at(IpAddr::V4(Ipv4Addr::new(203, 0, 113, h)), 1))
+            .collect();
+        eng.flush_events(&events);
+        let stored = (1..=60u8)
+            .filter(|h| {
+                eng.store
+                    .get(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, *h)))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            stored, 60,
+            "swarm_hint must promote every host once in-batch hosts >= threshold"
+        );
+        // And the subnet window must actually carry the swarm signal.
+        let sk = subnet_key_u128(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))).unwrap();
+        let rec = eng.store.subnet_table().get(&sk).unwrap();
+        assert_eq!(rec.unique_ips(), 60, "60 distinct hosts in the /24 bitmap");
+    }
+
+    /// Same swarm shape, but spread so each host sends ONE event in its own
+    /// flush: in-batch cardinality is 1 per batch, so the promote gate must
+    /// fall through to the cumulative store dual gate (leg 3) — the store was
+    /// seeded by earlier flushes of the same /24.
+    #[test]
+    fn swarm_hint_reads_store_dual_gate_across_flushes() {
+        let eng = engine();
+        let net_ip = |h: u8| IpAddr::V4(Ipv4Addr::new(198, 18, 7, h));
+        // First flush: 55 hosts x 2 events = 110 events — passes the store
+        // dual gate (>=50 uniq, >=100 events) on its own in-batch legs.
+        let seed: Vec<_> = (1..=55u8)
+            .flat_map(|h| (0..2u64).map(move |i| ev_at(net_ip(h), i)))
+            .collect();
+        eng.flush_events(&seed);
+        let sk = subnet_key_u128(net_ip(1)).unwrap();
+        // Scope the DashMap guard: holding it across `flush_events` would
+        // self-deadlock on the same shard (Phase A takes the write lock).
+        let (uniq, rps) = {
+            let rec = eng.store.subnet_table().get(&sk).unwrap();
+            (rec.unique_ips(), rec.total_rps)
+        };
+        assert!(
+            uniq >= 50 && rps >= 100,
+            "seed must arm the store dual gate"
+        );
+        // Second flush: one brand-new host, one event — below promote_min, but
+        // the /24 already satisfies the dual gate in the store.
+        let late = ev_at(net_ip(200), 3);
+        eng.flush_events(&[late]);
+        assert!(
+            eng.store.get(&net_ip(200)).is_some(),
+            "store dual gate must promote a late sparse host into a hot /24"
+        );
     }
 
     /// F1: window rollover de-arms — quiet subnet resets both counters.
