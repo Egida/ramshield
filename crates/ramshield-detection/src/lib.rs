@@ -12,7 +12,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use dashmap::DashMap;
 use ramshield_config::{ConfigHandle, DetectionConfig};
 use ramshield_metrics::Metrics;
-use ramshield_storage::{BlockState, IpRecord, Store, SubnetKey, Value, subnet_key_u128};
+use ramshield_storage::{BlockState, IpRecord, Store, SubnetKey, subnet_key_u128};
 use ramshield_types::BlockReason;
 use ramshield_types::{ConnectionEvent, EnforceAction, EnforceCommand, IpNetwork};
 use rate_tracker::{
@@ -1042,42 +1042,42 @@ impl DetectionEngine {
                 }
             }
 
+            // One subnet decision, one owner. The SHM rule, CGNAT tier, and
+            // history row are subnet-level facts — each emitted ONCE, not
+            // once per member host. (The former member loop repeated all of
+            // them N times with the same subnet key, so a single /24
+            // decision reported N blocks and N history rows for hosts that
+            // were never individually blocked.)
+            self.metrics.inc_cgnat_classify();
+            match subnet_tier {
+                ramshield_cgnat::CGNAT_TIER_ALLOW => self.metrics.inc_cgnat_allow(),
+                ramshield_cgnat::CGNAT_TIER_CHALLENGE => self.metrics.inc_cgnat_challenge(),
+                ramshield_cgnat::CGNAT_TIER_XDP_DROP => self.metrics.inc_cgnat_powdrop(),
+                ramshield_cgnat::CGNAT_TIER_BLOCK => self.metrics.inc_cgnat_block(),
+                _ => {} // ponytail: future tiers — no crash, just don't count
+            }
             let shm_key = match cidr.addr {
                 std::net::IpAddr::V4(network) => {
                     ramshield_cgnat::shm::subnet_key(u32::from(network), cidr.prefix_len)
                 }
                 std::net::IpAddr::V6(_) => sk as u64,
             };
-            let ips_in_subnet = self
-                .store
-                .get_ips_in_subnet_windowed(sk, 2 * 1_000_000_000, now);
-            for key in ips_in_subnet {
-                if let Some(e) = self.store.inner().get(&key)
-                    && let Value::IpRecord(ref r) = e.value().value
-                {
-                    let tier = subnet_tier;
-                    self.metrics.inc_cgnat_classify();
-                    match tier {
-                        ramshield_cgnat::CGNAT_TIER_ALLOW => self.metrics.inc_cgnat_allow(),
-                        ramshield_cgnat::CGNAT_TIER_CHALLENGE => self.metrics.inc_cgnat_challenge(),
-                        ramshield_cgnat::CGNAT_TIER_XDP_DROP => self.metrics.inc_cgnat_powdrop(),
-                        ramshield_cgnat::CGNAT_TIER_BLOCK => self.metrics.inc_cgnat_block(),
-                        _ => {} // ponytail: future tiers — no crash, just don't count
-                    }
-                    if tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
-                        self.shm_table.publish_rule(
-                            shm_key,
-                            cfg.detection.subnet_burst_ttl_secs * 1000,
-                            tier,
-                            0,
-                            true,
-                        );
-                        self.metrics.inc_shm_publish();
-                    }
-                    self.metrics
-                        .record_block_ip(&r.ip, "subnet_batch", "detection");
-                    self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
-                }
+            if subnet_tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
+                self.shm_table.publish_rule(
+                    shm_key,
+                    cfg.detection.subnet_burst_ttl_secs * 1000,
+                    subnet_tier,
+                    0,
+                    true,
+                );
+                self.metrics.inc_shm_publish();
+            }
+            if subnet_tier == ramshield_cgnat::CGNAT_TIER_BLOCK {
+                // The decision, in operator history — one row keyed by the
+                // network address. blocks_subnet was already counted when the
+                // enforcement command was accepted above (no double count).
+                self.metrics
+                    .record_block_ip(&cidr.addr, "subnet_batch", "detection");
             }
             self.store.reset_subnet_window(sk);
         }
@@ -1095,6 +1095,7 @@ fn now_ns() -> u64 {
 mod tests {
     use super::*;
     use ramshield_config::Config;
+    use ramshield_storage::Value;
     use std::net::Ipv4Addr;
 
     fn engine() -> Arc<DetectionEngine> {
@@ -1546,6 +1547,66 @@ mod tests {
         let sk = subnet_key_u128(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))).unwrap();
         let rec = eng.store.subnet_table().get(&sk).unwrap();
         assert_eq!(rec.unique_ips(), 60, "60 distinct hosts in the /24 bitmap");
+    }
+
+    /// One CIDR decision, one owner: a /24 swarm is ONE subnet block, not N
+    /// member blocks. The member loop used to publish an identical SHM rule,
+    /// count a CGNAT classification, write a phantom block-history row and
+    /// bump `blocks_subnet` for every host in the subnet — so a single
+    /// decision reported 60 blocks and 60 history rows for hosts that were
+    /// never individually blocked (check_ip correctly reads them clean).
+    #[test]
+    fn subnet_decision_is_one_block_not_one_per_member() {
+        // Hand-built engine: the shared `engine()` helper drops its receiver,
+        // so `try_send` fails there and the decision path can never commit.
+        // This test must own a LIVE receiver to exercise a real decision.
+        let cfg = Config::default().into_handle();
+        let store = Arc::new(Store::new(16));
+        let metrics = Arc::new(Metrics::new());
+        let (etx, mut erx) = mpsc::channel(64);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let eng = Arc::new(DetectionEngine::new(store, cfg, etx, metrics, shutdown));
+        // CGNAT_TIER_BLOCK needs hosts > 64 AND rate > 50_000, so the
+        // enforcement command is actually emitted: 65 hosts x 800 = 52_000.
+        let t = now_ns();
+        let events: Vec<_> = (1..=65u8)
+            .flat_map(|h| {
+                let ip = IpAddr::V4(Ipv4Addr::new(172, 16, 30, h));
+                (0..800).map(move |i| ev_at(ip, t + i))
+            })
+            .collect();
+        eng.flush_events(&events);
+        eng.subnet_batch_scan();
+
+        // Exactly one enforcement command for the whole /24.
+        let cmd = erx.try_recv().expect("one CIDR block command");
+        assert!(cmd.cidr.is_some(), "the decision is a CIDR block");
+        assert!(
+            erx.try_recv().is_err(),
+            "a single /24 must not emit one command per member host"
+        );
+
+        let blocks = eng.metrics.blocks_subnet.load(Ordering::Relaxed);
+        assert_eq!(
+            blocks, 1,
+            "one CIDR decision must be one block, not one per member host"
+        );
+        let history = eng.metrics.get_block_log();
+        assert_eq!(
+            history.len(),
+            1,
+            "block history must hold the decision, not a phantom row per member"
+        );
+        assert_eq!(
+            eng.metrics.cgnat_classify_ticks.load(Ordering::Relaxed),
+            1,
+            "classification is a subnet-level property — once per decision"
+        );
+        assert_eq!(
+            eng.metrics.shm_publish_count.load(Ordering::Relaxed),
+            1,
+            "one SHM rule for the subnet, not one per member"
+        );
     }
 
     /// Same swarm shape, but spread so each host sends ONE event in its own
