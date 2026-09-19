@@ -261,6 +261,16 @@ pub struct Metrics {
     pub last_batch_events: Arc<AtomicU64>,
     pub last_batch_promoted: Arc<AtomicU64>,
     pub last_batch_blocks: Arc<AtomicU64>,
+    /// Bloom advisory-cache observability (Patch A). The bloom is a revisit
+    /// cache for *promoted* IPs, not a block list, so its fill must be
+    /// measurable: `bloom_inserts_epoch` counts distinct promotes since the
+    /// last 8s clear; `bloom_fp_ppm` is derived in render_prometheus from
+    /// n and m (k=2). FP only ever OPENS the promote gate (over-promote),
+    /// never rejects — so an over-full bloom is a tuning signal, not an
+    /// outage.
+    pub bloom_bits: Arc<AtomicU64>,
+    pub bloom_inserts_epoch: Arc<AtomicU64>,
+    pub bloom_clears_total: Arc<AtomicU64>,
     pub last_batch: Arc<Mutex<Option<Arc<BatchRecord>>>>,
     pub batch_history: Arc<Mutex<VecDeque<Arc<BatchRecord>>>>,
     pub block_log: Arc<Mutex<VecDeque<BlockRecord>>>,
@@ -334,6 +344,9 @@ impl Metrics {
             last_batch_events: Arc::new(AtomicU64::new(0)),
             last_batch_promoted: Arc::new(AtomicU64::new(0)),
             last_batch_blocks: Arc::new(AtomicU64::new(0)),
+            bloom_bits: Arc::new(AtomicU64::new(0)),
+            bloom_inserts_epoch: Arc::new(AtomicU64::new(0)),
+            bloom_clears_total: Arc::new(AtomicU64::new(0)),
             last_batch: Arc::new(Mutex::new(None)),
             batch_history: Arc::new(Mutex::new(VecDeque::with_capacity(HISTORY))),
             block_log: Arc::new(Mutex::new(VecDeque::with_capacity(block_log_size.max(1)))),
@@ -366,6 +379,26 @@ impl Metrics {
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
     pub fn inc_shed(&self, n: u64) {
         self.events_shed.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Patch A: total bloom capacity in bits (gauge). Written once at
+    /// detection construction; `bloom_fp_ppm` is derived from it at render.
+    pub fn set_bloom_bits(&self, bits: u64) {
+        self.bloom_bits.store(bits, Ordering::Relaxed);
+    }
+
+    /// Patch A: add this flush's distinct promotes to the current epoch.
+    /// `n` is the promoted count, NOT the block count — the bloom tracks
+    /// promoted IPs so a promote-without-block host is still revisitable.
+    pub fn record_bloom_inserts(&self, n: u64) {
+        self.bloom_inserts_epoch.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Patch A: 8s bloom epoch ended. Zero the insert counter so
+    /// `bloom_fp_ppm` returns to 0, and bump the clears counter.
+    pub fn bloom_epoch_clear(&self) {
+        self.bloom_inserts_epoch.store(0, Ordering::Relaxed);
+        self.bloom_clears_total.fetch_add(1, Ordering::Relaxed);
     }
     /// Gauge: bounded ingest-queue occupancy. Written by the engine snapshot
     /// path (dashboard refresh + SSE), same source value on both writers.
@@ -777,6 +810,45 @@ impl Metrics {
             "Blocks from forecasting.",
             "counter"
         ));
+        // Patch A: bloom is an advisory revisit cache over PROMOTED ips (not
+        // a block list). n = distinct promotes this 8s epoch, m = capacity in
+        // bits. FP is estimated with k=2 (two hash slots per insert):
+        //   p = (1 - e^(-2n/m))^2
+        // Reported in ppm because at production n/m the useful values are
+        // tiny; a percentage would round to 0.000.
+        let bloom_bits = self.bloom_bits.load(Ordering::Relaxed);
+        let bloom_n = self.bloom_inserts_epoch.load(Ordering::Relaxed);
+        let bloom_fp_ppm = if bloom_bits == 0 {
+            0u64
+        } else {
+            let ratio = 2.0 * bloom_n as f64 / bloom_bits as f64;
+            let p = (1.0 - (-ratio).exp()).powi(2);
+            (p * 1_000_000.0) as u64
+        };
+        out.push_str(&emit!(
+            "ramshield_bloom_bits",
+            bloom_bits,
+            "Bloom filter capacity in bits (m).",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_bloom_inserts_epoch",
+            bloom_n,
+            "Distinct promoted IPs inserted into the bloom since the last clear (n).",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_bloom_clears_total",
+            self.bloom_clears_total.load(Ordering::Relaxed),
+            "Bloom epoch clears (advisory cache resets).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_bloom_fp_ppm",
+            bloom_fp_ppm,
+            "Estimated bloom false-positive rate in parts per million (k=2).",
+            "gauge"
+        ));
         out.push_str(&emit!(
             "ramshield_forecast_ticks",
             self.forecast_ticks.load(Ordering::Relaxed),
@@ -1090,6 +1162,92 @@ mod cache_tests {
         assert!(text.contains("# TYPE ramshield_ingest_channel_depth gauge"));
         assert!(text.contains("ramshield_active_cidr_blocks 7"));
         assert!(text.contains("# TYPE ramshield_active_cidr_blocks gauge"));
+    }
+
+    /// Patch A: the bloom gauges must exist and be wired to their writers.
+    /// Series absent = operators are blind to bloom fill, which is the whole
+    /// point of the patch.
+    #[test]
+    fn prometheus_renders_bloom_series() {
+        let m = Metrics::new();
+        m.set_bloom_bits(8_000_000);
+        m.record_bloom_inserts(1_000);
+        let text = m.render_prometheus();
+        for name in [
+            "ramshield_bloom_bits",
+            "ramshield_bloom_inserts_epoch",
+            "ramshield_bloom_clears_total",
+            "ramshield_bloom_fp_ppm",
+        ] {
+            assert!(
+                text.contains(&format!("# TYPE {name}")),
+                "missing Prometheus series {name}"
+            );
+        }
+        assert!(text.contains("ramshield_bloom_bits 8000000"));
+        assert!(text.contains("ramshield_bloom_inserts_epoch 1000"));
+    }
+
+    /// Patch A: FP estimate is k=2 -> p = (1 - e^(-2n/m))^2, in ppm.
+    /// Pins the arithmetic: a wrong exponent silently reports a plausible
+    /// but meaningless number.
+    #[test]
+    fn bloom_fp_ppm_matches_k2_formula() {
+        let m = Metrics::new();
+        m.set_bloom_bits(1_000_000);
+        m.record_bloom_inserts(10_000);
+        let text = m.render_prometheus();
+        let got: f64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("ramshield_bloom_fp_ppm "))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("bloom_fp_ppm must be present and numeric");
+        let ratio: f64 = 2.0 * 10_000.0 / 1_000_000.0;
+        let want = (1.0 - (-ratio).exp()).powi(2) * 1_000_000.0;
+        assert!(
+            (got - want).abs() <= 1.0,
+            "fp_ppm {got} must match k=2 formula {want}"
+        );
+    }
+
+    /// Patch A: an epoch clear zeroes n and therefore fp_ppm, and bumps the
+    /// clear counter. Without the reset the gauge reports the peak fill of a
+    /// filter that no longer holds those entries — a permanent false alarm.
+    #[test]
+    fn bloom_epoch_clear_resets_n_and_fp() {
+        let m = Metrics::new();
+        m.set_bloom_bits(8_000_000);
+        m.record_bloom_inserts(50_000);
+        assert!(
+            m.render_prometheus()
+                .contains("ramshield_bloom_inserts_epoch 50000")
+        );
+        m.bloom_epoch_clear();
+        let text = m.render_prometheus();
+        assert!(
+            text.contains("ramshield_bloom_inserts_epoch 0"),
+            "clear must zero the epoch insert count"
+        );
+        assert!(
+            text.contains("ramshield_bloom_fp_ppm 0"),
+            "fp must return to 0 after clear"
+        );
+        assert!(
+            text.contains("ramshield_bloom_clears_total 1"),
+            "clear counter must increment"
+        );
+    }
+
+    /// Patch A: an unset bloom capacity must not divide by zero or emit NaN.
+    #[test]
+    fn bloom_fp_ppm_is_zero_when_capacity_unset() {
+        let m = Metrics::new();
+        m.record_bloom_inserts(1_000);
+        let text = m.render_prometheus();
+        assert!(
+            text.contains("ramshield_bloom_fp_ppm 0"),
+            "no capacity => no denominator => report 0, never NaN"
+        );
     }
 }
 
