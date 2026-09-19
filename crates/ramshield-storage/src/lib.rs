@@ -359,6 +359,12 @@ impl Store {
         self.subnet_table
             .entry(key)
             .and_modify(|rec| {
+                // NTP step guard: the clock regressed (wall `now_ns()` is
+                // non-monotonic). Never let a stepped-back timestamp set the
+                // baseline — elapsed stays 0 (no early reset, no freeze),
+                // events still accumulate, and the high-water baseline keeps
+                // the window expiring on real forward time.
+                let now_ns = now_ns.max(rec.last_updated_ns);
                 if now_ns.saturating_sub(rec.last_updated_ns) > WINDOW_NS {
                     rec.total_rps = 0;
                     rec.host_bitmap = [0; 4];
@@ -997,6 +1003,36 @@ mod tests {
             "stale swarm signal must not survive past the window"
         );
         assert_eq!(rec.total_rps, 3);
+    }
+
+    /// NTP backward step: a merge stamped BEFORE the previous one must not
+    /// regress the window baseline. The baseline stays at the high-water
+    /// mark (events still count — no reset, no loss), and the window still
+    /// expires on a later forward timestamp.
+    #[test]
+    fn subnet_window_clock_step_backwards_keeps_baseline() {
+        let store = Store::new(16);
+        let t0 = 10_000_000_000u64;
+        let mk = |o: u8| IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, o));
+        let any = mk(1);
+        let net = IpNetwork::of_ip(any);
+        let sk = subnet_key_u128(any).unwrap();
+
+        let hosts: Vec<IpAddr> = (1..=30u8).map(mk).collect();
+        store.merge_subnet_window(sk, net, 60, Some(&hosts), t0);
+        // Clock steps back 4s (≈ one window): the window must NOT reset on
+        // this merge (decay = 0, not "window just started"), and the
+        // baseline must NOT regress to the stepped timestamp.
+        let stepped = t0 - 4_000_000_000;
+        store.merge_subnet_window(sk, net, 60, Some(&[mk(200)]), stepped);
+        let rec = store.subnet_table().get(&sk).unwrap();
+        assert_eq!(rec.last_updated_ns, t0, "clock step must not regress the baseline");
+        assert_eq!(rec.total_rps, 120, "stepped merge must accumulate, not reset or drop events");
+        drop(rec);
+        // Forward time must still expire the window.
+        store.merge_subnet_window(sk, net, 3, Some(&[mk(201)]), t0 + SUBNET_WINDOW_NS + 1_000_000_000);
+        let rec = store.subnet_table().get(&sk).unwrap();
+        assert_eq!(rec.total_rps, 3, "window must expire normally after the step");
     }
 
     /// Test helper: create an IpRecord with `block_state = Blocked`.
