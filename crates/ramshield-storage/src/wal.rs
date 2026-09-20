@@ -417,12 +417,12 @@ impl Wal {
                             // <= MAX_RECORD_SIZE raw (append enforces it pre-
                             // and post-compression), so a larger declared
                             // decompressed size is corruption or an attack.
-                            let declared = payload
-                                .get(..4)
-                                // ponytail: invariant — get(..4) guarantees exactly 4 bytes,
-                                // so TryInto<[u8; 4]> is provably infallible. Unwrap is safe.
-                                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-                                .unwrap_or(usize::MAX);
+                            // `first_chunk` gives Option<&[u8; 4]> — a total conversion, no
+                            // fallible TryInto and no unwrap on the hot replay path.
+                            let declared = match payload.first_chunk::<4>() {
+                                Some(b) => u32::from_le_bytes(*b) as usize,
+                                None => usize::MAX,
+                            };
                             if declared > MAX_RECORD_SIZE {
                                 warn!(
                                     "WAL record claims {declared} decompressed bytes \
