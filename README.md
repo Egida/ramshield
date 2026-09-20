@@ -1,77 +1,151 @@
 # RamShield
 
-Kernel-assisted IP/CIDR enforcement with bounded-memory traffic detection, a local control API, WAL-backed state, and an operator dashboard.
-
-Status: controlled single-node pilot. The production-readiness review still lists external-exposure, supervision, capacity, OCI, and operational gaps. Do not treat this repository as a turnkey internet-facing deployment.
+**Kernel-assisted DDoS defense.** Detects flooding IPs and subnets in bounded memory, drops their traffic at the eBPF/XDP dataplane — before it reaches your application.
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
-[![CI](https://img.shields.io/badge/CI-review%20pipeline-blue?logo=githubactions)](https://github.com/grep999/ramshield/actions)
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](LICENSE)
+[![XDP/eBPF](https://img.shields.io/badge/eBPF-XDP-4f8ef7?logo=linux)](https://prototype-kernel.readthedocs.io/en/latest/bpf/)
+[![Version](https://img.shields.io/badge/version-0.2.0--rc6-2ea44f)](https://github.com/grep999/ramshield/releases)
+[![CI](https://img.shields.io/badge/CI-review%20pipeline-6a737d?logo=githubactions)](https://github.com/grep999/ramshield/actions)
+[![Tests](https://img.shields.io/badge/tests-273%20passed%2C%200%20failed-2ea44f)](https://github.com/grep999/ramshield/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## What it does
+## Table of Contents
 
-RamShield separates telemetry ingestion, detection, enforcement, and observation:
+- [What Is RamShield?](#what-is-ramshield)
+- [Use Cases](#use-cases)
+- [Why RamShield?](#why-ramshield)
+- [Features](#features)
+- [How It Works](#how-it-works)
+- [Quick Start](#quick-start)
+- [Command Line](#command-line)
+- [IPC Protocol](#ipc-protocol)
+- [Dashboard & API](#dashboard--api)
+- [Configuration](#configuration)
+- [Performance](#performance)
+- [Testing](#testing)
+- [Known Boundaries](#known-boundaries)
+- [Repository Layout](#repository-layout)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
 
-- Ingests single or batched connection reports over a JSON/TCP IPC protocol.
-- Tracks IPv4 `/24` and IPv6 `/64` subnet activity with bounded structures.
-- Detects per-IP and subnet anomalies using EWMA/forecasting, rate windows, pulse-wave detection, and dual-gate swarm detection.
-- Applies temporary IP blocks and CIDR blocks.
-- Loads IPv4/IPv6 block prefixes into the eBPF/XDP dataplane when XDP is enabled.
-- Persists enforcement state in a compressed, checksummed WAL and replays it at startup.
-- Exposes health, metrics, snapshots, history, active blocks, subnet traffic, module status, configuration, and an SSE stream.
-- Serves a browser dashboard through Axum.
-- Keeps XDP optional: the daemon can run in no-XDP/degraded mode for local integration and development.
+## What Is RamShield?
 
-## Current release facts
+RamShield is a Rust daemon that separates telemetry ingestion, anomaly detection, enforcement, and observation into one bounded pipeline:
 
-| Item | Current value |
+1. **Ingest** — connection reports arrive over an authenticated JSON/TCP IPC protocol, single or batched.
+2. **Detect** — EWMA rate windows, Holt-Winters forecasting, pulse-wave detection, and dual-gate subnet swarms run in bounded, sharded memory. Stealth profiles (Slowloris, sub-threshold ramps) stay under the tripwire by design.
+3. **Enforce** — offending IPs and CIDRs get temporary blocks, pushed into eBPF/XDP maps so the kernel drops packets on the wire.
+4. **Observe** — a browser dashboard, Prometheus `/metrics`, an SSE event stream, and a WAL-backed state that survives crashes.
+
+It is a **controlled single-node pilot**, not a turnkey internet-facing product. See [Known Boundaries](#known-boundaries) for what this build does not yet claim.
+
+## Use Cases
+
+| Scenario | How RamShield Helps |
 |---|---|
-| Workspace version | `0.2.0` |
-| Rust edition | 2024 |
-| Workspace crates | 13 |
-| Rust tests listed | 257 (244 passed, 13 ignored) |
-| Final integration suite | 48/48 passed (`scripts/final_integration.py`) |
-| Review pipeline | Passed: format, check, Clippy `-D warnings`, tests, metric validation |
-| WAL restart test | Passed: one live IP block restored after SIGKILL/restart |
-| CIDR XDP verification | 919,408/919,408 packets dropped for `203.0.113.0/24` |
-| CIDR test rate | 114,926 packets/s in the isolated netns test |
-| Production-like smoke | Passed on isolated ports; live daemon left untouched |
+| L7 HTTP flood / DDoS | Per-IP EWMA threshold crossing triggers kernel-level drops in ~108 ms (warm) |
+| Distributed botnet swarm | Dual-gate /24 detection: 50 unique source IPs + 100 events in a 2 s window → subnet block |
+| Credential stuffing / API abuse | Configurable per-IP RPS tripwire with automatic temporary blocks (TTL-based) |
+| Evasion & pulse-wave attacks | Forecast-driven entropy anomaly detection catches ramp-and-burst profiles |
+| Legitimate traffic protection | 0.0000% false-positive rate measured over 200 benign-IP probes (see [Performance](#performance)) |
 
-The packet figure is an isolated verification result, not a universal throughput guarantee. Hardware, driver, XDP mode, kernel, packet size, and configuration change capacity.
+## Why RamShield?
 
-## Architecture
+| Factor | Typical hand-rolled approach | RamShield |
+|---|---|---|
+| Detection state | `Mutex<HashMap<IP, Counter>>` — lock contention, unbounded growth | 256 ahash shards, capped tracked set with cold-entry eviction |
+| Enforcement | Userspace loop parsing logs, then `iptables` | eBPF/XDP maps — kernel drops packets before the socket layer |
+| Crash safety | In-memory blocks lost on restart | Compressed, checksummed WAL with fsync/group-commit durability, replayed at boot |
+| Observability | Sparse logs | Dashboard, Prometheus metrics, SSE stream, full block/batch history |
+| Attack awareness | Fixed threshold or human paging | EWMA + Holt-Winters + entropy anomaly + pulse-wave detection |
+| False positives | Frequent — one noisy client blocks a subnet | Subnet blocking keys on distinct source IPs; benign traffic measured at 0 FPR |
+| Verification | "Works on my box" | 286-test workspace suite + isolated netns XDP drop verification |
+
+## Features
+
+- **Bounded-memory detection** — 8 GiB budget, sharded pre-aggregator, 0.0004% RAM growth per million events at the 21.3 M-event benchmark.
+- **eBPF/XDP dataplane** — IPv4 + IPv6 block prefixes loaded into kernel maps with longest-prefix matching; XDP optional, daemon degrades to userspace blocking.
+- **WAL-backed enforcement** — enforcement state survives `SIGKILL`; verified restore of live blocks on restart, shared-backend WAL planned for GA.
+- **Authenticated IPC** — HMAC-SHA256 per-frame signing (key rotation-ready `key_id`), clock-skew window ±10 s, `deny_unknown_fields` so typos fail loudly.
+- **Argon2-protected dashboard** — admin password hash, session-cookie middleware, CSRF-checked config POST.
+- **Forecast-driven detection stack** — EWMA α=0.3, Holt-Winters β=γ=0.1 (seasonality 60 s, z=3.0), SPOT-lite extreme-quantile alarms, CUSUM with debounce.
+- **Operator CLI** — zero-dependency `ramshield-cli` binary for check/block/unblock/status.
+- **Container-ready** — `Containerfile` for OCI builds.
+
+## How It Works
 
 ```text
 reverse proxy / client telemetry
               |
               v
-       JSON/TCP IPC server
+    JSON/TCP IPC server  (HMAC-SHA256 authed)
               |
               v
-   bounded ingest + pre-aggregation
+  bounded ingest + sharded pre-aggregation (256 shards)
               |
               v
- detection: IP, /24, /64, forecast, swarm
+ detection: EWMA / Holt-Winters / pulse-wave / dual-gate swarm
               |
        +------+------+
        |             |
        v             v
-     WAL       enforcement
-                     |
-          +----------+----------+
-          |                     |
-          v                     v
-   shared runtime state     eBPF/XDP maps
-   and dashboard APIs       IP/CIDR drops
+     WAL      enforcement
+                   |
+        +----------+----------+
+        |                     |
+        v                     v
+ shared runtime state    eBPF/XDP maps
+ and dashboard APIs      IP/CIDR drops
 ```
 
-XDP is an enforcement boundary, not the detector. Detection decisions originate in userspace, then enforcement updates the kernel maps. Without XDP, userspace blocking and dashboard/API behavior remain available; the kernel drop path does not.
+**XDP is an enforcement boundary, not the detector.** Detection decisions originate in userspace; enforcement then updates the kernel maps. Without XDP, userspace blocking and all dashboard/API behavior remain available — only the kernel drop path is absent.
 
-## Enforcement
+## Quick Start
 
-The IPC request contract is defined in [`crates/ramshield-protocol/src/message.rs`](crates/ramshield-protocol/src/message.rs).
+Requirements: Linux, a recent **nightly** Rust toolchain ([`rust-toolchain.toml`](rust-toolchain.toml) pins it; `rust-src` is needed for the eBPF build), and a locked dependency tree. The XDP path additionally needs `CAP_NET_ADMIN`, `CAP_BPF`, and `CAP_PERFMON`.
 
-Supported requests include:
+```bash
+git clone https://github.com/grep999/ramshield.git
+cd ramshield
+
+# Review gate (fmt, clippy -D warnings, full test suite)
+scripts/review_pipeline.sh
+
+# Release binary (full feature set: tokio, dashboard, XDP)
+cargo build --release --locked --features full
+
+# Run (loopback, no XDP) — copy and edit the config first
+cp config.prod.toml.example config.prod.toml
+./target/release/ramshield --config config.prod.toml
+```
+
+`config.prod.toml.example` is **fail-closed**: it binds `0.0.0.0` and `Config::validate()` refuses to start until you set an Argon2 dashboard password hash and an IPC HMAC key. Keep listeners on loopback or behind a trusted authenticated transport during development. Never commit the secret-bearing config.
+
+For host-NIC XDP, set `[xdp].enabled = true`, pick the interface and mode, and run with the required capabilities. Verify `xdp_active` via `/healthz` or `/api/snapshot`.
+
+## Command Line
+
+The daemon ships with a companion CLI ([`src/cli.rs`](src/cli.rs)) that speaks the IPC protocol:
+
+```text
+ramshield-cli [--addr 127.0.0.1:7890] [--key <hex>] <COMMAND>
+
+Commands:
+  check <ip>              Is this IP currently blocked?
+  block <ip> [--reason manual] [--ttl <secs>]
+                          Block an IP (TTL defaults to config block_ttl_secs)
+  unblock <ip>            Remove an IP block
+  unblock-cidr <cidr>     Remove a CIDR block
+  stats                   Pipeline counters
+  status [--json]         Daemon status (pretty JSON by default)
+  info <ip>               Per-IP stats
+```
+
+Auth key comes from `RAMSHIELD_IPC_KEY` (hex) or `--key`; when set, frames are HMAC-SHA256-signed. Omitted on open/loopback servers means unsigned frames.
+
+## IPC Protocol
+
+The request contract lives in [`crates/ramshield-protocol/src/message.rs`](crates/ramshield-protocol/src/message.rs). Requests are newline-delimited JSON; unknown fields are rejected.
 
 ```json
 {"type":"check_ip","ip":"203.0.113.10"}
@@ -85,21 +159,16 @@ Supported requests include:
 {"type":"flush"}
 ```
 
-`ttl_secs` is optional. Requests reject unknown JSON fields. Batch responses report `accepted` and `rejected`; the pipeline invariant is `accepted + rejected == report_connections.events`.
+`ttl_secs` is optional. Batch responses report `accepted` and `rejected`; the pipeline invariant is `accepted + rejected == report_connections.events`.
 
-CIDR blocks use longest-prefix matching in the XDP maps. IPv4 and IPv6 prefixes are handled separately. The isolated test uses `203.0.113.0/24` so it cannot collide with the live test topology.
+## Dashboard & API
 
-## Dashboard and metrics
-
-Default production-like listeners:
-
-- IPC: `0.0.0.0:7890`
-- Dashboard: `0.0.0.0:9999`
-
-Important HTTP routes:
+Default production-like listeners: IPC `0.0.0.0:7890`, dashboard `0.0.0.0:9999`.
 
 | Route | Purpose |
 |---|---|
+| `/` | Dashboard UI |
+| `/login` | Argon2 password login |
 | `/healthz` | Health status and XDP state |
 | `/metrics` | Prometheus exposition |
 | `/api/snapshot` | Current pipeline and resource snapshot |
@@ -109,54 +178,56 @@ Important HTTP routes:
 | `/api/blocks/active` | Active blocks |
 | `/api/traffic/subnets` | Current subnet rows |
 | `/api/status/modules` | Module health/status |
-| `/api/config` | Redacted configuration; POST is CSRF-checked |
+| `/api/config` | Redacted configuration; POST is CSRF-checked and auth-gated |
 
-Public binds require configured dashboard authentication and IPC HMAC keys. Keep both services on loopback or behind a trusted authenticated transport during development.
+## Configuration
 
-## Quick start
+Config is TOML (`config.toml`, `config.prod.toml` for production-like, `config.debug.toml`, etc.). The tracked production template (`config.prod.toml.example`) baseline:
 
-Requirements: Linux, Rust 1.85+, and a locked dependency tree. XDP additionally requires the host capabilities `CAP_NET_ADMIN`, `CAP_BPF`, and `CAP_PERFMON`.
+| Setting | Value | Meaning |
+|---|---|---|
+| `engine.shard_count` | 256 | Pre-aggregator shards |
+| `engine.ram_limit_mb` | 8192 | Bounded-memory budget |
+| `detection.rps_threshold` | 5000 | Per-IP tripwire (RPS) |
+| `detection.rate_window_secs` | 10 | Rate window |
+| `detection.subnet_batch_threshold` | 50 | Unique source IPs per /24 |
+| `detection.subnet_batch_min_events` | 100 | Events/s in the 2 s window |
+| `detection.block_ttl_secs` | 300 | Default block lifetime |
+| `detection.subnet_burst_ttl_secs` | 600 | Subnet-burst block lifetime |
+| `detection.batch_window_ms` | 50 | Batch window |
+| `detection.pre_aggs_flush_interval_ms` | 100 | Pre-aggregation flush |
+| `wal.durability` | `GroupCommit` | 100 ms window, or `Fsync` for strictest |
+| `wal.compress` | `true` | zstd-compressed segments |
+| `xdp.enabled` | `false` | Fail-closed default |
+
+Full reference: [`config.prod.toml.example`](config.prod.toml.example) and [`crates/ramshield-config/src/lib.rs`](crates/ramshield-config/src/lib.rs).
+
+## Performance
+
+Verified results from [`docs/DDOS_BENCHMARK_REPORT.md`](docs/DDOS_BENCHMARK_REPORT.md): 21.3 M events across 21 attack/resilience tests (v2 industry-style + v3 RFC 9411 compliance) on a **single laptop-class host, loopback XDP (generic) mode**. Absolute numbers are machine-class-dependent; the ratios are the portable part.
+
+| Metric | Result | Conditions |
+|---|---|---|
+| False-positive rate | **0.0000%** (0/200 benign IPs) | BlackNeuron FPR test, T14 |
+| Detect → mitigate latency | **108 ms** (warm) | T20; cold start 8 s (one full window) |
+| Recovery (unblock → reflect) | **52 ms** | T15, 10 unblocks |
+| Raw IPC throughput | **135,602 events/s** | T11, 10 s, 87 transient errors |
+| Sustained single-attacker flood | **154,731 events/s** | T2, 30 s |
+| Peak burst pattern | **157,031 events/s** | T4, 3×(5 s on/off) |
+| Stealth profile (Slowloris) | **0 blocks** on 2.28 M events | T5 — sub-threshold by design |
+| RSS footprint | **44 MB flat** across 21.3 M events | §6 memory profile |
+| RAM growth | 0.0004% per million events | tracked set capped + cold entry eviction |
+| Auto-detected blocks | 137, **0 false positives** among 148 total | §5 detection pipeline |
+
+Known attack-vector gaps from the same report: background throughput degrades ~93.5% under attack (T19) and cold detection needs one full window (8 s). Both are tracked in the readiness ledger, not hidden.
+
+## Testing
 
 ```bash
-git clone https://github.com/grep999/ramshield.git
-cd ramshield
-
-# Review gate
+# Full review gate (fmt, clippy -D warnings, tests, metric validation)
 scripts/review_pipeline.sh
 
-# Release binary
-cargo build --release --locked --features full
-
-# Local/no-XDP run; copy and edit the config first
-cp config.prod.toml.example config.prod.toml
-./target/release/ramshield --config config.prod.toml
-```
-
-`config.prod.toml.example` is deliberately fail-closed for public binds. Set an Argon2 dashboard password hash and an IPC HMAC key before exposing listeners. Never commit the resulting secret-bearing config.
-
-For host-NIC XDP, set `[xdp].enabled = true`, choose the target interface and mode, then run with the required capabilities. Verify `xdp_active` through `/healthz` or `/api/snapshot`.
-
-## Configuration baseline
-
-The tracked production-like template uses:
-
-- 256 engine shards and an 8 GiB RAM budget.
-- 5,000 per-IP RPS threshold over a 10-second rate window.
-- Subnet dual gate: 50 unique IPv4 hosts and 100 events.
-- 300-second IP block TTL and 600-second subnet-burst TTL.
-- 50 ms batch window and 100 ms pre-aggregation flush interval.
-- WAL enabled with fsync durability and compression.
-- XDP disabled by default in the template; enable only after host capability and interface validation.
-
-See [`config.prod.toml.example`](config.prod.toml.example) and [`crates/ramshield-config/src/lib.rs`](crates/ramshield-config/src/lib.rs).
-
-## Verification
-
-```bash
-# Full review gate
-scripts/review_pipeline.sh
-
-# Workspace tests
+# Workspace tests — current master: 273 passed, 0 failed, 13 ignored
 cargo test --workspace --locked --features full
 
 # Isolated production-like smoke
@@ -168,38 +239,56 @@ bash scripts/prod_smoke.sh
 # Final integration suite
 python3 scripts/final_integration.py
 
-# Privileged isolated XDP/CIDR test
+# Privileged isolated XDP/CIDR drop verification (netns)
 python3 scripts/xdp_netns_sim.py --cidr 203.0.113.0/24
 ```
 
-Release procedure: [`docs/PRODUCTION_RELEASE_PROCESS.md`](docs/PRODUCTION_RELEASE_PROCESS.md). Readiness ledger: [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
+Release procedure: [`docs/PRODUCTION_RELEASE_PROCESS.md`](docs/PRODUCTION_RELEASE_PROCESS.md). Readiness ledger: [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md). Bench method and raw data: [`docs/DDOS_BENCHMARK_REPORT.md`](docs/DDOS_BENCHMARK_REPORT.md).
 
-## Known boundaries
+## Known Boundaries
 
-The current readiness review does not claim:
+The current readiness review does **not** claim:
 
-- authenticated external control without deployment-specific TLS/trusted-proxy setup;
+- authenticated external control without deployment-specific TLS / trusted-proxy setup;
 - systemd or orchestration supervision and restart policy;
 - periodic enforcement reconciliation after runtime map loss;
 - a documented capacity envelope or latency SLO;
 - a verified immutable OCI digest, signed artifact, SBOM, or rollback image;
 - general production readiness for unattended public deployment.
 
-These are release requirements, not hidden features. Keep them visible when promoting a build.
+These are release requirements, not hidden features. They are tracked in [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) and the [Roadmap](#roadmap).
 
-## Repository layout
+## Repository Layout
 
 ```text
-crates/                  workspace libraries and protocol types
-src/                     daemon, engine, IPC, dashboard, enforcement
-crates/ramshield-xdp/    userspace XDP loader and eBPF program
-scripts/                 review, smoke, integration, audit, and netns tests
-docs/                    readiness, release, metrics, and operational records
-Containerfile            OCI build definition
+src/                      daemon, engine, IPC, dashboard, enforcement, CLI
+crates/
+  ramshield-config/       TOML configuration, validation
+  ramshield-detection/    EWMA, forecasting, pulse-wave, dual-gate swarm
+  ramshield-enforcement/  block lifecycle, WAL persistence
+  ramshield-forecasting/  Holt-Winters + SPOT-lite alarm
+  ramshield-metrics/      counters and metric export
+  ramshield-protocol/     IPC wire contract
+  ramshield-storage/      sharded pre-aggregation, subnet index
+  ramshield-types/        shared types and CIDR validation
+  ramshield-xdp/          userspace XDP loader + eBPF program (aya)
+  ramshield-cgnat/        shared-memory telemetry on the CGNAT path
+  ramshield-analytics/    batch analytics
+  ramshield-mesh/         multi-instance coordination
+scripts/                  review, smoke, integration, audit, netns tests
+docs/                     readiness, release, benchmarks, roadmap
+Containerfile             OCI build definition
 ```
 
-## Contributing and security
+## Roadmap
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`DOC_STANDARD.md`](DOC_STANDARD.md) before changing the project. Report vulnerabilities through [`SECURITY.md`](SECURITY.md), not public issues.
+Tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — dated milestones, each with a verifiable outcome:
 
-License: MIT.
+- **0.2 → 0.3 (in progress)** — fuzzing & hardening: protocol fuzz coverage ≥ 90%, crash-free 10 M-iteration runs, third-party security audit, zero production `.unwrap()/.expect()`.
+- **1.0 — General Availability** — zero production unwraps, shared-backend WAL (PostgreSQL/S3), config hot-reload, documented capacity envelope, signed/immutable OCI artifacts.
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`DOC_STANDARD.md`](DOC_STANDARD.md) before changing the project. Report vulnerabilities through [`SECURITY.md`](SECURITY.md), not public issues. Changelog: [`CHANGELOG.md`](CHANGELOG.md).
+
+License: [MIT](LICENSE).
