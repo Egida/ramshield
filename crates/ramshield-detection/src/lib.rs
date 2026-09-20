@@ -443,11 +443,13 @@ impl DetectionEngine {
         ev: &ConnectionEvent,
         emergency_threshold: u32,
     ) {
-        let before = local.get(&ev.ip).map(|a| a.count).unwrap_or(0);
-        local.entry(ev.ip).or_default().absorb(ev);
-        let after = local[&ev.ip].count;
-        if emergency_threshold > 0 && before < emergency_threshold && after >= emergency_threshold {
-            self.emit_emergency_block(ev.ip, after);
+        let a = local.entry(ev.ip).or_default();
+        a.absorb(ev);
+        // `count` increments by exactly 1 per event, so it crosses the threshold
+        // at exactly `count == threshold` — one lookup, and it can only be true
+        // once per window (one-shot, no per-IP flag needed).
+        if emergency_threshold > 0 && a.count == emergency_threshold {
+            self.emit_emergency_block(ev.ip, a.count);
         }
     }
 
