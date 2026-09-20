@@ -33,4 +33,4 @@ Human-readable overview of the autonomous agent fleet. Updated by the reviewer a
 
 Uncommitted diff in `src/dashboard/auth.rs`: 2 prod `.unwrap()` → `.expect()` with ponytail comments (lines 148, 187). Ready to commit.
 
-Full detail: [`REVIEW.md`](REVIEW.md) · [`AGENT_REPORT.md`](AGENT_REPORT.md) · [`DEPENDENCY_AUDIT.md`](DEPENDENCY_AUDIT.md) · Dashboard: [`AUTOMATION_DASHBOARD.html`](AUTOMATION_DASHBOARD.html) · Raw data: `docs/FACTS.json` · Fleet snapshot: `docs/CRON_STATUS.json`
+Full detail: [`REVIEW.md`](REVIEW.md) · [`AGENT_REPORT.md`](AGENT_REPORT.md) · [`DEPENDENCY_AUDIT.md`](DEPENDENCY_AUDIT.md) · Raw data: `docs/FACTS.json` · Fleet snapshot: `docs/CRON_STATUS.json`
