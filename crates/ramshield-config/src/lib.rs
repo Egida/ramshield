@@ -84,6 +84,13 @@ pub struct DetectionConfig {
     /// /24 event count in one window that lowers promotion threshold for that subnet.
     #[serde(default = "default_subnet_window_threshold")]
     pub subnet_window_threshold: u64,
+    /// Per-IP emergency burst gate: when one IP emits this many events in a
+    /// single unflushed detection window (~pre_aggs_flush_interval), the
+    /// worker emits an in-flight block immediately instead of waiting for
+    /// the periodic flush (50-1000ms of uninhibited traffic otherwise).
+    /// 0 disables the fast path (flush-only detection).
+    #[serde(default = "default_emergency_burst_threshold")]
+    pub emergency_burst_threshold: u32,
     /// Max unique IPs in the pre-aggregation buffer before flushing to main store.
     #[serde(default = "default_pre_aggs_max_size")]
     pub pre_aggs_max_size: usize,
@@ -119,6 +126,9 @@ fn default_pre_aggs_max_size() -> usize {
 fn default_pre_aggs_flush_interval_ms() -> u64 {
     1000
 }
+fn default_emergency_burst_threshold() -> u32 {
+    500
+}
 
 impl Default for DetectionConfig {
     fn default() -> Self {
@@ -137,6 +147,7 @@ impl Default for DetectionConfig {
             batch_window_ms: default_batch_window_ms(),
             promote_min_events: default_promote_min(),
             subnet_window_threshold: default_subnet_window_threshold(),
+            emergency_burst_threshold: default_emergency_burst_threshold(),
             pre_aggs_max_size: default_pre_aggs_max_size(),
             pre_aggs_flush_interval_ms: default_pre_aggs_flush_interval_ms(),
         }
