@@ -444,8 +444,21 @@ async fn handle_connection(
                 match parse_ipc_keys(&cfg) {
                     Ok(k) => k,
                     Err(e) => {
-                        debug!("parse_ipc_keys failed: {e}; rejecting frame");
-                        continue;
+                        // Fail closed AND answer the client. The old path
+                        // `debug!(..); continue;` dropped the frame silently,
+                        // leaving the client blocked on a read that never comes
+                        // while the fault (bad keys in a swapped-in config) was
+                        // invisible at default log level.
+                        error!(error = %e, "IPC auth keys invalid in live config — closing connection");
+                        let resp = Response::Error {
+                            code: 500,
+                            message: "internal configuration error: invalid auth state".into(),
+                        };
+                        let _ =
+                            timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
+                        return Err(std::io::Error::other(format!(
+                            "invalid runtime auth keys: {e}"
+                        )));
                     }
                 }
             };
