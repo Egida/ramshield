@@ -109,6 +109,11 @@ impl ShmTableManager {
         // Seqlock publication: odd means a reader must retry; the final even
         // Release publishes the complete rule as one coherent snapshot.
         slot.seq.fetch_add(1, Ordering::Relaxed);
+        // The odd marker must be globally visible before the payload stores
+        // (Relaxed alone lets them overtake it on ARM64, so a reader can see
+        // a half-published entry with before == after and accept the tear).
+        // Pairs with the C reader's acquire fence before its second seq load.
+        std::sync::atomic::fence(Ordering::Release);
         slot.tier.store(tier, Ordering::Relaxed);
         slot.max_rps.store(max_rps, Ordering::Relaxed);
         slot.flags.store(flags, Ordering::Relaxed);

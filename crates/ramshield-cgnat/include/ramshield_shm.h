@@ -81,7 +81,12 @@ ramshield_shm_read(const RamshieldShmRuleEntry *table,
         for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
             challenge_seed[i] = entry->challenge_seed[i];
 
-        uint32_t after = atomic_load_explicit(&entry->seq, memory_order_acquire);
+        /* Fence: the payload reads (and the plain challenge_seed bytes) must
+         * complete before the seq re-read, or the re-read can pass while the
+         * values were observed mid-write. Canonical C11 seqlock reader: the
+         * re-read itself may then be relaxed. */
+        atomic_thread_fence(memory_order_acquire);
+        uint32_t after = atomic_load_explicit(&entry->seq, memory_order_relaxed);
         if (before != after || (after & 1u)) continue;
         if (client_hash != hash || expires_at_ms <= now_ms) return false;
 
@@ -116,7 +121,14 @@ static inline void
 ramshield_shm_flush_all(RamshieldShmRuleEntry *table, uint64_t now_ms)
 {
     for (uint32_t i = 0; i < RAMSHIELD_SHM_TABLE_CAPACITY; i++) {
+        /* Relaxed is correct for the odd marker itself — but the marker must
+         * be VISIBLE before the payload stores, or a reader can observe a
+         * half-published entry while seq still reads even (before == after)
+         * and accept the tear. The audit's fix (release ON this increment)
+         * orders the previous cycle's stores, not the payload after it; the
+         * release FENCE here is what pairs with the reader's acquire fence. */
         atomic_fetch_add_explicit(&table[i].seq, 1, memory_order_relaxed);
+        atomic_thread_fence(memory_order_release);
         atomic_store_explicit(&table[i].client_hash, 0, memory_order_relaxed);
         atomic_store_explicit(&table[i].expires_at_ms, now_ms, memory_order_relaxed);
         atomic_store_explicit(&table[i].tier, RAMSHIELD_TIER_ALLOW, memory_order_relaxed);
