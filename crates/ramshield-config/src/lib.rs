@@ -664,6 +664,16 @@ impl Config {
                 Some((k, v)) => (k, v),
                 None => ("", entry.as_str()),
             };
+            // An entry with no key_id (":hex" or a bare hex blob) passes the hex
+            // checks below but parse_ipc_keys rejects it at bind time, which used
+            // to leave the listener up with ZERO active keys (silent downgrade to
+            // unauthenticated). Fail at validate() instead. Never echo `entry` —
+            // for a colon-less entry the whole string IS the secret.
+            if id.is_empty() {
+                anyhow::bail!(
+                    "ipc.auth_keys entries must be `key_id:hex_key` — empty or missing key_id"
+                );
+            }
             if hex_str.is_empty() {
                 anyhow::bail!("ipc.auth_keys entries must be `key_id:hex_key`");
             }
@@ -986,6 +996,28 @@ mod tests {
         cfg.ipc.auth_keys.clear();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("require_auth"), "{err}");
+    }
+
+    #[test]
+    fn auth_key_without_key_id_is_rejected() {
+        // A bare hex blob (no `:`) or `:hex` passes the length/hex checks below
+        // it, but parse_ipc_keys rejects the entry at bind time — which used to
+        // leave the listener up with ZERO active keys (silent downgrade to
+        // unauthenticated). validate() must fail first.
+        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021";
+        let mut cfg = Config::default();
+
+        cfg.ipc.auth_keys = vec![hex.into()];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("key_id"), "{err}");
+
+        cfg.ipc.auth_keys = vec![format!(":{hex}")];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("key_id"), "{err}");
+
+        // Sanity: the same secret WITH a key_id is accepted.
+        cfg.ipc.auth_keys = vec![format!("k1:{hex}")];
+        cfg.validate().unwrap();
     }
 
     #[test]
