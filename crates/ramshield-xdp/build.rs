@@ -13,8 +13,13 @@ fn main() {
     println!("cargo:rerun-if-changed=ramshield-xdp-bpf/Cargo.toml");
     println!("cargo:rerun-if-changed=bpf/main.rs");
 
-    // ponytail: cargo guarantees OUT_DIR for build scripts.
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by Cargo"));
+    // cargo guarantees OUT_DIR for build scripts; if it is somehow absent,
+    // skip the BPF build rather than panicking the build script.
+    let Ok(out_dir) = env::var("OUT_DIR") else {
+        eprintln!("cargo:warning=OUT_DIR unset; skipping XDP BPF build");
+        return;
+    };
+    let out_dir = PathBuf::from(out_dir);
     let dest = out_dir.join("ramshield-xdp");
 
     if try_aya_build(&dest) {
@@ -30,8 +35,10 @@ fn main() {
     // Write minimal placeholder so include_bytes! succeeds on hosts without bpf-linker.
     // Real attach path must check ELF validity / feature flags.
     if !dest.exists() {
-        std::fs::write(&dest, b"\0").expect("write placeholder BPF ELF");
-        eprintln!("cargo:warning=wrote placeholder BPF ELF (bpf-linker missing)");
+        match std::fs::write(&dest, b"\0") {
+            Ok(()) => eprintln!("cargo:warning=wrote placeholder BPF ELF (bpf-linker missing)"),
+            Err(e) => eprintln!("cargo:warning=could not write placeholder BPF ELF: {e}"),
+        }
     }
 }
 

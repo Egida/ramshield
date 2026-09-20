@@ -29,7 +29,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 // ── Bloom filter — 2-hash, no false negatives for inserted IPs ───────────────
@@ -367,8 +367,8 @@ impl DetectionEngine {
 
         // crossbeam Receiver inside Arc — clone Arc for each worker (cheap refcount bump).
         // Each worker drains aggressively with try_recv() inside a recv_timeout window.
-        // ponytail: lock().unwrap() here is poison-panic risk — one panicked worker
-        // poisons the shared mutex and every later spawn/join panics too.
+        // ponytail: a bare lock unwrap here is poison-panic risk — one panicked
+        // worker poisons the shared mutex and every later spawn/join panics too.
         // unwrap_or_else(PoisonError::into_inner) recovers the guard instead.
         let mut handles = self
             .worker_handles
@@ -377,21 +377,32 @@ impl DetectionEngine {
         for i in 0..n_workers {
             let eng = self.clone();
             let rx = self.event_rx.clone();
-            handles.push(
-                std::thread::Builder::new()
-                    .name(format!("rs-batch-{i}"))
-                    .spawn(move || eng.batch_processor_loop_from(rx))
-                    .expect("spawn batch processor"),
-            );
+            // A failed spawn must not panic the daemon; the shared queue keeps
+            // whatever this worker would have drained, so log loudly and run
+            // with the workers that did start.
+            let spawned = std::thread::Builder::new()
+                .name(format!("rs-batch-{i}"))
+                .spawn(move || eng.batch_processor_loop_from(rx));
+            match spawned {
+                Ok(h) => handles.push(h),
+                Err(e) => error!(
+                    "Detection: batch worker rs-batch-{i} did not spawn: {e} — \
+                     running with fewer workers (ingest capacity reduced)"
+                ),
+            }
         }
 
         let eng = self.clone();
-        handles.push(
-            std::thread::Builder::new()
-                .name("rs-subnet".into())
-                .spawn(move || eng.subnet_batch_loop())
-                .expect("spawn subnet batch loop"),
-        );
+        let spawned = std::thread::Builder::new()
+            .name("rs-subnet".into())
+            .spawn(move || eng.subnet_batch_loop());
+        match spawned {
+            Ok(h) => handles.push(h),
+            Err(e) => error!(
+                "Detection: subnet batch loop did not spawn: {e} — \
+                 CIDR/subnet batch-block is DISABLED until restart"
+            ),
+        }
         drop(handles);
     }
 
