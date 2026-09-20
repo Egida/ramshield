@@ -871,7 +871,7 @@ impl Store {
             // (DashSet::clone is a DEEP clone, not an Arc handle), removed the
             // IP from the throwaway copy, and emptiness-tested the copy too.
             // The real index entry was NEVER modified — every evicted/unblocked
-            // IP leaked into subnet_index forever, and get_ips_in_subnet kept
+            // IP leaked into subnet_index forever, and subnet batch-block kept
             // returning dead hosts for subnet batch-block. Removal is now a
             // conditional remove_if on the live entry: removes the IP, drops
             // the subnet key only if the set went empty, and a concurrent
@@ -892,43 +892,6 @@ impl Store {
                 })
                 .insert(ip_key);
         }
-    }
-
-    /// Get all IP keys in a given subnet using the reverse index (O(1) lookup).
-    pub fn get_ips_in_subnet(&self, subnet_key: SubnetKey) -> Vec<IpAddr> {
-        self.subnet_index
-            .get(&subnet_key)
-            .map(|ips| ips.iter().copied().collect())
-            .unwrap_or_default()
-    }
-
-    /// Windowed variant for the batch-block leg: only IPs whose store record
-    /// was seen within `window_ns` — same rationale as
-    /// `subnet_member_count_windowed` (lifetime index must not let a cooled
-    /// /64's historical members get batch-blocked by a small fresh burst).
-    pub fn get_ips_in_subnet_windowed(
-        &self,
-        subnet_key: SubnetKey,
-        window_ns: u64,
-        now_ns: u64,
-    ) -> Vec<IpAddr> {
-        self.subnet_index
-            .get(&subnet_key)
-            .map(|ips| {
-                ips.iter()
-                    .filter(|ip| {
-                        self.inner.get(*ip).is_some_and(|v| {
-                            let ls = match &v.value().value {
-                                Value::IpRecord(rec) => rec.last_seen_ns,
-                                _ => 0,
-                            };
-                            now_ns.saturating_sub(ls) <= window_ns
-                        })
-                    })
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Get all currently blocked IPs for XDP reconciliation.
@@ -1290,13 +1253,13 @@ mod tests {
         store.update_subnet_index(ip, Some(sk), false);
         // Also seed the subnet window so the same subnet is recognized.
         store.merge_subnet_window(sk, net, 1, Some(&[ip]), 1_000_000_000);
-        assert_eq!(store.get_ips_in_subnet(sk).len(), 1);
+        assert_eq!(store.subnet_member_count(sk), 1);
 
         // evict_batch: TTL already expired by the time we call.
         std::thread::sleep(std::time::Duration::from_millis(2));
         store.evict_batch(&[ip]);
         assert!(
-            store.get_ips_in_subnet(sk).is_empty(),
+            store.subnet_member_count(sk) == 0,
             "subnet_index must be empty after evict_batch; stale entries leak memory"
         );
     }
@@ -1311,10 +1274,10 @@ mod tests {
         let sk = subnet_key_u128(ip).unwrap();
         store.insert(ip, Value::Counter(1), None, 1 << 20).unwrap();
         store.update_subnet_index(ip, Some(sk), false);
-        assert_eq!(store.get_ips_in_subnet(sk).len(), 1);
+        assert_eq!(store.subnet_member_count(sk), 1);
         store.remove(&ip);
         assert!(
-            store.get_ips_in_subnet(sk).is_empty(),
+            store.subnet_member_count(sk) == 0,
             "subnet_index must be empty after remove; stale entries leak memory"
         );
     }
