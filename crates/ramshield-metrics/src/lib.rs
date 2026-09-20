@@ -254,6 +254,14 @@ pub struct Metrics {
     pub xdp_v6_drops: Arc<AtomicU64>,
     pub xdp_wire_pass: Arc<AtomicU64>,
     pub xdp_parse_fails: Arc<AtomicU64>,
+    /// XDP apply attempts that failed. The block is held in userspace (and
+    /// WAL) but NEVER reached the kernel, so the wire keeps passing the
+    /// attacker while the engine believes the target is blocked. Only the
+    /// CIDR LPM tries can exhaust (102_400 hard cap, no LRU support); the
+    /// per-IP maps are LRU and self-evict, so ENOSPC there is impossible.
+    /// Without this counter a full trie is a silent loss of the subnet-
+    /// swarm mitigation leg — a warn! log and nothing scrapeable.
+    pub xdp_apply_failures: Arc<AtomicU64>,
     /// Enforcement: last committed WAL LSN (atomic read for dashboard).
     pub wal_lsn: Arc<AtomicU64>,
     /// Enforcement: pending TTL expirations count.
@@ -341,6 +349,7 @@ impl Metrics {
             xdp_v6_drops: Arc::new(AtomicU64::new(0)),
             xdp_wire_pass: Arc::new(AtomicU64::new(0)),
             xdp_parse_fails: Arc::new(AtomicU64::new(0)),
+            xdp_apply_failures: Arc::new(AtomicU64::new(0)),
             wal_lsn: Arc::new(AtomicU64::new(0)),
             pending_expirations: Arc::new(AtomicU64::new(0)),
             mesh_record_ban_count: Arc::new(AtomicU64::new(0)),
@@ -386,6 +395,13 @@ impl Metrics {
     /// here the IP WAS blocked in memory but the kernel never learned.
     pub fn inc_enforcement_dropped(&self) {
         self.enforcement_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    /// A block/unblock decision failed to reach the kernel (map insert error:
+    /// CIDR LPM trie full, or a transient XDP load/attach failure). Userspace
+    /// and the WAL still hold it; the wire does not. Mirror of
+    /// inc_enforcement_dropped for the dataplane leg.
+    pub fn inc_xdp_apply_failures(&self) {
+        self.xdp_apply_failures.fetch_add(1, Ordering::Relaxed);
     }
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fingerprint, >64 KiB).
@@ -1029,6 +1045,12 @@ impl Metrics {
             "XDP kernel parse failures (COUNTERS PerCpuArray).",
             "counter"
         ));
+        out.push_str(&emit!(
+            "ramshield_xdp_apply_failures_total",
+            self.xdp_apply_failures.load(Ordering::Relaxed),
+            "Block/unblock decisions that failed to reach the kernel; the wire keeps passing the target while userspace+ WAL believe it is blocked (CIDR trie full / XDP failure).",
+            "counter"
+        ));
         // No trailing println! here — every emit stanza already ends in '\n',
         // and stdout writes from a render fn were a stray-syscall bug (2026-09).
         out
@@ -1284,6 +1306,25 @@ mod tests {
             out.contains("ramshield_enforcement_dropped_total 2"),
             "enforcement drops must be scrapeable — a silently dropped security \
              command is otherwise invisible to the operator"
+        );
+    }
+
+    #[test]
+    fn xdp_apply_failures_counter_is_exported() {
+        // The mirror of enforcement_dropped for the dataplane leg: when the
+        // CIDR LPM trie fills (no LRU, hard cap) a subnet block silently stops
+        // reaching the wire. This counter is the only scrapeable signal that
+        // happened.
+        let m = Metrics::new();
+        m.inc_xdp_apply_failures();
+        m.inc_xdp_apply_failures();
+        m.inc_xdp_apply_failures();
+        assert_eq!(m.xdp_apply_failures.load(Ordering::Relaxed), 3);
+        let out = m.render_prometheus();
+        assert!(
+            out.contains("ramshield_xdp_apply_failures_total 3"),
+            "XDP apply failures must be scrapeable — a silently full CIDR trie \
+             otherwise looks like the subnet mitigation is simply not firing"
         );
     }
 
