@@ -428,6 +428,54 @@ impl DetectionEngine {
         }
     }
 
+    /// Step 3 fast path: emit a per-IP block the instant its unflushed-window
+    /// event count crosses `emergency_threshold`, instead of waiting for the
+    /// periodic flush (~50-1000ms of uninhibited traffic). `local` drains at
+    /// each flush, so its count IS the current window's count; the threshold
+    /// is crossed exactly once (count only rises) — no per-IP flag needed.
+    /// Reuses the flush path's emission verbatim (same command, same
+    /// try_send, same dropped-block metric); the enforcement layer dedupes
+    /// by (ip, reason), so a later flush that re-blocks just refreshes TTL.
+    #[inline]
+    fn absorb_or_emergency(
+        &self,
+        local: &mut HashMap<IpAddr, IpAgg>,
+        ev: &ConnectionEvent,
+        emergency_threshold: u32,
+    ) {
+        let before = local.get(&ev.ip).map(|a| a.count).unwrap_or(0);
+        local.entry(ev.ip).or_default().absorb(ev);
+        let after = local[&ev.ip].count;
+        if emergency_threshold > 0 && before < emergency_threshold && after >= emergency_threshold {
+            self.emit_emergency_block(ev.ip, after);
+        }
+    }
+
+    /// The emergency emit — byte-identical to flush_batch's HighRps block.
+    fn emit_emergency_block(&self, ip: IpAddr, events: u32) {
+        let ttl = self.config.load().detection.block_ttl_secs;
+        let cmd = EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "detection".into(),
+            actor: "system".into(),
+            timestamp_utc: (now_ns() / 1_000_000_000) as i64,
+            ttl_seconds: ttl,
+            reason: BlockReason::HighRps.as_str().into(),
+            ip,
+            cidr: None,
+            action: EnforceAction::Block,
+        };
+        match self.enforcement_tx.try_send(cmd) {
+            Ok(()) => {
+                self.metrics
+                    .record_block_ip(&ip, BlockReason::HighRps.as_str(), "detection");
+                trace!(ip = %ip, events, "emergency fast-path block emitted pre-flush");
+            }
+            Err(_) => self.metrics.inc_enforcement_dropped(),
+        }
+    }
+
     /// Core batch loop — takes an explicit Receiver so N workers can share the
     /// same crossbeam channel (Receiver is Clone).
     ///
@@ -460,10 +508,11 @@ impl DetectionEngine {
             let cfg = self.config.load();
             let window = Duration::from_millis(cfg.detection.batch_window_ms);
             let max = cfg.detection.batch_max_events;
+            let emergency_threshold = cfg.detection.emergency_burst_threshold;
 
             // Drain events into the worker-local buffer — no shared lock.
             match rx.recv_timeout(window) {
-                Ok(ev) => local.entry(ev.ip).or_default().absorb(&ev),
+                Ok(ev) => self.absorb_or_emergency(&mut local, &ev, emergency_threshold),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     // Senders all gone: deliver what we hold, then exit.
@@ -476,7 +525,7 @@ impl DetectionEngine {
             // Drain remaining events up to batch_max_events
             for _ in 0..max.saturating_sub(1) {
                 match rx.try_recv() {
-                    Ok(ev) => local.entry(ev.ip).or_default().absorb(&ev),
+                    Ok(ev) => self.absorb_or_emergency(&mut local, &ev, emergency_threshold),
                     Err(_) => break,
                 }
             }
@@ -1171,6 +1220,69 @@ mod tests {
         assert_eq!(agg.status_dist[1], 1, "2xx from worker b");
         assert_eq!(agg.proto_fp, 7, "first non-zero fingerprint wins");
         assert!(a.is_empty(), "local buffer is drained into shared");
+    }
+
+    /// Step 3 fast path: crossing the emergency burst threshold on the
+    /// per-event path emits a block BEFORE any flush, fires exactly once per
+    /// window (count only rises, so the threshold is crossed once), and
+    /// re-fires on a fresh window after the local buffer drains.
+    #[test]
+    fn emergency_burst_fires_once_before_flush() {
+        let mut config = Config::default();
+        config.detection.emergency_burst_threshold = 5;
+        let cfg = config.into_handle();
+        let store = Arc::new(Store::new(16));
+        let metrics = Arc::new(Metrics::new());
+        let (etx, mut erx) = mpsc::channel(64);
+        let eng = Arc::new(DetectionEngine::new(
+            store,
+            cfg,
+            etx,
+            metrics,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        let ev = |n: u64| ConnectionEvent {
+            ip,
+            timestamp_ns: n,
+            bytes: 10,
+            status_code: 200,
+            proto_fingerprint: 0,
+        };
+        let mut local: HashMap<IpAddr, IpAgg> = HashMap::new();
+
+        // Window 1: count climbs 1..5; crossing at 5 emits the block.
+        for n in 0..5 {
+            eng.absorb_or_emergency(&mut local, &ev(n), 5);
+        }
+        let cmd = erx
+            .try_recv()
+            .expect("emergency block must be emitted pre-flush");
+        assert_eq!(cmd.ip, ip);
+        assert!(
+            matches!(cmd.action, EnforceAction::Block),
+            "must be a Block"
+        );
+
+        // Still hot in the same window: no re-emit (crossing is one-shot).
+        for n in 5..30 {
+            eng.absorb_or_emergency(&mut local, &ev(n), 5);
+        }
+        assert!(
+            erx.try_recv().is_err(),
+            "crossing must fire exactly once per window"
+        );
+
+        // Drain (simulates flush) -> fresh window re-crosses and re-fires.
+        local.clear();
+        for n in 0..5 {
+            eng.absorb_or_emergency(&mut local, &ev(n), 5);
+        }
+        assert!(
+            erx.try_recv().is_ok(),
+            "a fresh window crossing must fire again"
+        );
     }
 
     /// P1 regression (F1): with N workers, the old iter_mut+take+clear flush
