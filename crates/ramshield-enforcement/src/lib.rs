@@ -618,6 +618,7 @@ impl EnforcementService {
                 }
 
                 // Step 3: dataplane.
+                let is_cidr = cmd.cidr.is_some();
                 let xdp_applied = match cmd.cidr {
                     Some(network) => {
                         self.xdp
@@ -629,7 +630,22 @@ impl EnforcementService {
                 }
                 .map(|()| true)
                 .unwrap_or_else(|e| {
-                    warn!(ip=%cmd.ip, cidr=?cmd.cidr, "XDP block failed: {}", e);
+                    // Userspace + WAL hold this block; the kernel does not, so
+                    // the wire keeps passing the target. Counter is the only
+                    // scrapeable signal. CIDR LPM tries have a hard cap and no
+                    // LRU support, so a full trie means the subnet-swarm leg
+                    // has silently stopped — that case is loud, not a warn.
+                    self.metrics.inc_xdp_apply_failures();
+                    if is_cidr {
+                        error!(
+                            ip=%cmd.ip, cidr=?cmd.cidr,
+                            "XDP subnet block did NOT reach the kernel (CIDR LPM trie full?): {} \
+                             — wire mitigation is OFF for this prefix while the engine reports it blocked",
+                            e
+                        );
+                    } else {
+                        warn!(ip=%cmd.ip, "XDP block failed: {}", e);
+                    }
                     false
                 });
                 self.remember_decision(cmd.decision_id);
