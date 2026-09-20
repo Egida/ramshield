@@ -370,9 +370,6 @@ async fn handle_connection(
     config: ConnectionConfig,
     dropped_events: Arc<AtomicU64>,
 ) -> Result<(), std::io::Error> {
-    // STEP 2: Hard 2MB ceiling for incoming stream to prevent OOM from malformed clients
-    let mut socket = socket.take(2 * 1024 * 1024);
-
     let mut buf = BytesMut::with_capacity(8192);
     let mut chunk = [0u8; 8192];
     let mut total_bytes_read = 0usize;
@@ -399,7 +396,16 @@ async fn handle_connection(
             return Ok(());
         }
 
-        let n = match timeout(config.read_timeout, socket.read(&mut chunk)).await {
+        // 2 MiB ceiling per read(): a hostile peer streaming without newline
+        // cannot make one read() hand us more than 2 MiB. Reborrow — Take<&mut
+        // TcpStream> borrows for this expression only; socket stays owned for
+        // the write_resp calls below (take(self) would move it).
+        let n = match timeout(
+            config.read_timeout,
+            (&mut socket).take(2 * 1024 * 1024).read(&mut chunk),
+        )
+        .await
+        {
             Ok(Ok(n)) => n,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
