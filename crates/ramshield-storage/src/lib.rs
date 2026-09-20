@@ -259,7 +259,13 @@ pub type SubnetKey = u128;
 /// OS — collision-DoS resistant, unlike fixed seeds.
 type SubnetTable = DashMap<SubnetKey, SubnetRecord, ahash::RandomState>;
 type IpEntryMap = DashMap<IpAddr, Entry, ahash::RandomState>;
-type SubnetIndex = DashMap<SubnetKey, DashSet<IpAddr>, ahash::RandomState>;
+// ponytail: plain HashSet, not the local DashSet alias — the inner set is
+// only ever touched under the outer entry's shard lock, so DashMap's 32-64
+// shards bought zero concurrency and cost ~3 KB per discovered subnet (the
+// 2.2 state-DoS arithmetic: 100k rotated subnets ≈ 300 MB of locks for
+// nothing). Same publication protocol, ~30x less memory per subnet.
+type SubnetIndex =
+    DashMap<SubnetKey, std::collections::HashSet<IpAddr, ahash::RandomState>, ahash::RandomState>;
 
 pub struct Store {
     inner: Arc<IpEntryMap>,
@@ -434,8 +440,8 @@ impl Store {
     pub fn subnet_member_count_windowed(&self, key: SubnetKey, window_ns: u64, now_ns: u64) -> u64 {
         self.subnet_index.get(&key).map_or(0, |ips| {
             ips.iter()
-                .filter(|e| {
-                    self.inner.get(e.key()).is_some_and(|v| {
+                .filter(|ip| {
+                    self.inner.get(*ip).is_some_and(|v| {
                         let ls = match &v.value().value {
                             Value::IpRecord(rec) => rec.last_seen_ns,
                             _ => 0,
@@ -881,8 +887,10 @@ impl Store {
         } else {
             self.subnet_index
                 .entry(sk)
-                .or_insert_with(|| DashSet::with_hasher(ahash::RandomState::new()))
-                .insert(ip_key, ());
+                .or_insert_with(|| {
+                    std::collections::HashSet::with_hasher(ahash::RandomState::new())
+                })
+                .insert(ip_key);
         }
     }
 
@@ -890,7 +898,7 @@ impl Store {
     pub fn get_ips_in_subnet(&self, subnet_key: SubnetKey) -> Vec<IpAddr> {
         self.subnet_index
             .get(&subnet_key)
-            .map(|ips| ips.iter().map(|e| *e.key()).collect())
+            .map(|ips| ips.iter().copied().collect())
             .unwrap_or_default()
     }
 
@@ -908,8 +916,8 @@ impl Store {
             .get(&subnet_key)
             .map(|ips| {
                 ips.iter()
-                    .filter(|e| {
-                        self.inner.get(e.key()).is_some_and(|v| {
+                    .filter(|ip| {
+                        self.inner.get(*ip).is_some_and(|v| {
                             let ls = match &v.value().value {
                                 Value::IpRecord(rec) => rec.last_seen_ns,
                                 _ => 0,
@@ -917,7 +925,7 @@ impl Store {
                             now_ns.saturating_sub(ls) <= window_ns
                         })
                     })
-                    .map(|e| *e.key())
+                    .copied()
                     .collect()
             })
             .unwrap_or_default()
