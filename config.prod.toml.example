@@ -55,7 +55,10 @@ min_entropy = 4.5
 [detection]
 rps_threshold = 5000
 rate_window_secs = 10
-# Dual gate: unique IPs per /24 AND events/s in the 2s window.
+# Dual gate: unique IPs per /24 AND events/s in the 2s window. These are the
+# decision PRECONDITIONS; the acting tier (cgnat::classify_subnet) is:
+#   public subnet: ALLOW < 5k events, CHALLENGE 5k-50k, BLOCK > 50k AND > 64 hosts
+#   RFC 6598 (100.64/10): challenge-first, never hard-blocked
 # 500 unique IPs is unreachable on a /24 (254 hosts). Keep the
 # documented 50+100 gate; rps_threshold=5000 is the per-IP tripwire.
 subnet_batch_threshold = 50

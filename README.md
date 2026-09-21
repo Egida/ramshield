@@ -44,7 +44,7 @@ It is a **controlled single-node pilot**, not a turnkey internet-facing product.
 | Scenario | How RamShield Helps |
 |---|---|
 | L7 HTTP flood / DDoS | Per-IP EWMA threshold crossing triggers kernel-level drops in ~108 ms (warm) |
-| Distributed botnet swarm | Dual-gate /24 detection: 50 unique source IPs + 100 events in a 2 s window → subnet block |
+| Distributed botnet swarm | Dual-gate /24 detection (50 unique hosts + 100 events) confirms a swarm; public subnets hard-block once density (>64 hosts) and volume (>50k events in 2 s) both confirm |
 | Credential stuffing / API abuse | Configurable per-IP RPS tripwire with automatic temporary blocks (TTL-based) |
 | Evasion & pulse-wave attacks | Forecast-driven entropy anomaly detection catches ramp-and-burst profiles |
 | Legitimate traffic protection | 0.0000% false-positive rate measured over 200 benign-IP probes (see [Performance](#performance)) |
