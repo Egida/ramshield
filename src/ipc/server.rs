@@ -454,8 +454,7 @@ async fn handle_connection(
                             code: 500,
                             message: "internal configuration error: invalid auth state".into(),
                         };
-                        let _ =
-                            timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
+                        let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
                         return Err(std::io::Error::other(format!(
                             "invalid runtime auth keys: {e}"
                         )));

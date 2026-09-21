@@ -887,9 +887,9 @@ impl Store {
         } else {
             self.subnet_index
                 .entry(sk)
-                .or_insert_with(|| {
-                    std::collections::HashSet::with_hasher(ahash::RandomState::new())
-                })
+                .or_insert_with(
+                    || std::collections::HashSet::with_hasher(ahash::RandomState::new()),
+                )
                 .insert(ip_key);
         }
     }
@@ -997,13 +997,28 @@ mod tests {
         let stepped = t0 - 4_000_000_000;
         store.merge_subnet_window(sk, net, 60, Some(&[mk(200)]), stepped);
         let rec = store.subnet_table().get(&sk).unwrap();
-        assert_eq!(rec.last_updated_ns, t0, "clock step must not regress the baseline");
-        assert_eq!(rec.total_rps, 120, "stepped merge must accumulate, not reset or drop events");
+        assert_eq!(
+            rec.last_updated_ns, t0,
+            "clock step must not regress the baseline"
+        );
+        assert_eq!(
+            rec.total_rps, 120,
+            "stepped merge must accumulate, not reset or drop events"
+        );
         drop(rec);
         // Forward time must still expire the window.
-        store.merge_subnet_window(sk, net, 3, Some(&[mk(201)]), t0 + SUBNET_WINDOW_NS + 1_000_000_000);
+        store.merge_subnet_window(
+            sk,
+            net,
+            3,
+            Some(&[mk(201)]),
+            t0 + SUBNET_WINDOW_NS + 1_000_000_000,
+        );
         let rec = store.subnet_table().get(&sk).unwrap();
-        assert_eq!(rec.total_rps, 3, "window must expire normally after the step");
+        assert_eq!(
+            rec.total_rps, 3,
+            "window must expire normally after the step"
+        );
     }
 
     /// Test helper: create an IpRecord with `block_state = Blocked`.
