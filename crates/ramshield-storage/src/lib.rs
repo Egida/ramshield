@@ -550,7 +550,7 @@ impl Store {
                 if tracing::enabled!(tracing::Level::TRACE) {
                     tracing::trace!(key = %key, total_inserts = self.total_inserts.load(Ordering::Relaxed), "store insert committed");
                 }
-                return Ok(());
+                Ok(())
             }
             dashmap::Entry::Vacant(v) => {
                 // Fresh insert: reserve capacity atomically BEFORE the entry
@@ -600,7 +600,7 @@ impl Store {
                         "store insert accounted"
                     );
                 }
-                return Ok(());
+                Ok(())
             }
         }
     }
