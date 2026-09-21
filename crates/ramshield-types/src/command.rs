@@ -28,7 +28,7 @@ pub enum EnforceAction {
     Unblock,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnforceResult {
     pub decision_id: Uuid,
     pub committed: bool,
