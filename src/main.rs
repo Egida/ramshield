@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         None => {
             // Still honor env overrides in no-config mode (dashboard auth etc).
             let mut c = Config::default();
-            c.apply_env_overrides();
+            c.apply_env_overrides()?;
             // P1 fix (same class as Config::load): env overrides could set a
             // public bind with no secrets; the fail-closed guard must run on
             // the FINAL config here too, not just on the file path.

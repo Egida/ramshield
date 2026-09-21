@@ -435,9 +435,10 @@ impl Config {
     /// Env vars take precedence: RAMSHIELD_ENGINE__RAM_LIMIT_MB=1024
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let mut cfg = Self::from_toml_file(path)?;
-        cfg.apply_env_overrides();
-        // P1 fix: file validation ran BEFORE env overrides, and
-        // apply_env_overrides swallowed its own re-validation (let _ =).
+        cfg.apply_env_overrides()?;
+        // P1 fix: file validation runs before overrides, so the final merged
+        // configuration is validated again below. Typed env parsing itself is
+        // fail-fast and returns an error before validation can be bypassed.
         // RAMSHIELD_IPC__TCP_ADDR=0.0.0.0:7890 (or dashboard addr) without
         // auth keys/hash therefore silently defeated the fail-closed
         // public-bind guard. Validate the FINAL config or fail startup.
@@ -446,75 +447,73 @@ impl Config {
     }
 
     /// Apply RAMSHIELD_*__FIELD environment overrides on top of any config.
-    pub fn apply_env_overrides(&mut self) {
+    ///
+    /// Invalid typed values are fatal rather than silently ignored. This is a
+    /// security/operations invariant: an operator must never receive a
+    /// successful startup while a requested mitigation threshold, memory
+    /// limit, connection limit, or feature toggle was rejected by parsing.
+    /// Secret values are never included in error messages.
+    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        fn parse<T>(name: &str) -> anyhow::Result<Option<T>>
+        where
+            T: std::str::FromStr,
+            T::Err: std::fmt::Display,
+        {
+            match std::env::var(name) {
+                Ok(value) => value
+                    .parse::<T>()
+                    .map(Some)
+                    .map_err(|e| anyhow::anyhow!("invalid value for {name}: {e}")),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    anyhow::bail!("environment variable {name} is not valid UTF-8")
+                }
+            }
+        }
+
         // Engine overrides
-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__RAM_LIMIT_MB")
-            && let Ok(parsed) = v.parse::<usize>()
-        {
-            self.engine.ram_limit_mb = parsed;
+        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__RAM_LIMIT_MB")? {
+            self.engine.ram_limit_mb = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__WORKER_THREADS")
-            && let Ok(parsed) = v.parse::<usize>()
-        {
-            self.engine.worker_threads = parsed;
+        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__WORKER_THREADS")? {
+            self.engine.worker_threads = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__SHARD_COUNT")
-            && let Ok(parsed) = v.parse::<usize>()
-        {
-            self.engine.shard_count = parsed.next_power_of_two();
+        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__SHARD_COUNT")? {
+            self.engine.shard_count = v
+                .checked_next_power_of_two()
+                .ok_or_else(|| anyhow::anyhow!("RAMSHIELD_ENGINE__SHARD_COUNT is too large"))?;
         }
 
         // Detection overrides
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__RPS_THRESHOLD")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.rps_threshold = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__RPS_THRESHOLD")? {
+            self.detection.rps_threshold = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__PROMOTE_MIN_EVENTS")
-            && let Ok(parsed) = v.parse::<u32>()
-        {
-            self.detection.promote_min_events = parsed;
+        if let Some(v) = parse::<u32>("RAMSHIELD_DETECTION__PROMOTE_MIN_EVENTS")? {
+            self.detection.promote_min_events = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BATCH_WINDOW_MS")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.batch_window_ms = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__BATCH_WINDOW_MS")? {
+            self.detection.batch_window_ms = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_WINDOW_THRESHOLD")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.subnet_window_threshold = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_WINDOW_THRESHOLD")? {
+            self.detection.subnet_window_threshold = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BLOCK_TTL_SECS")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.block_ttl_secs = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__BLOCK_TTL_SECS")? {
+            self.detection.block_ttl_secs = v;
         }
-
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BURST_TTL_SECS")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.subnet_burst_ttl_secs = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_BURST_TTL_SECS")? {
+            self.detection.subnet_burst_ttl_secs = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__RATE_WINDOW_SECS")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.rate_window_secs = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__RATE_WINDOW_SECS")? {
+            self.detection.rate_window_secs = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_THRESHOLD")
-            && let Ok(parsed) = v.parse::<usize>()
-        {
-            self.detection.subnet_batch_threshold = parsed;
+        if let Some(v) = parse::<usize>("RAMSHIELD_DETECTION__SUBNET_BATCH_THRESHOLD")? {
+            self.detection.subnet_batch_threshold = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_MIN_EVENTS")
-            && let Ok(parsed) = v.parse::<u64>()
-        {
-            self.detection.subnet_batch_min_events = parsed;
+        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_BATCH_MIN_EVENTS")? {
+            self.detection.subnet_batch_min_events = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BATCH_BLOCK_ENABLED")
-            && let Ok(parsed) = v.parse::<bool>()
-        {
-            self.detection.batch_block_enabled = parsed;
+        if let Some(v) = parse::<bool>("RAMSHIELD_DETECTION__BATCH_BLOCK_ENABLED")? {
+            self.detection.batch_block_enabled = v;
         }
 
         // IPC overrides
@@ -528,34 +527,29 @@ impl Config {
         if let Ok(v) = std::env::var("RAMSHIELD_IPC__TCP_ADDR") {
             self.ipc.tcp_addr = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_IPC__MAX_CONNECTIONS")
-            && let Ok(parsed) = v.parse::<usize>()
-        {
-            self.ipc.max_connections = parsed;
+        if let Some(v) = parse::<usize>("RAMSHIELD_IPC__MAX_CONNECTIONS")? {
+            self.ipc.max_connections = v;
         }
 
         // Dashboard overrides
-        if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ENABLED")
-            && let Ok(parsed) = v.parse::<bool>()
-        {
-            self.dashboard.enabled = parsed;
+        if let Some(v) = parse::<bool>("RAMSHIELD_DASHBOARD__ENABLED")? {
+            self.dashboard.enabled = v;
         }
         if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__HTTP_ADDR") {
             self.dashboard.http_addr = v;
         }
         if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ADMIN_PASSWORD") {
-            // Plaintext env convenience: hash at load, never store plaintext.
             use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
             let salt = SaltString::generate(&mut OsRng);
-            if let Ok(hash) = argon2::Argon2::default().hash_password(v.as_bytes(), &salt) {
-                self.dashboard.admin_password_hash = Some(hash.to_string());
-            }
+            self.dashboard.admin_password_hash = Some(
+                argon2::Argon2::default()
+                    .hash_password(v.as_bytes(), &salt)
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to hash RAMSHIELD_DASHBOARD__ADMIN_PASSWORD: {e}")
+                    })?
+                    .to_string(),
+            );
         }
-        // Pre-hashed password (PHC string) straight from a Secret. This is the
-        // name the shipped k8s manifests and docs use; without this reader the
-        // env var was inert and the dashboard silently booted unauthenticated.
-        // Takes precedence over the plaintext var so a manifest that sets both
-        // does not fall back to a runtime-generated salt.
         if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ADMIN_PASSWORD_HASH") {
             let v = v.trim().to_string();
             if !v.is_empty() {
@@ -564,15 +558,11 @@ impl Config {
         }
 
         // Forecasting overrides
-        if let Ok(v) = std::env::var("RAMSHIELD_FORECASTING__ENABLED")
-            && let Ok(parsed) = v.parse::<bool>()
-        {
-            self.forecasting.enabled = parsed;
+        if let Some(v) = parse::<bool>("RAMSHIELD_FORECASTING__ENABLED")? {
+            self.forecasting.enabled = v;
         }
 
-        // Env-override validation now happens on the FINAL config at every
-        // entry point (Config::load, main's no-config branch). An earlier
-        // `let _ = self.validate()` here swallowed the result — bypass path.
+        Ok(())
     }
 
     /// Validate configuration with sensible bounds and error messages.
@@ -1094,22 +1084,18 @@ mod tests {
 
     #[test]
     #[serial]
-    fn env_override_invalid_ignored() {
-        use std::panic;
+    fn env_override_invalid_value_is_rejected() {
         clear_env_vars();
         unsafe {
             std::env::set_var("RAMSHIELD_ENGINE__RAM_LIMIT_MB", "not_a_number");
         }
         let tmpfile = "/tmp/ramshield_test_config.toml";
         std::fs::write(tmpfile, "").unwrap();
-
-        // Should not panic; invalid env var is silently ignored
-        let result = panic::catch_unwind(|| Config::load(tmpfile).unwrap());
+        let err = Config::load(tmpfile).expect_err("invalid typed env override must fail startup");
         assert!(
-            result.is_ok(),
-            "Config::load should not panic on invalid env var"
+            err.to_string().contains("RAMSHIELD_ENGINE__RAM_LIMIT_MB"),
+            "{err}"
         );
-        assert_eq!(result.unwrap().engine.ram_limit_mb, 512); // default preserved
         clear_env_vars();
     }
 }
