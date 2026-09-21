@@ -152,18 +152,24 @@ def detection():
         c.ok(blocked, "EWMA auto-block fires above threshold")
 
         # Test 2: Subnet /24 block on distinct-IP flood
-        # Need >50 unique IPs per /24 (subnet_batch_threshold)
-        # And >100 events per /24 (subnet_batch_min_events)
-        evs = [{"ip":f"192.0.2.{i%254}","bytes":256,"status_code":404,"proto_fp":4096} for i in range(200)]
-
-        # Send 5 batches to build up counts
-        for _ in range(5):
-            ipc({"type":"report_connections","events":evs})
-            time.sleep(0.1)
+        # Detection dual gate (50 uniq IPs + 100 events) is only the
+        # decision PRECONDITION. The acting tier (cgnat::classify_subnet)
+        # hard-blocks public subnets at >64 hosts AND >50k events in the
+        # 2s window; 5k-50k events digress to CHALLENGE, below that ALLOW.
+        # Flood past the BLOCK tier: 150 hosts x 1000 events = 150k events
+        # (drains ~1.9s at the 4096/50ms batch cap; even a slow inject that
+        # slides the 2s window keeps >50k in-view).
+        evs = [
+            {"ip": f"192.0.2.{h}", "bytes": 256, "status_code": 404, "proto_fp": 4096}
+            for h in range(150)
+            for _ in range(1000)
+        ]
+        for i in range(0, len(evs), 200):
+            ipc({"type": "report_connections", "events": evs[i:i + 200]})
 
         sub = False
         body = ""
-        for _ in range(30):
+        for _ in range(60):
             time.sleep(0.1)
             st, body = dash("/api/history/blocks")
             hist = json.loads(body)
