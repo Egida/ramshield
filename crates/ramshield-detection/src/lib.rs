@@ -843,7 +843,8 @@ impl DetectionEngine {
         // ponytail: coarse 1h age prune on overflow; per-entry expiry only
         // if this gate ever shows up in a flame graph.
         if self.pending_mitigations.len() > 1_048_576 {
-            self.pending_mitigations.retain(|_, ts| now.saturating_sub(*ts) < 3_600_000_000_000);
+            self.pending_mitigations
+                .retain(|_, ts| now.saturating_sub(*ts) < 3_600_000_000_000);
         }
         for b in blocks {
             let key = (b.0, b.1);
@@ -1289,7 +1290,10 @@ mod tests {
         let ip: IpAddr = "10.0.0.55".parse().unwrap();
         let t0 = 1_000_000_000_000u64;
         let key = (ip, BlockReason::HighRps);
-        assert!(eng.admit_mitigation(key, 3600, t0), "first admission passes");
+        assert!(
+            eng.admit_mitigation(key, 3600, t0),
+            "first admission passes"
+        );
         assert!(
             !eng.admit_mitigation(key, 3600, t0 + 1_000_000_000),
             "re-admission inside ttl/2 cooldown must be suppressed"
@@ -1320,7 +1324,10 @@ mod tests {
         // cooldown = ttl/2
         let half = ttl * 1_000_000_000 / 2;
         assert!(!eng.admit_mitigation(key, ttl, t0 + half - 1));
-        assert!(eng.admit_mitigation(key, ttl, t0 + half), "past cooldown re-admits");
+        assert!(
+            eng.admit_mitigation(key, ttl, t0 + half),
+            "past cooldown re-admits"
+        );
     }
 
     /// Item 3 regression: worker-local merge must equal the old shared-map

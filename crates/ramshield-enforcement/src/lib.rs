@@ -490,7 +490,11 @@ impl EnforcementService {
     }
 
     fn remember_result(&mut self, result: &EnforceResult) {
-        if self.processed_results.insert(result.decision_id, result.clone()).is_none() {
+        if self
+            .processed_results
+            .insert(result.decision_id, result.clone())
+            .is_none()
+        {
             self.processed_order.push_back(result.decision_id);
             while self.processed_order.len() > 65_536 {
                 if let Some(old) = self.processed_order.pop_front() {
