@@ -410,6 +410,7 @@ impl XdpApplier for AyaXdpApplier {
     fn reconcile(
         &mut self,
         expected_blocks: &[IpAddr],
+        expected_cidrs: &[IpNetwork],
     ) -> Result<ReconciliationState, EnforcementError> {
         // IPv6 plan Task 3: the two maps are reconciled independently — each
         // drains its stale keys against its family's expected set only. The
@@ -460,6 +461,44 @@ impl XdpApplier for AyaXdpApplier {
                 );
             }
         }
+        // CIDR state has its own LPM-trie maps and therefore cannot be
+        // reconstructed from `expected_blocks`. A driver/map reload can wipe
+        // BLOCKCIDR/BLOCKCIDR6 while userspace still considers the prefixes
+        // active. Reconcile both families explicitly. Aya exposes LpmTrie::keys
+        // as a fallible iterator, so collect current keys before deleting to
+        // avoid mutating the iterator while it is walking the kernel map.
+        let (v4_cidrs, v6_cidrs): (Vec<_>, Vec<_>) = expected_cidrs
+            .iter()
+            .partition(|n| matches!(n.addr, IpAddr::V4(_)));
+        for (name, expected) in [("BLOCKCIDR", v4_cidrs), ("BLOCKCIDR6", v6_cidrs)] {
+            // aya::maps::lpm_trie::Key derives only Clone+Copy (no Eq/Hash), so
+            // set membership is a field-wise linear scan over the expected set.
+            let expected: Vec<LpmKey<[u64; 2]>> = expected
+                .into_iter()
+                .map(|network: &IpNetwork| cidr_key(*network))
+                .collect();
+            let is_expected = |k: &LpmKey<[u64; 2]>| {
+                expected
+                    .iter()
+                    .any(|e| e.prefix_len() == k.prefix_len() && e.data() == k.data())
+            };
+            self.with_cidr_map(name, |trie| {
+                let current: Vec<LpmKey<[u64; 2]>> = trie.keys().collect::<Result<Vec<_>, _>>()?;
+                for key in current {
+                    if !is_expected(&key) {
+                        trie.remove(&key)?;
+                    }
+                }
+                for key in &expected {
+                    // Reconciliation deliberately restores CIDRs as permanent
+                    // kernel entries. Userspace TTL scheduling remains the
+                    // authority and removes the entry when its TTL expires.
+                    trie.insert(key, 1u8, 0)?;
+                }
+                Ok(())
+            })?;
+        }
+
         Ok(ReconciliationState::default())
     }
 

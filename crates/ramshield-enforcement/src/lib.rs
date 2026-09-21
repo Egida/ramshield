@@ -73,9 +73,13 @@ pub trait XdpApplier: Send + Sync {
             "CIDR enforcement unsupported: {network}"
         )))
     }
+    /// Reconcile both per-IP hash maps and CIDR LPM-trie maps against the
+    /// userspace source of truth. CIDRs are included explicitly because they
+    /// are not represented by `Store::get_all_blocked_ips()`.
     fn reconcile(
         &mut self,
         expected_blocks: &[IpAddr],
+        expected_cidrs: &[IpNetwork],
     ) -> Result<ReconciliationState, EnforcementError>;
     /// Drain kernel→userspace drop notifications (RingBuf). Default: no channel.
     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
@@ -116,6 +120,7 @@ impl XdpApplier for StubXdpApplier {
     fn reconcile(
         &mut self,
         _expected_blocks: &[IpAddr],
+        _expected_cidrs: &[IpNetwork],
     ) -> Result<ReconciliationState, EnforcementError> {
         Ok(ReconciliationState::default())
     }
@@ -208,7 +213,9 @@ impl EnforcementService {
     pub async fn run(mut self, mut command_rx: mpsc::Receiver<EnforceCommand>) -> Result<()> {
         info!("Enforcement service started");
         let expected = self.store.get_all_blocked_ips();
-        match self.xdp.reconcile(&expected) {
+        let expected_cidrs: Vec<IpNetwork> =
+            self.store.active_cidrs.iter().map(|e| *e.key()).collect();
+        match self.xdp.reconcile(&expected, &expected_cidrs) {
             Ok(_) => {
                 self.blocked_ips = expected.into_iter().collect();
                 info!("XDP reconciled with {} blocked IPs", self.blocked_ips.len());
@@ -229,7 +236,8 @@ impl EnforcementService {
                     reconcile_ticks = reconcile_ticks.wrapping_add(1);
                     if reconcile_ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
                         let expected = self.store.get_all_blocked_ips();
-                        match self.xdp.reconcile(&expected) {
+                        let expected_cidrs: Vec<IpNetwork> = self.store.active_cidrs.iter().map(|e| *e.key()).collect();
+                        match self.xdp.reconcile(&expected, &expected_cidrs) {
                             Ok(_) => {
                                 self.blocked_ips = expected.into_iter().collect();
                                 debug!(
@@ -921,6 +929,7 @@ mod tests {
         fn reconcile(
             &mut self,
             _expected: &[IpAddr],
+            _expected_cidrs: &[IpNetwork],
         ) -> Result<ReconciliationState, EnforcementError> {
             Ok(ReconciliationState::default())
         }
@@ -1116,7 +1125,11 @@ mod tests {
             fn apply_unblock(&mut self, _: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
                 Err(EnforcementError::Xdp("kernel gone".into()))
             }
-            fn reconcile(&mut self, _: &[IpAddr]) -> Result<ReconciliationState, EnforcementError> {
+            fn reconcile(
+                &mut self,
+                _: &[IpAddr],
+                _: &[IpNetwork],
+            ) -> Result<ReconciliationState, EnforcementError> {
                 Ok(ReconciliationState::default())
             }
         }
