@@ -472,125 +472,137 @@ impl Store {
             + std::mem::size_of::<Entry>()
             + new_entry.value.heap_bytes();
 
-        // Atomic insert: get old value from insert() return to avoid
-        // get()+insert() race (two separate shard lock acquisitions).
-        //
-        // P1 fix: `was_blocked` is captured here but the blocked indexes are
-        // NOT updated yet. The CapacityExceeded rollback below removes the
-        // entry from `inner`; if blocked_count/blocked_set had already been
-        // bumped, the rollback would leave them permanently over-counted — an
-        // index that never converges (and `unblock_all`/`blocked_list` then
-        // act on phantom IPs). Deferred until the insert is known to stick.
-        let (old_size, was_blocked, old_had_ttl) =
-            self.inner
-                .insert(key, new_entry)
-                .map_or((0, false, false), |old| {
-                    (
-                        std::mem::size_of::<Entry>()
-                            + old.value.heap_bytes()
-                            + std::mem::size_of::<IpAddr>(),
-                        old.value.is_blocked(),
-                        old.expires_at.is_some(),
-                    )
-                });
-
-        let net_growth = entry_size.saturating_sub(old_size);
-
-        if old_size == 0 {
-            // New insert: reserve capacity atomically.
-            // Capacity check must be atomic: two threads both reading the
-            // pre-insert `ram_bytes` and both deciding "fits" will both insert
-            // and the budget will be silently exceeded. fetch_update loops
-            // until the CAS succeeds, so the second thread sees the first's
-            // bookkeeping and rolls back.
-            let mut current = self.ram_bytes.load(Ordering::Relaxed);
-            loop {
-                if current + net_growth > ram_limit_bytes {
-                    self.inner.remove(&key);
-                    tracing::warn!(
+        // Shard-locked commit (entry API): the shard write lock is held
+        // across the capacity check AND the publication, so
+        //  - a rejected fresh insert is NEVER observable — the old flow
+        //    published via inner.insert() and rolled back with remove(),
+        //    leaving a window where a concurrent get() saw a phantom entry;
+        //  - RAM accounting changes in the same critical section as the
+        //    value it accounts for;
+        //  - a replacement swaps the LIVE value under the lock (there is no
+        //    stale get()-snapshot to race), so a late commit cannot roll
+        //    back a newer value: block state transitions can never be
+        //    clobbered by an older copy.
+        match self.inner.entry(key) {
+            dashmap::Entry::Occupied(mut o) => {
+                // Replacement: swap in place. net_growth may be negative
+                // (smaller value) — the limit only gates net-new growth, so
+                // adjust the counters directly.
+                let old = std::mem::replace(
+                    o.get_mut(),
+                    Entry {
+                        value: new_entry.value,
+                        expires_at,
+                    },
+                );
+                drop(o);
+                let old_size = std::mem::size_of::<Entry>()
+                    + old.value.heap_bytes()
+                    + std::mem::size_of::<IpAddr>();
+                let was_blocked = old.value.is_blocked();
+                let old_had_ttl = old.expires_at.is_some();
+                let net_growth = entry_size.saturating_sub(old_size);
+                if entry_size >= old_size {
+                    self.ram_bytes
+                        .fetch_add(entry_size - old_size, Ordering::Relaxed);
+                } else {
+                    self.ram_bytes
+                        .fetch_sub(old_size - entry_size, Ordering::Relaxed);
+                }
+                // Delta applies whether this was a fresh insert or a
+                // replacement: `was_blocked` is false for a fresh insert, so
+                // the (false -> true) case bumps the count.
+                if !was_blocked && new_blocked {
+                    self.blocked_count.fetch_add(1, Ordering::Relaxed);
+                    self.blocked_set.insert(key, ());
+                } else if was_blocked && !new_blocked {
+                    self.blocked_count.fetch_sub(1, Ordering::Relaxed);
+                    self.blocked_set.remove(&key);
+                }
+                match (old_had_ttl, new_has_ttl) {
+                    (false, true) => {
+                        self.ttl_entries.fetch_add(1, Ordering::Relaxed);
+                    }
+                    (true, false) => {
+                        self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    let current = self.ram_bytes.load(Ordering::Relaxed);
+                    tracing::trace!(
+                        ram_bytes = current,
+                        net_growth,
                         key = %key,
-                        limit_mb = ram_limit_bytes / (1024 * 1024),
-                        "store insert rejected: capacity exceeded"
+                        "store insert accounted"
                     );
-                    return Err(RsError::CapacityExceeded {
-                        limit_mb: ram_limit_bytes / (1024 * 1024),
-                    });
                 }
-                match self.ram_bytes.compare_exchange_weak(
-                    current,
-                    current + net_growth,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(observed) => current = observed,
+                if entry_size >= old_size {
+                    self.traffic
+                        .used_bytes
+                        .fetch_add((entry_size - old_size) as u64, Ordering::Relaxed);
+                } else {
+                    self.traffic
+                        .used_bytes
+                        .fetch_sub((old_size - entry_size) as u64, Ordering::Relaxed);
                 }
+                self.total_inserts.fetch_add(1, Ordering::Relaxed);
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!(key = %key, total_inserts = self.total_inserts.load(Ordering::Relaxed), "store insert committed");
+                }
+                return Ok(());
             }
-        } else {
-            // Replacement: net_growth may be negative (smaller value). Adjust
-            // the counter directly — no need to gate it, the limit only
-            // protects net-new growth. `fetch_add`/`fetch_sub` take usize,
-            // so we branch on the sign and pick the right primitive.
-            if entry_size >= old_size {
-                self.ram_bytes
-                    .fetch_add(entry_size - old_size, Ordering::Relaxed);
-            } else {
-                self.ram_bytes
-                    .fetch_sub(old_size - entry_size, Ordering::Relaxed);
+            dashmap::Entry::Vacant(v) => {
+                // Fresh insert: reserve capacity atomically BEFORE the entry
+                // exists. Capacity check must be atomic: two threads both
+                // reading the pre-insert `ram_bytes` and both deciding "fits"
+                // will both exceed the budget — the CAS serializes them.
+                let mut current = self.ram_bytes.load(Ordering::Relaxed);
+                loop {
+                    if current + entry_size > ram_limit_bytes {
+                        tracing::warn!(
+                            key = %key,
+                            limit_mb = ram_limit_bytes / (1024 * 1024),
+                            "store insert rejected: capacity exceeded"
+                        );
+                        return Err(RsError::CapacityExceeded {
+                            limit_mb: ram_limit_bytes / (1024 * 1024),
+                        });
+                    }
+                    match self.ram_bytes.compare_exchange_weak(
+                        current,
+                        current + entry_size,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(observed) => current = observed,
+                    }
+                }
+                v.insert(new_entry);
+                if new_blocked {
+                    self.blocked_count.fetch_add(1, Ordering::Relaxed);
+                    self.blocked_set.insert(key, ());
+                }
+                if new_has_ttl {
+                    self.ttl_entries.fetch_add(1, Ordering::Relaxed);
+                }
+                self.traffic
+                    .used_bytes
+                    .fetch_add(entry_size as u64, Ordering::Relaxed);
+                self.total_inserts.fetch_add(1, Ordering::Relaxed);
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    let current = self.ram_bytes.load(Ordering::Relaxed);
+                    tracing::trace!(
+                        ram_bytes = current,
+                        net_growth = entry_size,
+                        key = %key,
+                        "store insert accounted"
+                    );
+                }
+                return Ok(());
             }
         }
-
-        // Insert stuck — now safe to update the blocked indexes. Delta applies
-        // whether this was a fresh insert or a replacement: `was_blocked` is
-        // false for a fresh insert, so the (false → true) case bumps the count.
-        if !was_blocked && new_blocked {
-            self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            self.blocked_set.insert(key, ());
-        } else if was_blocked && !new_blocked {
-            self.blocked_count.fetch_sub(1, Ordering::Relaxed);
-            self.blocked_set.remove(&key);
-        }
-        // Same deferral rule for the TTL population counter (item 14 gate):
-        // only after the insert is known to stick (rollback above removed
-        // without touching it).
-        match (old_had_ttl, new_has_ttl) {
-            (false, true) => {
-                self.ttl_entries.fetch_add(1, Ordering::Relaxed);
-            }
-            (true, false) => {
-                self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-        if tracing::enabled!(tracing::Level::TRACE) {
-            let current = self.ram_bytes.load(Ordering::Relaxed);
-            tracing::trace!(
-                ram_bytes = current,
-                net_growth,
-                key = %key,
-                "store insert accounted"
-            );
-        }
-
-        // Mirror the ram_bytes change to used_bytes (AtomicU64 — pick the
-        // signed direction explicitly so a shrink actually subtracts).
-        if entry_size >= old_size {
-            self.traffic
-                .used_bytes
-                .fetch_add((entry_size - old_size) as u64, Ordering::Relaxed);
-        } else {
-            self.traffic
-                .used_bytes
-                .fetch_sub((old_size - entry_size) as u64, Ordering::Relaxed);
-        }
-        self.total_inserts.fetch_add(1, Ordering::Relaxed);
-        if tracing::enabled!(tracing::Level::TRACE) {
-            // Per-event insert trace: high-cardinality flood under load.
-            // TRACE = opt-in low-level channel; RUST_LOG=debug stays batch-
-            // summary-only (metric deltas, not per-event lines).
-            tracing::trace!(key = %key, total_inserts = self.total_inserts.load(Ordering::Relaxed), "store insert committed");
-        }
-        Ok(())
     }
 
     /// Atomic read-modify-write of an `IpRecord` under ONE shard lock.
@@ -1111,6 +1123,70 @@ mod tests {
             .unwrap();
         assert_eq!(store.get_stats().blocked, 1);
         assert_eq!(store.get_all_blocked_ips(), vec![ip]);
+    }
+
+    /// Documented architecture contract, commit item: a fresh insert that
+    /// exceeds the budget is rejected BEFORE publication — no phantom entry,
+    /// no accounting, no index trace anywhere.
+    #[test]
+    fn rejected_insert_leaves_no_phantom() {
+        let store = Store::new(16);
+        let ip: IpAddr = "10.9.9.8".parse().unwrap();
+        let denied = store
+            .insert(ip, Value::IpRecord(blocked_record(ip)), None, 1)
+            .unwrap_err();
+        assert!(matches!(denied, RsError::CapacityExceeded { .. }));
+        assert!(!store.inner().contains_key(&ip), "no phantom entry");
+        assert_eq!(store.ram_bytes(), 0, "no accounting on a rejected insert");
+        assert_eq!(
+            store.get_stats().blocked,
+            0,
+            "no blocked index on a rejected insert"
+        );
+        assert!(store.get_all_blocked_ips().is_empty());
+    }
+
+    /// Documented architecture contract, commit item: the capacity gate runs
+    /// under the shard lock, so under concurrent fresh inserts the budget is
+    /// never silently exceeded and no rejected entry ever persists.
+    #[test]
+    fn capacity_gate_holds_under_concurrent_fresh_inserts() {
+        let store = std::sync::Arc::new(Store::new(16));
+        // Budget for ~50 records (blank record + key ~ 128 B): 16 KiB.
+        let mut handles = Vec::new();
+        for t in 0..8u32 {
+            let s = std::sync::Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..200u32 {
+                    let ip: IpAddr =
+                        std::net::Ipv4Addr::new((t % 250) as u8, (i % 250) as u8, 0, 1).into();
+                    let _ = s.insert(ip, Value::IpRecord(blank_record(ip)), None, 16 * 1024);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(
+            store.ram_bytes() <= 16 * 1024,
+            "budget silently exceeded: {} bytes",
+            store.ram_bytes()
+        );
+        assert!(store.ram_bytes() > 0, "some inserts must have committed");
+        // Every surviving entry must account for real bytes: total equals the
+        // sum of the live entries (no phantom residue from rollbacks).
+        let sum: usize = store
+            .inner()
+            .iter()
+            .map(|e| {
+                std::mem::size_of::<Entry>() + e.value.heap_bytes() + std::mem::size_of::<IpAddr>()
+            })
+            .sum();
+        assert_eq!(
+            store.ram_bytes(),
+            sum,
+            "accounting diverged from live entries"
+        );
     }
 
     #[test]
