@@ -1,0 +1,862 @@
+diff -ruN ramshield-original/ramshield-master/crates/ramshield-config/src/lib.rs ramshield/ramshield-master/crates/ramshield-config/src/lib.rs
+--- ramshield-original/ramshield-master/crates/ramshield-config/src/lib.rs	2026-09-20 14:48:57.000000000 +0000
++++ ramshield/ramshield-master/crates/ramshield-config/src/lib.rs	2026-09-21 16:13:14.380917723 +0000
+@@ -435,9 +435,10 @@
+     /// Env vars take precedence: RAMSHIELD_ENGINE__RAM_LIMIT_MB=1024
+     pub fn load(path: &str) -> anyhow::Result<Self> {
+         let mut cfg = Self::from_toml_file(path)?;
+-        cfg.apply_env_overrides();
+-        // P1 fix: file validation ran BEFORE env overrides, and
+-        // apply_env_overrides swallowed its own re-validation (let _ =).
++        cfg.apply_env_overrides()?;
++        // P1 fix: file validation runs before overrides, so the final merged
++        // configuration is validated again below. Typed env parsing itself is
++        // fail-fast and returns an error before validation can be bypassed.
+         // RAMSHIELD_IPC__TCP_ADDR=0.0.0.0:7890 (or dashboard addr) without
+         // auth keys/hash therefore silently defeated the fail-closed
+         // public-bind guard. Validate the FINAL config or fail startup.
+@@ -446,76 +447,55 @@
+     }
+ 
+     /// Apply RAMSHIELD_*__FIELD environment overrides on top of any config.
+-    pub fn apply_env_overrides(&mut self) {
+-        // Engine overrides
+-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__RAM_LIMIT_MB")
+-            && let Ok(parsed) = v.parse::<usize>()
+-        {
+-            self.engine.ram_limit_mb = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__WORKER_THREADS")
+-            && let Ok(parsed) = v.parse::<usize>()
+-        {
+-            self.engine.worker_threads = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_ENGINE__SHARD_COUNT")
+-            && let Ok(parsed) = v.parse::<usize>()
+-        {
+-            self.engine.shard_count = parsed.next_power_of_two();
++    /// Apply RAMSHIELD_*__FIELD environment overrides on top of any config.
++    ///
++    /// Invalid typed values are fatal rather than silently ignored. This is a
++    /// security/operations invariant: an operator must never receive a
++    /// successful startup while a requested mitigation threshold, memory
++    /// limit, connection limit, or feature toggle was rejected by parsing.
++    /// Secret values are never included in error messages.
++    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
++        fn parse<T>(name: &str) -> anyhow::Result<Option<T>>
++        where
++            T: std::str::FromStr,
++            T::Err: std::fmt::Display,
++        {
++            match std::env::var(name) {
++                Ok(value) => value
++                    .parse::<T>()
++                    .map(Some)
++                    .map_err(|e| anyhow::anyhow!("invalid value for {name}: {e}")),
++                Err(std::env::VarError::NotPresent) => Ok(None),
++                Err(std::env::VarError::NotUnicode(_)) => {
++                    anyhow::bail!("environment variable {name} is not valid UTF-8")
++                }
++            }
+         }
+ 
+-        // Detection overrides
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__RPS_THRESHOLD")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.rps_threshold = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__PROMOTE_MIN_EVENTS")
+-            && let Ok(parsed) = v.parse::<u32>()
+-        {
+-            self.detection.promote_min_events = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BATCH_WINDOW_MS")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.batch_window_ms = parsed;
++        // Engine overrides
++        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__RAM_LIMIT_MB")? {
++            self.engine.ram_limit_mb = v;
+         }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_WINDOW_THRESHOLD")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.subnet_window_threshold = parsed;
++        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__WORKER_THREADS")? {
++            self.engine.worker_threads = v;
+         }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BLOCK_TTL_SECS")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.block_ttl_secs = parsed;
++        if let Some(v) = parse::<usize>("RAMSHIELD_ENGINE__SHARD_COUNT")? {
++            self.engine.shard_count = v
++                .checked_next_power_of_two()
++                .ok_or_else(|| anyhow::anyhow!("RAMSHIELD_ENGINE__SHARD_COUNT is too large"))?;
+         }
+ 
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BURST_TTL_SECS")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.subnet_burst_ttl_secs = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__RATE_WINDOW_SECS")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.rate_window_secs = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_THRESHOLD")
+-            && let Ok(parsed) = v.parse::<usize>()
+-        {
+-            self.detection.subnet_batch_threshold = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__SUBNET_BATCH_MIN_EVENTS")
+-            && let Ok(parsed) = v.parse::<u64>()
+-        {
+-            self.detection.subnet_batch_min_events = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DETECTION__BATCH_BLOCK_ENABLED")
+-            && let Ok(parsed) = v.parse::<bool>()
+-        {
+-            self.detection.batch_block_enabled = parsed;
+-        }
++        // Detection overrides
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__RPS_THRESHOLD")? { self.detection.rps_threshold = v; }
++        if let Some(v) = parse::<u32>("RAMSHIELD_DETECTION__PROMOTE_MIN_EVENTS")? { self.detection.promote_min_events = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__BATCH_WINDOW_MS")? { self.detection.batch_window_ms = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_WINDOW_THRESHOLD")? { self.detection.subnet_window_threshold = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__BLOCK_TTL_SECS")? { self.detection.block_ttl_secs = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_BURST_TTL_SECS")? { self.detection.subnet_burst_ttl_secs = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__RATE_WINDOW_SECS")? { self.detection.rate_window_secs = v; }
++        if let Some(v) = parse::<usize>("RAMSHIELD_DETECTION__SUBNET_BATCH_THRESHOLD")? { self.detection.subnet_batch_threshold = v; }
++        if let Some(v) = parse::<u64>("RAMSHIELD_DETECTION__SUBNET_BATCH_MIN_EVENTS")? { self.detection.subnet_batch_min_events = v; }
++        if let Some(v) = parse::<bool>("RAMSHIELD_DETECTION__BATCH_BLOCK_ENABLED")? { self.detection.batch_block_enabled = v; }
+ 
+         // IPC overrides
+         if let Ok(v) = std::env::var("RAMSHIELD_IPC__AUTH_KEYS") {
+@@ -528,51 +508,30 @@
+         if let Ok(v) = std::env::var("RAMSHIELD_IPC__TCP_ADDR") {
+             self.ipc.tcp_addr = v;
+         }
+-        if let Ok(v) = std::env::var("RAMSHIELD_IPC__MAX_CONNECTIONS")
+-            && let Ok(parsed) = v.parse::<usize>()
+-        {
+-            self.ipc.max_connections = parsed;
+-        }
++        if let Some(v) = parse::<usize>("RAMSHIELD_IPC__MAX_CONNECTIONS")? { self.ipc.max_connections = v; }
+ 
+         // Dashboard overrides
+-        if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ENABLED")
+-            && let Ok(parsed) = v.parse::<bool>()
+-        {
+-            self.dashboard.enabled = parsed;
+-        }
+-        if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__HTTP_ADDR") {
+-            self.dashboard.http_addr = v;
+-        }
++        if let Some(v) = parse::<bool>("RAMSHIELD_DASHBOARD__ENABLED")? { self.dashboard.enabled = v; }
++        if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__HTTP_ADDR") { self.dashboard.http_addr = v; }
+         if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ADMIN_PASSWORD") {
+-            // Plaintext env convenience: hash at load, never store plaintext.
+             use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+             let salt = SaltString::generate(&mut OsRng);
+-            if let Ok(hash) = argon2::Argon2::default().hash_password(v.as_bytes(), &salt) {
+-                self.dashboard.admin_password_hash = Some(hash.to_string());
+-            }
++            self.dashboard.admin_password_hash = Some(
++                argon2::Argon2::default()
++                    .hash_password(v.as_bytes(), &salt)
++                    .map_err(|e| anyhow::anyhow!("failed to hash RAMSHIELD_DASHBOARD__ADMIN_PASSWORD: {e}"))?
++                    .to_string(),
++            );
+         }
+-        // Pre-hashed password (PHC string) straight from a Secret. This is the
+-        // name the shipped k8s manifests and docs use; without this reader the
+-        // env var was inert and the dashboard silently booted unauthenticated.
+-        // Takes precedence over the plaintext var so a manifest that sets both
+-        // does not fall back to a runtime-generated salt.
+         if let Ok(v) = std::env::var("RAMSHIELD_DASHBOARD__ADMIN_PASSWORD_HASH") {
+             let v = v.trim().to_string();
+-            if !v.is_empty() {
+-                self.dashboard.admin_password_hash = Some(v);
+-            }
++            if !v.is_empty() { self.dashboard.admin_password_hash = Some(v); }
+         }
+ 
+         // Forecasting overrides
+-        if let Ok(v) = std::env::var("RAMSHIELD_FORECASTING__ENABLED")
+-            && let Ok(parsed) = v.parse::<bool>()
+-        {
+-            self.forecasting.enabled = parsed;
+-        }
++        if let Some(v) = parse::<bool>("RAMSHIELD_FORECASTING__ENABLED")? { self.forecasting.enabled = v; }
+ 
+-        // Env-override validation now happens on the FINAL config at every
+-        // entry point (Config::load, main's no-config branch). An earlier
+-        // `let _ = self.validate()` here swallowed the result — bypass path.
++        Ok(())
+     }
+ 
+     /// Validate configuration with sensible bounds and error messages.
+@@ -1094,22 +1053,16 @@
+ 
+     #[test]
+     #[serial]
+-    fn env_override_invalid_ignored() {
+-        use std::panic;
++    fn env_override_invalid_value_is_rejected() {
+         clear_env_vars();
+         unsafe {
+             std::env::set_var("RAMSHIELD_ENGINE__RAM_LIMIT_MB", "not_a_number");
+         }
+         let tmpfile = "/tmp/ramshield_test_config.toml";
+         std::fs::write(tmpfile, "").unwrap();
+-
+-        // Should not panic; invalid env var is silently ignored
+-        let result = panic::catch_unwind(|| Config::load(tmpfile).unwrap());
+-        assert!(
+-            result.is_ok(),
+-            "Config::load should not panic on invalid env var"
+-        );
+-        assert_eq!(result.unwrap().engine.ram_limit_mb, 512); // default preserved
++        let err = Config::load(tmpfile).expect_err("invalid typed env override must fail startup");
++        assert!(err.to_string().contains("RAMSHIELD_ENGINE__RAM_LIMIT_MB"), "{err}");
+         clear_env_vars();
+     }
++
+ }
+diff -ruN ramshield-original/ramshield-master/crates/ramshield-enforcement/src/lib.rs ramshield/ramshield-master/crates/ramshield-enforcement/src/lib.rs
+--- ramshield-original/ramshield-master/crates/ramshield-enforcement/src/lib.rs	2026-09-20 14:48:57.000000000 +0000
++++ ramshield/ramshield-master/crates/ramshield-enforcement/src/lib.rs	2026-09-21 16:12:25.006876114 +0000
+@@ -73,9 +73,13 @@
+             "CIDR enforcement unsupported: {network}"
+         )))
+     }
++    /// Reconcile both per-IP hash maps and CIDR LPM-trie maps against the
++    /// userspace source of truth. CIDRs are included explicitly because they
++    /// are not represented by `Store::get_all_blocked_ips()`.
+     fn reconcile(
+         &mut self,
+         expected_blocks: &[IpAddr],
++        expected_cidrs: &[IpNetwork],
+     ) -> Result<ReconciliationState, EnforcementError>;
+     /// Drain kernel→userspace drop notifications (RingBuf). Default: no channel.
+     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
+@@ -116,6 +120,7 @@
+     fn reconcile(
+         &mut self,
+         _expected_blocks: &[IpAddr],
++        _expected_cidrs: &[IpNetwork],
+     ) -> Result<ReconciliationState, EnforcementError> {
+         Ok(ReconciliationState::default())
+     }
+@@ -208,7 +213,8 @@
+     pub async fn run(mut self, mut command_rx: mpsc::Receiver<EnforceCommand>) -> Result<()> {
+         info!("Enforcement service started");
+         let expected = self.store.get_all_blocked_ips();
+-        match self.xdp.reconcile(&expected) {
++        let expected_cidrs: Vec<IpNetwork> = self.store.active_cidrs.iter().map(|e| *e.key()).collect();
++        match self.xdp.reconcile(&expected, &expected_cidrs) {
+             Ok(_) => {
+                 self.blocked_ips = expected.into_iter().collect();
+                 info!("XDP reconciled with {} blocked IPs", self.blocked_ips.len());
+@@ -229,7 +235,8 @@
+                     reconcile_ticks = reconcile_ticks.wrapping_add(1);
+                     if reconcile_ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
+                         let expected = self.store.get_all_blocked_ips();
+-                        match self.xdp.reconcile(&expected) {
++                        let expected_cidrs: Vec<IpNetwork> = self.store.active_cidrs.iter().map(|e| *e.key()).collect();
++                        match self.xdp.reconcile(&expected, &expected_cidrs) {
+                             Ok(_) => {
+                                 self.blocked_ips = expected.into_iter().collect();
+                                 debug!(
+@@ -921,6 +928,7 @@
+         fn reconcile(
+             &mut self,
+             _expected: &[IpAddr],
++            _expected_cidrs: &[IpNetwork],
+         ) -> Result<ReconciliationState, EnforcementError> {
+             Ok(ReconciliationState::default())
+         }
+@@ -1116,7 +1124,7 @@
+             fn apply_unblock(&mut self, _: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
+                 Err(EnforcementError::Xdp("kernel gone".into()))
+             }
+-            fn reconcile(&mut self, _: &[IpAddr]) -> Result<ReconciliationState, EnforcementError> {
++            fn reconcile(&mut self, _: &[IpAddr], _: &[IpNetwork]) -> Result<ReconciliationState, EnforcementError> {
+                 Ok(ReconciliationState::default())
+             }
+         }
+diff -ruN ramshield-original/ramshield-master/crates/ramshield-enforcement/src/xdp.rs ramshield/ramshield-master/crates/ramshield-enforcement/src/xdp.rs
+--- ramshield-original/ramshield-master/crates/ramshield-enforcement/src/xdp.rs	2026-09-20 14:48:57.000000000 +0000
++++ ramshield/ramshield-master/crates/ramshield-enforcement/src/xdp.rs	2026-09-21 16:13:01.706581730 +0000
+@@ -410,6 +410,7 @@
+     fn reconcile(
+         &mut self,
+         expected_blocks: &[IpAddr],
++        expected_cidrs: &[IpNetwork],
+     ) -> Result<ReconciliationState, EnforcementError> {
+         // IPv6 plan Task 3: the two maps are reconciled independently — each
+         // drains its stale keys against its family's expected set only. The
+@@ -460,6 +461,42 @@
+                 );
+             }
+         }
++        // CIDR state has its own LPM-trie maps and therefore cannot be
++        // reconstructed from `expected_blocks`. A driver/map reload can wipe
++        // BLOCKCIDR/BLOCKCIDR6 while userspace still considers the prefixes
++        // active. Reconcile both families explicitly. Aya exposes LpmTrie::keys
++        // as a fallible iterator, so collect current keys before deleting to
++        // avoid mutating the iterator while it is walking the kernel map.
++        let (v4_cidrs, v6_cidrs): (Vec<_>, Vec<_>) = expected_cidrs
++            .iter()
++            .partition(|n| matches!(n.addr, IpAddr::V4(_)));
++        for (name, expected) in [
++            ("BLOCKCIDR", v4_cidrs),
++            ("BLOCKCIDR6", v6_cidrs),
++        ] {
++            let expected: std::collections::HashSet<LpmKey<[u64; 2]>> = expected
++                .into_iter()
++                .map(|network| cidr_key(*network))
++                .collect();
++            self.with_cidr_map(name, |trie| {
++                let current: Vec<LpmKey<[u64; 2]>> = trie
++                    .keys()
++                    .collect::<Result<Vec<_>, _>>()?;
++                for key in current {
++                    if !expected.contains(&key) {
++                        trie.remove(&key)?;
++                    }
++                }
++                for key in &expected {
++                    // Reconciliation deliberately restores CIDRs as permanent
++                    // kernel entries. Userspace TTL scheduling remains the
++                    // authority and removes the entry when its TTL expires.
++                    trie.insert(key, 1u8, 0)?;
++                }
++                Ok(())
++            })?;
++        }
++
+         Ok(ReconciliationState::default())
+     }
+ 
+diff -ruN ramshield-original/ramshield-master/docs/RAMSHIELD_HARDENING_20260921.md ramshield/ramshield-master/docs/RAMSHIELD_HARDENING_20260921.md
+--- ramshield-original/ramshield-master/docs/RAMSHIELD_HARDENING_20260921.md	1970-01-01 00:00:00.000000000 +0000
++++ ramshield/ramshield-master/docs/RAMSHIELD_HARDENING_20260921.md	2026-09-21 16:13:14.543268362 +0000
+@@ -0,0 +1,76 @@
++# RamShield Hardening Integration — 2026-09-21
++
++## Integrated changes
++
++### H1 — CIDR-aware XDP reconciliation
++
++`XdpApplier::reconcile()` now receives both:
++
++- expected per-IP blocks;
++- expected CIDR blocks.
++
++`EnforcementService` obtains the CIDR source of truth from
++`Store::active_cidrs` on initial and periodic reconciliation.
++
++The Aya implementation independently reconciles:
++
++- `BLOCKLIST`
++- `BLOCKLIST6`
++- `BLOCKCIDR`
++- `BLOCKCIDR6`
++
++The CIDR maps use Aya `LpmTrie::keys()` followed by exact-key removal and
++reinsertion of the expected set. Aya documents `keys()` as a fallible iterator
++and `remove()` as exact prefix/data removal, which matches this reconciliation
++strategy.
++
++### H2 — Fail-fast typed environment configuration
++
++`Config::apply_env_overrides()` now returns `anyhow::Result<()>`.
++
++All typed environment variables reject malformed values. This prevents a
++configuration typo from silently falling back to TOML/default state.
++
++The two configuration entry points propagate this error:
++
++- `Config::load()`;
++- no-config startup in `src/main.rs`.
++
++A regression test verifies invalid `RAMSHIELD_ENGINE__RAM_LIMIT_MB` fails
++startup.
++
++### H3 — Operator runbook and diagnostics
++
++Added:
++
++- `docs/RAMSHIELD_RUNBOOK.md`
++- `docs/RAMSHIELD_HARDENING_20260921.md`
++- `scripts/ramshield-preflight.sh`
++- `scripts/ramshield-xdp-inspect.sh`
++- `scripts/ramshield-wal-inspect.sh`
++
++All scripts are intentionally read-only.
++
++### H4 — WAL semantics documented explicitly
++
++The implementation remains append-before-mutate. The runbook now explicitly
++states that this is durable command intent, not a complete ACID transaction.
++The remaining storage-failure window is documented rather than hidden.
++
++The next WAL format revision should add an explicit intent/commit protocol if
++full transactional recovery is required.
++
++## Validation performed in the packaging environment
++
++The repository preflight script passes its source/layout checks.
++
++Cargo/rustc and bpftool were not installed in the packaging environment, so no
++fresh compiler, clippy, rustfmt, integration-test, or live XDP result is claimed.
++
++On a development/CI host, run:
++
++```bash
++cargo test --workspace --all-targets --no-fail-fast
++cargo clippy --workspace --all-targets --all-features -- -D warnings
++cargo fmt --all -- --check
++```
+diff -ruN ramshield-original/ramshield-master/docs/RAMSHIELD_RUNBOOK.md ramshield/ramshield-master/docs/RAMSHIELD_RUNBOOK.md
+--- ramshield-original/ramshield-master/docs/RAMSHIELD_RUNBOOK.md	1970-01-01 00:00:00.000000000 +0000
++++ ramshield/ramshield-master/docs/RAMSHIELD_RUNBOOK.md	2026-09-21 16:12:57.813578772 +0000
+@@ -0,0 +1,293 @@
++# RamShield Operations & Recovery Runbook
++
++> This document is intentionally colocated with the implementation. The code
++> comments in `ramshield-enforcement` and `ramshield-config` describe the
++> invariants; this runbook describes how an operator verifies those invariants
++> in production and what to do when they are violated.
++
++## 1. Scope
++
++This runbook covers the failure modes identified by the 2026-09-20 ground-up
++source audit:
++
++1. XDP per-IP map drift.
++2. XDP CIDR/LPM map drift.
++3. WAL -> storage ordering and recovery semantics.
++4. Invalid environment overrides.
++5. CI/toolchain and security-audit checks.
++6. GitHub automation trust boundaries.
++
++The enforcement actor remains the sole writer of block state and dataplane
++state. Do not edit BPF maps manually during an active incident unless the
++incident procedure explicitly requires it.
++
++## 2. Normal verification
++
++From the repository root:
++
++```bash
++./scripts/ramshield-preflight.sh
++```
++
++The preflight script is deliberately read-only. It checks for the expected
++source layout, required tools, workspace metadata, and the presence of the
++security/recovery tests.
++
++When Rust/Cargo is installed, run:
++
++```bash
++cargo test --workspace --all-targets --no-fail-fast
++cargo clippy --workspace --all-targets --all-features -- -D warnings
++cargo fmt --all -- --check
++```
++
++Cargo's `test` command compiles and runs unit, integration, and documentation
++tests, while `--workspace` selects the workspace packages. See the Cargo
++reference for the exact behavior. citeturn0search0turn0search2
++
++## 3. Environment configuration failure
++
++### Symptom
++
++Startup fails with an error containing the environment variable name, for
++example:
++
++```text
++invalid value for RAMSHIELD_ENGINE__RAM_LIMIT_MB: invalid digit found in string
++```
++
++### Meaning
++
++This is intentional. Typed environment overrides are configuration input, not
++best-effort hints. An invalid value must prevent startup rather than silently
++leaving the TOML/default value active.
++
++### Recovery
++
++1. Inspect the service environment:
++
++```bash
++systemctl show ramshield --property=Environment
++```
++
++2. Correct the variable.
++3. Run the preflight script.
++4. Restart RamShield.
++
++Never print password, HMAC, or Argon2 secret values into incident logs.
++
++## 4. XDP map drift
++
++### Symptom
++
++Dashboard/metrics indicate active blocks but kernel enforcement counters do
++not reflect the expected traffic, or a kernel/BPF reload has occurred.
++
++### First response
++
++Run:
++
++```bash
++./scripts/ramshield-xdp-inspect.sh
++```
++
++The script is diagnostic only. It does not mutate maps.
++
++### Recovery
++
++The enforcement actor performs periodic store -> XDP reconciliation. Both
++per-IP maps and CIDR LPM maps are now included in the reconciliation contract.
++
++For CIDRs specifically, the expected set comes from
++`Store::active_cidrs`; it is not inferred from the per-IP blocked index.
++
++If the maps remain inconsistent after the normal reconciliation interval:
++
++1. Capture logs and `bpftool` output.
++2. Do not manually delete active entries.
++3. Restart the daemon only if the incident procedure allows it; WAL replay
++   reconstructs durable enforcement state before normal reconciliation.
++
++## 5. CIDR/LPM-specific failure
++
++A CIDR block is represented in:
++
++```text
++Store::active_cidrs
++        |
++        +--> BLOCKCIDR   (IPv4)
++        |
++        +--> BLOCKCIDR6  (IPv6)
++```
++
++A per-IP block is represented in:
++
++```text
++Store::blocked_set
++        |
++        +--> BLOCKLIST
++        +--> BLOCKLIST6
++```
++
++These are separate state domains. A successful per-IP reconciliation does not
++prove that CIDR state is present in the kernel.
++
++The implementation therefore:
++
++1. partitions expected CIDRs by address family;
++2. converts each expected network to the exact Aya LPM key;
++3. removes stale kernel prefixes;
++4. inserts missing prefixes;
++5. restores CIDRs as permanent kernel entries;
++6. leaves TTL authority with the enforcement actor.
++
++Aya exposes `LpmTrie::keys()` as a fallible iterator and exact-key removal via
++`remove`, which is why reconciliation collects the current keys before
++mutating the trie. citeturn1search0turn1search3
++
++## 6. WAL recovery
++
++### Current contract
++
++The current WAL implementation uses **append-before-mutate**:
++
++```text
++WAL append
++   -> Store mutation
++      -> TTL scheduling
++         -> XDP
++```
++
++This guarantees that a successfully journaled command exists before the
++corresponding in-memory transition is attempted.
++
++### Important limitation
++
++A storage mutation can still fail after the WAL record has been appended. The
++existing WAL format does not contain a two-phase commit/abort record, so this
++is a known recovery-semantics limitation rather than a claim of full ACID
++transactionality.
++
++Do not describe the current WAL as a database transaction log.
++
++### Recovery procedure
++
++1. Preserve the WAL directory.
++2. Do not delete the newest segment.
++3. Inspect logs for `WAL replay` messages.
++4. Confirm recovered block counts.
++5. Confirm CIDR recovery separately.
++6. Confirm XDP reconciliation after startup.
++
++Use:
++
++```bash
++./scripts/ramshield-wal-inspect.sh /path/to/wal
++```
++
++The script only reads segment metadata and never rewrites WAL files.
++
++## 7. Security audit / CI
++
++The security audit must be treated as a deliberate policy gate. Do not hide a
++failing dependency audit with `|| true` in a release workflow.
++
++Recommended release checks:
++
++```bash
++cargo test --workspace --all-targets --no-fail-fast
++cargo clippy --workspace --all-targets --all-features -- -D warnings
++cargo fmt --all -- --check
++cargo audit
++```
++
++If stable compatibility is required in addition to the repository's nightly
++toolchain, make it an explicitly named compatibility job rather than silently
++mixing toolchains.
++
++## 8. GitHub automation security
++
++The `.github/scripts` automation layer is privileged infrastructure.
++
++Rules:
++
++- Do not execute untrusted strings through `shell=True`.
++- Prefer argument arrays / direct process APIs.
++- Keep workflow token permissions minimal.
++- Never expose repository secrets to untrusted pull-request code.
++- Separate read-only analysis agents from write/commit agents.
++- Treat issue/PR text as untrusted input.
++
++Rust's `std::process::Command::arg/args` passes arguments literally rather than
++through a shell, which is the preferred process-spawning model when shell
++syntax is not required. citeturn0search1turn0search3
++
++## 9. Incident evidence checklist
++
++Collect:
++
++```text
++- RamShield version
++- git revision
++- kernel version
++- network interface
++- XDP attach mode
++- active block count
++- active CIDR count
++- WAL directory and segment list
++- last WAL LSN
++- XDP counters
++- enforcement/XDP error logs
++- configuration validation errors
++- relevant systemd journal window
++```
++
++Do not collect or paste:
++
++```text
++- IPC HMAC secrets
++- dashboard passwords
++- Argon2 plaintext passwords
++- session cookies
++```
++
++## 10. Change procedure for enforcement code
++
++Any change touching:
++
++```text
++XdpApplier
++Store::blocked_set
++Store::active_cidrs
++WalEntry
++replay_wal_*
++EnforcementService::enforce
++EnforcementService::expire_due
++```
++
++must include:
++
++1. a unit regression test;
++2. a restart/replay test where applicable;
++3. an XDP reconciliation test where applicable;
++4. a comment documenting ownership and failure semantics;
++5. a runbook update if operator behavior changes.
++
++## 11. Future WAL transaction work
++
++The remaining architectural improvement is a true command transaction protocol:
++
++```text
++Intent LSN
++   |
++   +--> state mutation
++   |
++   +--> Commit LSN
++
++replay:
++   apply only intents with a durable Commit
++```
++
++A format/version migration is required before implementing this. Until then,
++append-before-mutate is the supported behavior and the storage-failure window
++must remain visible in operational documentation.
+diff -ruN ramshield-original/ramshield-master/scripts/ramshield-preflight.sh ramshield/ramshield-master/scripts/ramshield-preflight.sh
+--- ramshield-original/ramshield-master/scripts/ramshield-preflight.sh	1970-01-01 00:00:00.000000000 +0000
++++ ramshield/ramshield-master/scripts/ramshield-preflight.sh	2026-09-21 16:13:01.706997116 +0000
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Read-only repository preflight.
++# This intentionally does not install packages, mutate BPF maps, restart the
++# service, or expose secrets. It is suitable for CI and operator diagnostics.
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$ROOT"
++
++fail=0
++check() {
++  local label="$1"; shift
++  if "$@" >/dev/null 2>&1; then
++    printf '[OK]   %s\n' "$label"
++  else
++    printf '[FAIL] %s\n' "$label"
++    fail=1
++  fi
++}
++
++check 'workspace Cargo.toml exists' test -f Cargo.toml
++check 'Cargo.lock exists' test -f Cargo.lock
++check 'Rust toolchain policy exists' test -f rust-toolchain.toml
++check 'enforcement source exists' test -f crates/ramshield-enforcement/src/lib.rs
++check 'XDP source exists' test -f crates/ramshield-enforcement/src/xdp.rs
++check 'config source exists' test -f crates/ramshield-config/src/lib.rs
++check 'runbook exists' test -f docs/RAMSHIELD_RUNBOOK.md
++check 'XDP inspection script exists' test -x scripts/ramshield-xdp-inspect.sh
++check 'WAL inspection script exists' test -x scripts/ramshield-wal-inspect.sh
++
++if command -v cargo >/dev/null 2>&1; then
++  printf '[INFO] cargo: %s\n' "$(cargo --version)"
++else
++  printf '[WARN] cargo is not installed; source-only preflight completed\n'
++fi
++
++if command -v bpftool >/dev/null 2>&1; then
++  printf '[INFO] bpftool: available\n'
++else
++  printf '[WARN] bpftool: unavailable; kernel-map inspection will be limited\n'
++fi
++
++if grep -R -q 'expected_cidrs' crates/ramshield-enforcement/src/lib.rs crates/ramshield-enforcement/src/xdp.rs; then
++  printf '[OK]   CIDR-aware reconciliation contract present\n'
++else
++  printf '[FAIL] CIDR-aware reconciliation contract missing\n'
++  fail=1
++fi
++
++if grep -q 'invalid value for {name}' crates/ramshield-config/src/lib.rs; then
++  printf '[OK]   invalid env values fail loudly\n'
++else
++  printf '[FAIL] typed env validation helper missing\n'
++  fail=1
++fi
++
++exit "$fail"
+diff -ruN ramshield-original/ramshield-master/scripts/ramshield-wal-inspect.sh ramshield/ramshield-master/scripts/ramshield-wal-inspect.sh
+--- ramshield-original/ramshield-master/scripts/ramshield-wal-inspect.sh	1970-01-01 00:00:00.000000000 +0000
++++ ramshield/ramshield-master/scripts/ramshield-wal-inspect.sh	2026-09-21 16:12:57.816289532 +0000
+@@ -0,0 +1,23 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Read-only WAL inspection. It intentionally avoids parsing payloads because
++# payloads may contain operationally sensitive information. Use RamShield's
++# own replay code for semantic validation.
++
++DIR="${1:-}"
++if [[ -z "$DIR" ]]; then
++  echo "usage: $0 /path/to/wal" >&2
++  exit 2
++fi
++if [[ ! -d "$DIR" ]]; then
++  echo "WAL directory does not exist: $DIR" >&2
++  exit 2
++fi
++
++printf 'WAL directory: %s\n' "$DIR"
++printf 'Segments:\n'
++find "$DIR" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
++printf '\nPermissions:\n'
++stat -c '%A %U:%G %n' "$DIR"/* 2>/dev/null || true
++printf '\nNo WAL files were modified.\n'
+diff -ruN ramshield-original/ramshield-master/scripts/ramshield-xdp-inspect.sh ramshield/ramshield-master/scripts/ramshield-xdp-inspect.sh
+--- ramshield-original/ramshield-master/scripts/ramshield-xdp-inspect.sh	1970-01-01 00:00:00.000000000 +0000
++++ ramshield/ramshield-master/scripts/ramshield-xdp-inspect.sh	2026-09-21 16:12:57.815487716 +0000
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++# Read-only XDP/BPF inspection helper.
++# Usage: ./scripts/ramshield-xdp-inspect.sh [interface]
++# No map mutation is performed by this script.
++
++IFACE="${1:-}"
++
++if ! command -v bpftool >/dev/null 2>&1; then
++  echo "bpftool is required for kernel-map inspection" >&2
++  exit 2
++fi
++
++if [[ -n "$IFACE" ]] && command -v ip >/dev/null 2>&1; then
++  echo "== XDP link: $IFACE =="
++  ip -details link show dev "$IFACE" || true
++fi
++
++echo "== XDP programs =="
++bpftool prog show || true
++
++echo "== BPF maps =="
++bpftool map show || true
++
++echo "== RamShield-related maps =="
++bpftool map show | grep -E 'BLOCKLIST|BLOCKCIDR|COUNTERS|EVENTS' || true
++
++echo
++cat <<'NOTE'
++Interpretation:
++- BLOCKLIST/BLOCKLIST6 are per-IP maps.
++- BLOCKCIDR/BLOCKCIDR6 are CIDR LPM maps.
++- A present userspace block with an empty corresponding kernel map is map drift.
++- Do not mutate maps from this script; let the enforcement actor reconcile them.
++NOTE
+diff -ruN ramshield-original/ramshield-master/src/main.rs ramshield/ramshield-master/src/main.rs
+--- ramshield-original/ramshield-master/src/main.rs	2026-09-20 14:48:57.000000000 +0000
++++ ramshield/ramshield-master/src/main.rs	2026-09-21 16:12:31.902794548 +0000
+@@ -50,7 +50,7 @@
+         None => {
+             // Still honor env overrides in no-config mode (dashboard auth etc).
+             let mut c = Config::default();
+-            c.apply_env_overrides();
++            c.apply_env_overrides()?;
+             // P1 fix (same class as Config::load): env overrides could set a
+             // public bind with no secrets; the fail-closed guard must run on
+             // the FINAL config here too, not just on the file path.
