@@ -164,6 +164,14 @@ pub struct DetectionEngine {
     cgnat_guard: ramshield_cgnat::CgnatGuard,
     /// P2: Shared memory rule table for proxy lookups (<15ns).
     shm_table: Arc<ramshield_cgnat::ShmTableManager>,
+    /// (ip, reason) admission gate: key -> last-admitted wall-clock ns.
+    /// A re-emit for a key inside its cooldown (ttl/2, or 30s for permanent
+    /// blocks) is suppressed: the enforcement layer keeps the block alive
+    /// and re-admission at the cooldown boundary is the TTL refresh — the
+    /// same mitigation no longer re-does WAL append + store write + XDP
+    /// apply every flush window. Queue rejection removes the key so the
+    /// next window retries instead of suppressing forever.
+    pending_mitigations: DashMap<(IpAddr, BlockReason), u64, ahash::RandomState>,
 }
 
 /// Releases the single-flusher gate even on early return/panic.
@@ -234,6 +242,10 @@ impl DetectionEngine {
             // P2: one SHM open shared by proxy and CGNAT guard.
             shm_table: shm_table.clone(),
             cgnat_guard: ramshield_cgnat::CgnatGuard::new(),
+            pending_mitigations: DashMap::with_hasher_and_shard_amount(
+                ahash::RandomState::new(),
+                32,
+            ),
         })
     }
 
@@ -464,9 +476,47 @@ impl DetectionEngine {
         }
     }
 
+    /// Admission gate: may we emit a mitigation for `(ip, reason)` now?
+    ///
+    /// First admission of a key passes and stamps the wall clock; a later
+    /// admission inside the cooldown (ttl/2, or 30s for permanent blocks)
+    /// is suppressed. The cooldown re-admission IS the block TTL refresh —
+    /// it stops the per-flush-window re-emission that previously re-did the
+    /// whole enforcement command path (WAL, store, ring, XDP) for every
+    /// sustained attacker.
+    ///
+    /// On `try_send` failure the caller MUST `retreat_mitigation` so the
+    /// next window retries: a queue-full rejection is a delivery failure,
+    /// not a suppression signal.
+    fn admit_mitigation(&self, key: (IpAddr, BlockReason), ttl_secs: u64, now: u64) -> bool {
+        let cooldown_ns = if ttl_secs == 0 {
+            30_000_000_000
+        } else {
+            (ttl_secs.saturating_mul(1_000_000_000) / 2).max(1_000_000_000)
+        };
+        let suppressed = self
+            .pending_mitigations
+            .get(&key)
+            .is_some_and(|g| now.saturating_sub(*g) < cooldown_ns);
+        if suppressed {
+            return false;
+        }
+        self.pending_mitigations.insert(key, now);
+        true
+    }
+
+    /// Undo an admission whose command never reached the enforcement queue.
+    fn retreat_mitigation(&self, key: (IpAddr, BlockReason)) {
+        self.pending_mitigations.remove(&key);
+    }
+
     /// The emergency emit — byte-identical to flush_batch's HighRps block.
     fn emit_emergency_block(&self, ip: IpAddr, events: u32) {
         let ttl = self.config.load().detection.block_ttl_secs;
+        let key = (ip, BlockReason::HighRps);
+        if !self.admit_mitigation(key, ttl, now_ns()) {
+            return;
+        }
         let cmd = EnforceCommand {
             decision_id: Uuid::new_v4(),
             policy_version: 1,
@@ -485,7 +535,12 @@ impl DetectionEngine {
                     .record_block_ip(&ip, BlockReason::HighRps.as_str(), "detection");
                 trace!(ip = %ip, events, "emergency fast-path block emitted pre-flush");
             }
-            Err(_) => self.metrics.inc_enforcement_dropped(),
+            Err(_) => {
+                // Queue rejected it: undo the admission so the next window
+                // retries instead of suppressing this key.
+                self.retreat_mitigation(key);
+                self.metrics.inc_enforcement_dropped();
+            }
         }
     }
 
@@ -782,7 +837,19 @@ impl DetectionEngine {
         // ponytail: warn once per 1024 rejections — log churn kills throughput
         // under sustained queue pressure.
         let mut rejected = 0u32;
+        // Bound the gate: only entry AGE is used (cooldown < ttl/2, and the
+        // re-admission is what refreshes the block). Trim only under
+        // attacker-cardinality overflow — 1M+ distinct (ip, reason) pairs.
+        // ponytail: coarse 1h age prune on overflow; per-entry expiry only
+        // if this gate ever shows up in a flame graph.
+        if self.pending_mitigations.len() > 1_048_576 {
+            self.pending_mitigations.retain(|_, ts| now.saturating_sub(*ts) < 3_600_000_000_000);
+        }
         for b in blocks {
+            let key = (b.0, b.1);
+            if !self.admit_mitigation(key, b.2, now) {
+                continue;
+            }
             let cmd = EnforceCommand {
                 decision_id: Uuid::new_v4(),
                 policy_version: 1,
@@ -800,6 +867,9 @@ impl DetectionEngine {
                 self.metrics
                     .record_block_ip(&b.0, b.1.as_str(), "detection");
             } else {
+                // Queue rejection is a delivery failure: undo the admission
+                // so the NEXT window retries this (ip, reason).
+                self.retreat_mitigation(key);
                 rejected += 1;
                 self.metrics.inc_enforcement_dropped();
                 if rejected & 0x3FF == 1 {
@@ -1113,24 +1183,32 @@ impl DetectionEngine {
             let now = now_ns();
             let subnet_tier = self.cgnat_guard.classify_subnet(cidr.addr, uniq, count);
             if subnet_tier == ramshield_cgnat::CGNAT_TIER_BLOCK {
-                let cmd = EnforceCommand {
-                    decision_id: Uuid::new_v4(),
-                    policy_version: 1,
-                    source: "detection".into(),
-                    actor: "system".into(),
-                    timestamp_utc: (now / 1_000_000_000) as i64,
-                    ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
-                    reason: "subnet_burst".into(),
-                    ip: cidr.addr,
-                    cidr: Some(cidr),
-                    action: EnforceAction::Block,
-                };
-                if self.enforcement_tx.try_send(cmd).is_err() {
-                    rejected_q += 1;
-                    self.metrics.inc_enforcement_dropped();
-                    warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
-                } else {
-                    self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
+                // Same admission gate as per-IP blocks: one /24 decision
+                // re-emitted every 500ms tick would otherwise re-do the
+                // whole enforcement path for the prefix. Cooldown =
+                // subnet_burst_ttl/2; rejection still retries next tick.
+                let key = (cidr.addr, BlockReason::SubnetBatch);
+                if self.admit_mitigation(key, cfg.detection.subnet_burst_ttl_secs, now) {
+                    let cmd = EnforceCommand {
+                        decision_id: Uuid::new_v4(),
+                        policy_version: 1,
+                        source: "detection".into(),
+                        actor: "system".into(),
+                        timestamp_utc: (now / 1_000_000_000) as i64,
+                        ttl_seconds: cfg.detection.subnet_burst_ttl_secs,
+                        reason: "subnet_burst".into(),
+                        ip: cidr.addr,
+                        cidr: Some(cidr),
+                        action: EnforceAction::Block,
+                    };
+                    if self.enforcement_tx.try_send(cmd).is_err() {
+                        self.retreat_mitigation(key);
+                        rejected_q += 1;
+                        self.metrics.inc_enforcement_dropped();
+                        warn!(cidr = %cidr, rejected_q, "enforcement queue full; CIDR block rejected");
+                    } else {
+                        self.metrics.blocks_subnet.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -1199,6 +1277,52 @@ mod tests {
         Arc::new(DetectionEngine::new(store, cfg, etx, metrics, shutdown))
     }
 
+    /// Documented architecture contract, admission item: re-emitting a block
+    /// for the same (ip, reason) every flush window re-did WAL append + store
+    /// write + ring re-arm + XDP apply per window. Gate: first admission
+    /// passes, re-admission inside the TTL/2 cooldown is suppressed, a
+    /// different reason is an independent key, and queue rejection removes
+    /// the pending key so the next window can retry.
+    #[test]
+    fn admission_gate_suppresses_reemit_within_cooldown() {
+        let eng = engine();
+        let ip: IpAddr = "10.0.0.55".parse().unwrap();
+        let t0 = 1_000_000_000_000u64;
+        let key = (ip, BlockReason::HighRps);
+        assert!(eng.admit_mitigation(key, 3600, t0), "first admission passes");
+        assert!(
+            !eng.admit_mitigation(key, 3600, t0 + 1_000_000_000),
+            "re-admission inside ttl/2 cooldown must be suppressed"
+        );
+        assert!(
+            eng.admit_mitigation((ip, BlockReason::SubnetBatch), 3600, t0 + 1_000),
+            "different reason is an independent admission key"
+        );
+        // Queue rejection: the pending key must be removed so the next
+        // window can retry (a stuck key would suppress the block forever).
+        eng.retreat_mitigation(key);
+        assert!(
+            eng.admit_mitigation(key, 3600, t0 + 1_000_000),
+            "after a queue rejection the same key must admit again"
+        );
+    }
+
+    /// Admission is time-bounded: past the cooldown the same (ip, reason)
+    /// admits again — that re-admission is the TTL refresh mechanism.
+    #[test]
+    fn admission_gate_rearms_after_cooldown() {
+        let eng = engine();
+        let ip: IpAddr = "10.0.0.56".parse().unwrap();
+        let key = (ip, BlockReason::HighRps);
+        let ttl = 3600u64;
+        let t0 = 1_000_000_000_000u64;
+        assert!(eng.admit_mitigation(key, ttl, t0));
+        // cooldown = ttl/2
+        let half = ttl * 1_000_000_000 / 2;
+        assert!(!eng.admit_mitigation(key, ttl, t0 + half - 1));
+        assert!(eng.admit_mitigation(key, ttl, t0 + half), "past cooldown re-admits");
+    }
+
     /// Item 3 regression: worker-local merge must equal the old shared-map
     /// semantics — same-IP counts/statuses summed, window timestamps min/max,
     /// local buffer emptied into shared.
@@ -1237,12 +1361,17 @@ mod tests {
 
     /// Step 3 fast path: crossing the emergency burst threshold on the
     /// per-event path emits a block BEFORE any flush, fires exactly once per
-    /// window (count only rises, so the threshold is crossed once), and
-    /// re-fires on a fresh window after the local buffer drains.
+    /// window (count only rises, so the threshold is crossed once), and —
+    /// documented architecture contract — a fresh window's re-crossing is
+    /// admitted only after the (ip, reason) cooldown (ttl/2, min 1s): the
+    /// re-admission is the block's TTL refresh, not a per-window re-emit.
     #[test]
     fn emergency_burst_fires_once_before_flush() {
         let mut config = Config::default();
         config.detection.emergency_burst_threshold = 5;
+        // 2s block TTL -> 1s admission cooldown (floor), so the re-fire
+        // assertion below can wait a real wall-clock second.
+        config.detection.block_ttl_secs = 2;
         let cfg = config.into_handle();
         let store = Arc::new(Store::new(16));
         let metrics = Arc::new(Metrics::new());
@@ -1287,14 +1416,28 @@ mod tests {
             "crossing must fire exactly once per window"
         );
 
-        // Drain (simulates flush) -> fresh window re-crosses and re-fires.
+        // Drain (simulates flush) -> fresh window re-crosses, but the
+        // (ip, reason) is inside its 1s admission cooldown: suppressed.
+        // The enforcement layer keeps the block alive; re-emission is the
+        // TTL refresh and only happens at the cooldown boundary.
+        local.clear();
+        for n in 0..5 {
+            eng.absorb_or_emergency(&mut local, &ev(n), 5);
+        }
+        assert!(
+            erx.try_recv().is_err(),
+            "re-crossing inside the admission cooldown must be suppressed"
+        );
+
+        // Cooldown elapses -> the same crossing admits again (TTL refresh).
+        std::thread::sleep(std::time::Duration::from_millis(1050));
         local.clear();
         for n in 0..5 {
             eng.absorb_or_emergency(&mut local, &ev(n), 5);
         }
         assert!(
             erx.try_recv().is_ok(),
-            "a fresh window crossing must fire again"
+            "a crossing past the admission cooldown must re-fire (TTL refresh)"
         );
     }
 
