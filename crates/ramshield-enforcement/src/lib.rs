@@ -134,7 +134,11 @@ pub struct EnforcementService {
     xdp: Box<dyn XdpApplier>,
     /// Optional durability: append-before-mutate. None = in-memory only.
     wal: Option<Arc<Wal>>,
-    processed_decisions: HashSet<Uuid>,
+    /// Idempotency cache: decision_id → ORIGINAL EnforceResult (bounded to
+    /// 65_536 by processed_order). A replayed decision_id returns what
+    /// happened the first time — including a dataplane failure — instead of
+    /// a fabricated fresh success.
+    processed_results: HashMap<Uuid, EnforceResult>,
     processed_order: VecDeque<Uuid>,
     blocked_ips: HashSet<IpAddr>,
     /// Userspace mirror of active CIDR blocks lives in `store.active_cidrs`
@@ -181,7 +185,7 @@ impl EnforcementService {
             metrics,
             xdp,
             wal: None,
-            processed_decisions: HashSet::new(),
+            processed_results: HashMap::new(),
             processed_order: VecDeque::with_capacity(65_536),
             blocked_ips: HashSet::new(),
             expirations: HashMap::new(),
@@ -341,8 +345,19 @@ impl EnforcementService {
                 cidr: None,
                 action: EnforceAction::Unblock,
             };
-            if let Err(e) = self.enforce(cmd).await {
-                warn!(%ip, "TTL unblock failed: {}", e);
+            match self.enforce(cmd).await {
+                Ok(_) => {}
+                Err(EnforcementError::InvalidCommand(_)) => {
+                    warn!(%ip, "TTL unblock rejected as invalid; dropping lease");
+                }
+                Err(e) => {
+                    // A transient WAL/storage failure must never convert a
+                    // temporary block into a permanent one: re-arm the lease
+                    // one second out and let the next tick retry the same
+                    // Unblock transition.
+                    warn!(%ip, "TTL unblock failed: {e} — re-arming lease");
+                    self.schedule_expiration(ip, Instant::now() + Duration::from_secs(1));
+                }
             }
         }
         let now = Instant::now();
@@ -365,8 +380,16 @@ impl EnforcementService {
                 cidr: Some(network),
                 action: EnforceAction::Unblock,
             };
-            if let Err(e) = self.enforce(cmd).await {
-                warn!(cidr=?network, "CIDR TTL unblock failed: {}", e);
+            match self.enforce(cmd).await {
+                Ok(_) => {}
+                Err(EnforcementError::InvalidCommand(_)) => {
+                    warn!(cidr=?network, "CIDR TTL unblock rejected as invalid; dropping lease");
+                }
+                Err(e) => {
+                    warn!(cidr=?network, "CIDR TTL unblock failed: {e} — re-arming lease");
+                    self.cidr_expirations
+                        .insert(network, Instant::now() + Duration::from_secs(1));
+                }
             }
         }
     }
@@ -466,12 +489,12 @@ impl EnforcementService {
         );
     }
 
-    fn remember_decision(&mut self, id: Uuid) {
-        if self.processed_decisions.insert(id) {
-            self.processed_order.push_back(id);
+    fn remember_result(&mut self, result: &EnforceResult) {
+        if self.processed_results.insert(result.decision_id, result.clone()).is_none() {
+            self.processed_order.push_back(result.decision_id);
             while self.processed_order.len() > 65_536 {
                 if let Some(old) = self.processed_order.pop_front() {
-                    self.processed_decisions.remove(&old);
+                    self.processed_results.remove(&old);
                 }
             }
         }
@@ -484,15 +507,12 @@ impl EnforcementService {
         &mut self,
         cmd: EnforceCommand,
     ) -> Result<EnforceResult, EnforcementError> {
-        if self.processed_decisions.contains(&cmd.decision_id) {
-            return Ok(EnforceResult {
-                decision_id: cmd.decision_id,
-                committed: true,
-                applied: true,
-                wal_lsn: None,
-                xdp_applied: true,
-                error: None,
-            });
+        // Idempotent replay: return what actually happened the first time —
+        // a fabricated `xdp_applied: true` would hide a dataplane failure
+        // from every retry consumer.
+        if let Some(cached) = self.processed_results.get(&cmd.decision_id) {
+            trace!(decision_id = %cmd.decision_id, "duplicate decision — returning cached original result");
+            return Ok(cached.clone());
         }
         if cmd.ip.is_unspecified() {
             trace!(
@@ -656,8 +676,16 @@ impl EnforcementService {
                     }
                     false
                 });
-                self.remember_decision(cmd.decision_id);
                 self.metrics.inc_blocks();
+                let result = EnforceResult {
+                    decision_id: cmd.decision_id,
+                    committed: true,
+                    applied: true,
+                    wal_lsn,
+                    xdp_applied,
+                    error: None,
+                };
+                self.remember_result(&result);
                 trace!(
                     ip = %cmd.ip,
                     action = "block",
@@ -668,14 +696,7 @@ impl EnforcementService {
                     decision_id = %cmd.decision_id,
                     "enforce applied: block committed"
                 );
-                Ok(EnforceResult {
-                    decision_id: cmd.decision_id,
-                    committed: true,
-                    applied: true,
-                    wal_lsn,
-                    xdp_applied,
-                    error: None,
-                })
+                Ok(result)
             }
             EnforceAction::Unblock => {
                 if let Some(Value::IpRecord(mut rec)) = self.store.get(&cmd.ip) {
@@ -711,7 +732,15 @@ impl EnforcementService {
                     warn!(ip=%cmd.ip, cidr=?cmd.cidr, "XDP unblock failed: {}", e);
                     false
                 });
-                self.remember_decision(cmd.decision_id);
+                let result = EnforceResult {
+                    decision_id: cmd.decision_id,
+                    committed: true,
+                    applied: true,
+                    wal_lsn,
+                    xdp_applied,
+                    error: None,
+                };
+                self.remember_result(&result);
                 trace!(
                     ip = %cmd.ip,
                     action = "unblock",
@@ -721,14 +750,7 @@ impl EnforcementService {
                     decision_id = %cmd.decision_id,
                     "enforce applied: unblock committed"
                 );
-                Ok(EnforceResult {
-                    decision_id: cmd.decision_id,
-                    committed: true,
-                    applied: true,
-                    wal_lsn,
-                    xdp_applied,
-                    error: None,
-                })
+                Ok(result)
             }
         }
     }
@@ -959,6 +981,64 @@ mod tests {
         ))
     }
 
+    /// 64 B segments: every append rotates, so the rotation open of the NEXT
+    /// segment is where a failure lands. Deterministic WAL-failure injection.
+    fn svc_with_tiny_wal(dir: &std::path::Path) -> EnforcementService {
+        svc(Box::new(RecordingApplier::new())).with_wal(Arc::new(
+            Wal::open(
+                dir.to_str().unwrap(),
+                false,
+                ramshield_types::Durability::None,
+                64,
+                0,
+            )
+            .unwrap(),
+        ))
+    }
+
+    /// Documented architecture contract, TTL item: a due lease is retained
+    /// until unblock SUCCEEDS. Old code detached the ring card BEFORE the
+    /// unblock attempt and dropped it on failure, so one transient WAL or
+    /// storage error converted a temporary block into a permanent one —
+    /// the IP silently never released.
+    #[tokio::test]
+    async fn ttl_lease_retries_after_failed_unblock() {
+        let dir = std::env::temp_dir().join(format!("rs_enf_retry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = svc_with_tiny_wal(&dir);
+        s.store.traffic.ram_limit_mb.store(512, Ordering::Relaxed);
+        let target = ip([10, 60, 0, 9]);
+        // The block append succeeds (rotates 0→1). Then poison the NEXT
+        // rotation target so the unblock's append hits EISDIR: the WAL
+        // fails durably-first, before any state change.
+        s.enforce(block_cmd(target, 1)).await.unwrap();
+        std::fs::create_dir_all(dir.join("wal-00000002.rshw")).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        s.expire_due().await;
+        assert!(
+            s.blocked_ips.contains(&target),
+            "failed unblock must not remove the block state"
+        );
+        assert!(
+            s.expirations.contains_key(&target),
+            "failed TTL unblock must re-arm the lease for retry"
+        );
+        s.check_ring_invariant();
+        // Recovery: remove the poison, the retried unblock succeeds.
+        std::fs::remove_dir_all(dir.join("wal-00000002.rshw")).unwrap();
+        // Re-arm deadline is +1s at second-granularity buckets; give it the
+        // full slack the ring resolution allows.
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        s.expire_due().await;
+        assert!(
+            !s.blocked_ips.contains(&target),
+            "once WAL works again, the retried lease must unblock"
+        );
+        assert!(s.expirations.is_empty() && s.buckets.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn block_cmd(ip: IpAddr, ttl: u64) -> EnforceCommand {
         EnforceCommand {
             decision_id: Uuid::new_v4(),
@@ -1017,6 +1097,56 @@ mod tests {
         s.enforce(cmd).await.unwrap();
         // One dataplane op: verify via store state + single blocked entry.
         assert_eq!(s.blocked_ips.len(), 1);
+    }
+
+    /// A dataplane-failing applier: storage and WAL still commit, kernel does
+    /// not. Used by the idempotency + dataplane-failure contracts.
+    struct FailingApplier;
+    #[async_trait::async_trait]
+    impl XdpApplier for FailingApplier {
+        fn apply_block(&mut self, _: IpAddr, _: Uuid, _: u64) -> Result<(), EnforcementError> {
+            Err(EnforcementError::Xdp("kernel gone".into()))
+        }
+        fn apply_unblock(&mut self, _: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
+            Err(EnforcementError::Xdp("kernel gone".into()))
+        }
+        fn reconcile(
+            &mut self,
+            _: &[IpAddr],
+            _: &[IpNetwork],
+        ) -> Result<ReconciliationState, EnforcementError> {
+            Ok(ReconciliationState::default())
+        }
+    }
+
+    /// Documented architecture contract, idempotency item: a duplicate
+    /// decision_id must return the ORIGINAL EnforceResult. The old code
+    /// remembered only the id and fabricated a fresh success
+    /// (`xdp_applied: true`) even when the first attempt had failed on the
+    /// dataplane — the operator could not see that the kernel never got the
+    /// block, and a retry consumer would read a lie.
+    #[tokio::test]
+    async fn duplicate_decision_returns_original_result() {
+        let store = Arc::new(Store::new(16));
+        store.traffic.ram_limit_mb.store(512, Ordering::Relaxed);
+        let mut s = EnforcementService::new(
+            store,
+            Arc::new(Metrics::new()),
+            Box::new(FailingApplier),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let target = ip([9, 9, 9, 3]);
+        let cmd = block_cmd(target, 0);
+        let first = s.enforce(cmd.clone()).await.unwrap();
+        assert!(
+            !first.xdp_applied,
+            "test premise: first application failed on the dataplane"
+        );
+        let second = s.enforce(cmd).await.unwrap();
+        assert_eq!(
+            first, second,
+            "duplicate decision_id must return the cached original result"
+        );
     }
 
     #[tokio::test]
@@ -1116,23 +1246,6 @@ mod tests {
     async fn storage_blocked_before_dataplane() {
         // If the dataplane errors, storage must STILL hold the block (fail-open
         // kernel, fail-closed state).
-        struct FailingApplier;
-        #[async_trait::async_trait]
-        impl XdpApplier for FailingApplier {
-            fn apply_block(&mut self, _: IpAddr, _: Uuid, _: u64) -> Result<(), EnforcementError> {
-                Err(EnforcementError::Xdp("kernel gone".into()))
-            }
-            fn apply_unblock(&mut self, _: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
-                Err(EnforcementError::Xdp("kernel gone".into()))
-            }
-            fn reconcile(
-                &mut self,
-                _: &[IpAddr],
-                _: &[IpNetwork],
-            ) -> Result<ReconciliationState, EnforcementError> {
-                Ok(ReconciliationState::default())
-            }
-        }
         let store = Arc::new(Store::new(16));
         store.traffic.ram_limit_mb.store(512, Ordering::Relaxed);
         let mut s = EnforcementService::new(
