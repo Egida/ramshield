@@ -96,6 +96,6 @@ clippy.out
 /verify.sh
 .hermes/
 
-# key-bearing configs (templates: *.example stay tracked)
+# key-bearing configs stay local; config.baseline.toml is THE tracked template
 config.prod.toml
 config.bench.toml

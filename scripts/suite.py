@@ -52,6 +52,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BIN = REPO / "target" / "release" / "ramshield"
+BASELINE = REPO / "config.baseline.toml"
 IPC_PORT = 17890
 DASH_PORT = 19999
 IPC_ADDR = f"127.0.0.1:{IPC_PORT}"
@@ -60,6 +61,33 @@ START_TIMEOUT = 30.0
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def baseline_config(**overrides) -> str:
+    """Scratch config generated from the tracked baseline template.
+
+    Dotted-path overrides only (wal__dir, ipc__tcp_addr, xdp__enabled…).
+    The baseline is the single source of truth — harnesses must never
+    hand-roll whole configs. Returns the temp path; server deletes nothing
+    (OS tmp hygiene).
+    """
+    import tempfile
+    import tomllib
+    base = tomllib.loads(BASELINE.read_text())
+    for dotted, val in overrides.items():
+        cur = base
+        parts = dotted.split("__")
+        for p in parts[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[parts[-1]] = val
+    fd, path = tempfile.mkstemp(suffix=".toml", prefix="rs_scratch_")
+    with os.fdopen(fd, "w") as f:
+        for sec, fields in base.items():
+            f.write(f"[{sec}]\n")
+            for k, v in fields.items():
+                f.write(f"{k} = {json.dumps(v)}\n")
+            f.write("\n")
+    return path
+
 
 def sh(*args: str, cwd: Path = REPO, timeout: int | None = None) -> int:
     print(f"  $ {' '.join(args)}")
@@ -125,25 +153,22 @@ def wait_ready(deadline: float = START_TIMEOUT) -> bool:
 
 
 class Server:
-    """Scratch-port release server lifecycle (never touches :7890/:9999)."""
+    """Scratch-port release server lifecycle (never touches :7890/:9999).
 
-    def __init__(self) -> None:
+    Config must be baseline-generated (ports/wal dir already overridden) —
+    see baseline_config(). No env-var injection: one mechanism."""
+
+    def __init__(self, config: str) -> None:
         self.proc: subprocess.Popen | None = None
+        self.config = config
 
     def __enter__(self) -> "Server":
         if not BIN.exists():
             raise SystemExit(f"release binary missing: {BIN}\n  cargo build --release -F full")
-        # Scratch ports are injected via env overrides (RAMSHIELD_IPC__TCP_ADDR /
-        # RAMSHIELD_DASHBOARD__HTTP_ADDR) so we never collide with a live
-        # instance on :7890/:9999 regardless of which config file is loaded.
-        env = dict(os.environ,
-                   RAMSHIELD_IPC__TCP_ADDR=IPC_ADDR,
-                   RAMSHIELD_DASHBOARD__HTTP_ADDR=f"127.0.0.1:{DASH_PORT}",
-                   RAMSHIELD_DASHBOARD__ENABLED="true")
         self.proc = subprocess.Popen(
-            [str(BIN), "config.toml"],
+            [str(BIN), "--config", self.config],
             cwd=str(REPO),
-            env=env,
+            env=dict(os.environ),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -193,7 +218,16 @@ def layer_unit() -> int:
 
 def layer_e2e(keep: bool = False) -> int:
     c = Check("e2e")
-    with Server() as srv:
+    # Baseline-derived: scratch ports, isolated WAL (single-writer rule),
+    # XDP off — kernel coverage is the xdp layer's job (live instance).
+    import shutil
+    shutil.rmtree("/tmp/rs_e2e_wal", ignore_errors=True)
+    with Server(baseline_config(
+        ipc__tcp_addr=IPC_ADDR,
+        dashboard__http_addr=f"127.0.0.1:{DASH_PORT}",
+        wal__dir="/tmp/rs_e2e_wal",
+        xdp__enabled=False,
+    )) as srv:
         # health
         with urllib.request.urlopen(f"{DASH_URL}/healthz", timeout=3) as r:
             body = json.load(r)
@@ -438,6 +472,18 @@ def layer_xdp(target: str | None = None) -> int:
     return c.finish()
 
 
+def load_config() -> str:
+    """Baseline-derived scratch config for the load layer (no WAL, XDP off)."""
+    import shutil
+    shutil.rmtree("/tmp/rs_load_wal", ignore_errors=True)
+    return baseline_config(
+        ipc__tcp_addr=IPC_ADDR,
+        dashboard__http_addr=f"127.0.0.1:{DASH_PORT}",
+        wal__enabled=False,
+        xdp__enabled=False,
+    )
+
+
 def layer_load(args: argparse.Namespace) -> int:
     nexus = REPO / "scripts" / "attack_nexus.py"
     if args.load_cmd == "profiles":
@@ -448,10 +494,10 @@ def layer_load(args: argparse.Namespace) -> int:
             args_ += ["run", "--profile", args.profile, "--duration", str(args.duration)]
         else:
             args_ += ["run", "--profile", "l7_http_flood", "--duration", str(args.duration)]
-        with Server() as _srv:
+        with Server(load_config()) as _srv:
             return sh(*args_)
     if args.load_cmd == "bench":
-        with Server() as _srv:
+        with Server(load_config()) as _srv:
             return sh(sys.executable, str(REPO / "scripts" / "subnet_ddos_bench.sh"))
     print(f"unknown load command: {args.load_cmd}")
     return 1
