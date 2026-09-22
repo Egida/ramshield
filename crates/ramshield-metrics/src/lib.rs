@@ -252,6 +252,8 @@ pub struct Metrics {
     /// COUNTERS PerCpuArray: [v4_drop, v6_drop, wire_pass, parse_fail]
     pub xdp_v4_drops: Arc<AtomicU64>,
     pub xdp_v6_drops: Arc<AtomicU64>,
+    pub xdp_attribution_gaps: Arc<AtomicU64>,
+    pub xdp_blocked_ips_zero_drops: Arc<AtomicU64>,
     pub xdp_wire_pass: Arc<AtomicU64>,
     pub xdp_parse_fails: Arc<AtomicU64>,
     /// XDP apply attempts that failed. The block is held in userspace (and
@@ -347,6 +349,8 @@ impl Metrics {
             cms_decay_ticks: Arc::new(AtomicU64::new(0)),
             xdp_v4_drops: Arc::new(AtomicU64::new(0)),
             xdp_v6_drops: Arc::new(AtomicU64::new(0)),
+            xdp_attribution_gaps: Arc::new(AtomicU64::new(0)),
+            xdp_blocked_ips_zero_drops: Arc::new(AtomicU64::new(0)),
             xdp_wire_pass: Arc::new(AtomicU64::new(0)),
             xdp_parse_fails: Arc::new(AtomicU64::new(0)),
             xdp_apply_failures: Arc::new(AtomicU64::new(0)),
@@ -1020,6 +1024,18 @@ impl Metrics {
             self.xdp_v6_drops.load(Ordering::Relaxed),
             "XDP kernel IPv6 drops (COUNTERS PerCpuArray).",
             "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_attribution_gaps",
+            self.xdp_attribution_gaps.load(Ordering::Relaxed),
+            "XDP drop events whose source IP is not userspace-blocked (kernel/userspace drift indicator).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_blocked_ips_zero_drops",
+            self.xdp_blocked_ips_zero_drops.load(Ordering::Relaxed),
+            "Blocked IPs with zero attributed XDP drops since block (early-release candidate gauge).",
+            "gauge"
         ));
         out.push_str(&emit!(
             "ramshield_xdp_wire_pass",
