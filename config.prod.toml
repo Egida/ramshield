@@ -55,7 +55,7 @@ batch_max_events = 4096
 batch_window_ms = 25
 # Staleness backstop for shared pre_aggs: 250ms instead of 1s. Slow
 # accumulators (low-rate attackers under the batch window) are promoted
-# to the store 4x sooner — CUSUB arms ~2s faster, pulse windows sample
+# to the store 4x sooner — CUSUM arms ~2s faster, pulse windows sample
 # 4x per second. Idle cost: ~3 extra near-empty flushes/s (~microseconds).
 pre_aggs_flush_interval_ms = 250
 promote_min_events = 4
