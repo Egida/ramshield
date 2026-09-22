@@ -44,6 +44,11 @@ name = "hot_paths"
 path = "benches/hot_paths.rs"
 harness = false
 
+[[bench]]
+name = "field_day"
+path = "benches/field_day.rs"
+harness = false
+
 [features]
 default = []
 full = ["tokio/full", "tracing-subscriber/env-filter", "tracing-subscriber/fmt", "tower-http/cors", "clap/derive", "xdp"]

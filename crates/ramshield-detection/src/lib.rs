@@ -684,9 +684,6 @@ impl DetectionEngine {
         for &(ip, ref agg) in ip_aggs {
             let sk = subnet_key_u128(ip);
 
-            let (a, b) = BloomFilter::slots(&ip);
-            let bloom_hit = self.bloom.load().contains_hashed(a, b);
-
             // Swarm hint (sparse /24 deadlock fix): Phase A above already
             // merged this batch's subnet window, so an IP with agg.count < 8
             // can still be part of an attack. Three independent legs:
@@ -722,21 +719,29 @@ impl DetectionEngine {
                 || in_batch_events >= det.subnet_window_threshold
                 || store_dual_gate_met;
 
-            if agg.count < det.promote_min_events && !swarm_hint && !bloom_hit {
-                cold_skipped += 1;
-                cold_skipped_events += agg.count;
-                trace!(
-                    ip = %ip,
-                    events = agg.count,
-                    bytes = agg.bytes,
-                    proto_fp = agg.proto_fp,
-                    in_batch_hosts,
-                    in_batch_events,
-                    store_dual_gate_met,
-                    cold_skipped,
-                    "ip cold-skipped: below promote gate"
-                );
-                continue;
+            // ponytail-ish: bloom consulted only for genuinely cold IPs
+            // (count < promote_min && no swarm context) — for promoted or
+            // swarm-covered IPs it is dead work (2 hashes + 2 loads per IP
+            // per flush).
+            if agg.count < det.promote_min_events && !swarm_hint {
+                let (a, b) = BloomFilter::slots(&ip);
+                let bloom_hit = self.bloom.load().contains_hashed(a, b);
+                if !bloom_hit {
+                    cold_skipped += 1;
+                    cold_skipped_events += agg.count;
+                    trace!(
+                        ip = %ip,
+                        events = agg.count,
+                        bytes = agg.bytes,
+                        proto_fp = agg.proto_fp,
+                        in_batch_hosts,
+                        in_batch_events,
+                        store_dual_gate_met,
+                        cold_skipped,
+                        "ip cold-skipped: below promote gate"
+                    );
+                    continue;
+                }
             }
 
             // ponytail: merge_record does the single store lookup (is_blocked check
