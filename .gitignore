@@ -95,3 +95,7 @@ clippy.out
 /test_xdp_load*
 /verify.sh
 .hermes/
+
+# key-bearing configs (templates: *.example stay tracked)
+config.prod.toml
+config.bench.toml
