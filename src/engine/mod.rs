@@ -619,8 +619,8 @@ mod startup_tests {
     }
 
     fn blocked_record(ip: std::net::IpAddr) -> crate::storage::IpRecord {
-        use crate::storage::{BlockState, IpRecord};
         use crate::BlockReason;
+        use crate::storage::{BlockState, IpRecord};
         IpRecord {
             ip,
             request_count: 1,
