@@ -89,6 +89,30 @@ attribution gaps, apply failures all 0; HMAC, metrics, dashboard 200.
 Cumulative over both rounds: 846k block ops, 43M events ingested, 1.73M
 requests served, zero crashes, zero leaks, zero XDP failures.
 
+## Correction (post-round-22, C1–C3)
+
+The "one unsound parameter" finding above is **retracted**.
+`events_rejected_total` is a CONFLATED counter: it sums auth 401s,
+connection refusals, AND channel-full event drops (three call sites in
+`src/ipc/server.rs` all bump `inc_rejected`). My B4 auth-wall rounds alone
+sent ~300k 401s into that counter. C1 (17k eps + up to 1k blk/s, single-digit
+rejections per 10 s phase) and C3 (15k → 45k eps, no writers, **zero**
+rejections at every rate) show the 64k bounded channel + pre-aggregation
+drains well beyond 45k eps sustained — the channel-full path is effectively
+unreachable at realistic IPC rates. The 416k "drop storm" was auth rejections
+counted as event rejections.
+
+Fix: commit be51ef1 splits the counter into
+`ramshield_ipc_event_drops_total`, `ramshield_ipc_auth_rejections_total`,
+`ramshield_ipc_rejected_connections_total`; `events_rejected_total` remains
+the aggregate for dashboard/SSE compat. Related: `IpcServerStats`
+(`dropped_events`, `channel_capacity`) exists in `src/ipc/server.rs` but is
+never called — the clean per-class stats had no consumer at all.
+
+The surviving, smaller finding: detection latency degrades ~10× under
+concurrent enforcement load (C2: 199 ms clean vs 2,049 ms under 32 writers +
+noise feed) — head-of-line, not a ceiling.
+
 ## Harness bugs (mine, fixed or noted)
 
 B2's generated scripts had mangled f-string braces (data valid, prints
