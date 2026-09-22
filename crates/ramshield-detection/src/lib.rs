@@ -648,6 +648,16 @@ impl DetectionEngine {
             .traffic
             .record_flush(rate, ip_aggs.len() as u64, &subnet_vals);
 
+        // Dual-gate leg computed ONCE per subnet per flush (was: one
+        // subnet_table read per IP — 256 reads of the same record per /24).
+        // ponytail ceiling: frozen at Phase A (post-merge, pre-promotion);
+        // merge_record side effects mid-loop no longer refresh it. Advisory
+        // only: the in-batch legs use the same flush data, so any delta is
+        // double-covered. Upgrade path: none expected — per-subnet here is
+        // the correct granularity.
+        let mut dual_gate_met: HashMap<SubnetKey, bool> =
+            HashMap::with_capacity(subnet_counts.len());
+
         for (&sk, &(count, ref members)) in subnet_counts.iter() {
             let net = networks.get(&sk).copied().unwrap_or_else(|| {
                 // pre-agg path passes no networks map — reconstruct the /24
@@ -668,6 +678,18 @@ impl DetectionEngine {
             });
             self.store
                 .merge_subnet_window(sk, net, count, Some(members), now);
+            // Hoisted dual gate: post-merge read, per subnet, not per IP.
+            let dual = self.store.subnet_table().get(&sk).is_some_and(|r| {
+                let uniq = if r.network.family() == 4 {
+                    r.unique_ips()
+                } else {
+                    self.store
+                        .subnet_member_count_windowed(sk, SUBNET_WINDOW_NS, now)
+                };
+                uniq >= det.subnet_batch_threshold as u64
+                    && r.total_rps >= det.subnet_batch_min_events
+            });
+            dual_gate_met.insert(sk, dual);
         }
 
         let mut blocks = Vec::new();
@@ -699,20 +721,7 @@ impl DetectionEngine {
                 .unwrap_or((0, 0));
 
             let store_dual_gate_met = sk
-                .and_then(|k| {
-                    self.store.subnet_table().get(&k).map(|r| {
-                        // v4: 256-bit host bitmap; v6 /64: windowed index
-                        // cardinality (same split as subnet_batch_scan).
-                        let uniq = if r.network.family() == 4 {
-                            r.unique_ips()
-                        } else {
-                            self.store
-                                .subnet_member_count_windowed(k, SUBNET_WINDOW_NS, now)
-                        };
-                        uniq >= det.subnet_batch_threshold as u64
-                            && r.total_rps >= det.subnet_batch_min_events
-                    })
-                })
+                .map(|k| dual_gate_met.get(&k).copied().unwrap_or(false))
                 .unwrap_or(false);
 
             let swarm_hint = in_batch_hosts >= det.subnet_batch_threshold as u64
