@@ -33,16 +33,21 @@ use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 // ── Bloom filter — 2-hash, no false negatives for inserted IPs ───────────────
-#[derive(Clone)]
+// No Clone: atomic words are mutated in place through the shared Arc.
 pub struct BloomFilter {
-    bits: Vec<u64>,
+    // Atomic words: insert runs through the SHARED Arc (flush thread) while
+    // the 8 s epoch clear (subnet_batch_loop thread) swaps the Arc. No
+    // clone + store per flush; a write racing a clear lands in the
+    // discarded generation = one missed revisit = the gate opens once more.
+    // Advisory, so that is the intended failure mode.
+    bits: Vec<AtomicU64>,
     size: usize,
 }
 
 impl BloomFilter {
     pub fn new(bits: usize) -> Self {
         Self {
-            bits: vec![0; bits.div_ceil(64)],
+            bits: (0..bits.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(),
             size: bits,
         }
     }
@@ -53,7 +58,9 @@ impl BloomFilter {
     /// true and the cold-skip short-circuit at line 365 stops skipping
     /// anything, ballooning the store to O(total_ips_ever_seen).
     pub fn clear(&mut self) {
-        self.bits.fill(0);
+        for w in &self.bits {
+            w.store(0, Ordering::Relaxed);
+        }
     }
 
     pub fn slots(ip: &IpAddr) -> (usize, usize) {
@@ -71,14 +78,28 @@ impl BloomFilter {
     pub fn contains_hashed(&self, a: usize, b: usize) -> bool {
         let a = a % self.size;
         let b = b % self.size;
-        (self.bits[a / 64] >> (a % 64)) & 1 == 1 && (self.bits[b / 64] >> (b % 64)) & 1 == 1
+        (self.bits[a / 64].load(Ordering::Relaxed) >> (a % 64)) & 1 == 1
+            && (self.bits[b / 64].load(Ordering::Relaxed) >> (b % 64)) & 1 == 1
+    }
+
+    /// Shared insert through the ArcSwap-resident filter: fetch_or on the
+    /// words in place. No clone, no store. Concurrency: the 8 s epoch clear
+    /// on another thread may swap the Arc under us — a lost bit then only
+    /// costs one re-promote (advisory revisit cache; FPs open, never reject).
+    pub fn insert_shared(&self, ip: IpAddr) {
+        let (a, b) = Self::slots(&ip);
+        self.insert_hashed_in(a, b);
     }
 
     pub fn insert_hashed(&mut self, a: usize, b: usize) {
+        self.insert_hashed_in(a, b);
+    }
+
+    fn insert_hashed_in(&self, a: usize, b: usize) {
         let a = a % self.size;
         let b = b % self.size;
-        self.bits[a / 64] |= 1u64 << (a % 64);
-        self.bits[b / 64] |= 1u64 << (b % 64);
+        self.bits[a / 64].fetch_or(1u64 << (a % 64), Ordering::Relaxed);
+        self.bits[b / 64].fetch_or(1u64 << (b % 64), Ordering::Relaxed);
     }
 
     pub fn contains(&self, ip: IpAddr) -> bool {
@@ -814,7 +835,9 @@ impl DetectionEngine {
             }
         }
 
-        // Batch bloom insert — ArcSwap clone+insert+store.
+        // Batch bloom insert — shared atomic words, no clone, no store.
+        // (was: ArcSwap clone+insert+store — a 12.5 KB..1 MB memcpy per
+        // flush at default bloom_bits, once per flush with any promote.)
         // Patch A: the insert set is PROMOTED IPs, not blocked ones. The
         // bloom is a revisit cache whose whole purpose is to let a host seen
         // last epoch skip the cold path this epoch. Blocked IPs are already
@@ -824,12 +847,10 @@ impl DetectionEngine {
         // hosts that had just been seen. Over-promoting is the intended
         // failure mode: a bloom FP opens the gate, never rejects.
         if !promoted_ips.is_empty() {
-            let mut bf = (*self.bloom.load_full()).clone();
+            let bf = self.bloom.load();
             for &ip in &promoted_ips {
-                let (a, b) = BloomFilter::slots(&ip);
-                bf.insert_hashed(a, b);
+                bf.insert_shared(ip);
             }
-            self.bloom.store(Arc::new(bf));
         }
         // n for the FP estimate: distinct promotes this epoch. Approximate
         // across flushes (an IP promoted in two flushes counts twice), which
