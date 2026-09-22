@@ -40,11 +40,17 @@ and how to recreate it if the Hermes cron state is lost.
    verify-with-restore); single WAL writer (prod owns
    `/tmp/ramshield_wal`); total runtime cap 45 min; teardown stops
    load generators first.
-4. **Report.** `ATTACK_GAUNTLEND_DAILY/YYYY-MM-DD.md` on this branch
+4. **Sync with master.** Before the round: `git fetch origin`; if
+   `origin/master` is ahead, merge it in — `--ff-only` first, a real
+   merge on divergence. On ANY conflict: `git merge --abort`, record
+   `sync skipped: conflict` in the report, and continue without the
+   sync. The job never resolves code conflicts autonomously, never
+   force-pushes, never rewrites history.
+5. **Report.** `ATTACK_GAUNTLEND_DAILY/YYYY-MM-DD.md` on this branch
    (per-round table, anomalies, flagged defects — flagged only, no
    product fixes from this path), committed here and pushed
    (`git push origin daily-gauntlet`). Master is not touched by the
-   job.
+   job (it only ever merges master *in*).
 
 ## Report layout
 
