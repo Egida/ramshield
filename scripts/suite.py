@@ -12,6 +12,11 @@ Layers:
   e2e      boots a release binary on scratch ports, drives the real IPC
            protocol end-to-end: health, check_ip, block/unblock, batch
            reports, subnet blocking, WAL restart recovery, dashboard API
+  xdp      kernel dataplane proof on a real NIC: drives the LIVE instance
+           (the one holding the BPF program), blocks a probe IP via IPC,
+           generates real ingress packets, asserts the kernel counters move
+           and the LPM entry is pruned after TTL expiry. SKIPs cleanly when
+           no XDP program is attached anywhere (CI-safe no-op).
   load     attack profiles via attack_nexus.py (the retained simulator):
              profiles list | run --profile NAME --duration S | bench
 
@@ -22,21 +27,25 @@ Usage:
   python3 scripts/suite.py lint
   python3 scripts/suite.py e2e                 # full end-to-end pass
   python3 scripts/suite.py e2e --keep          # keep server running after
+  python3 scripts/suite.py xdp [--target IP]   # kernel dataplane (SKIPs if N/A)
   python3 scripts/suite.py load profiles
   python3 scripts/suite.py load run --profile l7_http_flood --duration 30
   python3 scripts/suite.py load bench          # 5-min subnet DDoS benchmark
-  python3 scripts/suite.py all                 # lint + unit + e2e (CI order)
+  python3 scripts/suite.py all                 # lint + unit + e2e + xdp (CI order)
 Exit code = number of failed layers (0 = all green).
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -268,6 +277,167 @@ def layer_e2e(keep: bool = False) -> int:
     return c.finish()
 
 
+# The kernel layer targets the LIVE instance (default 7890/9999) — the scratch
+# Server above runs config.toml with XDP disabled and can never attach.
+LIVE_IPC_PORT = 7890
+LIVE_DASH_URL = "http://127.0.0.1:9999"
+PROD_CONFIG = REPO / "config.prod.toml"
+
+
+def xdp_metrics(url: str = LIVE_DASH_URL) -> dict:
+    """ramshield_xdp_* gauges from a live instance's /metrics."""
+    out = {}
+    for row in urllib.request.urlopen(f"{url}/metrics", timeout=3).read().decode().splitlines():
+        if row.startswith("ramshield_xdp_") and " " in row:
+            out[row.rsplit(" ", 1)[0]] = int(float(row.rsplit(" ", 1)[1]))
+    return out
+
+
+def live_ipc(payload: dict, key: bytes | None, key_id: str, timeout: float = 5.0) -> dict:
+    """One JSON line to the LIVE instance — HMAC auth when the prod config
+    carries keys (sig over '<ts_ms>.<key_id>' + compact-sorted payload JSON,
+    payload = frame without the auth object)."""
+    frame = dict(payload)
+    line = json.dumps(frame, separators=(",", ":"), sort_keys=True).encode()
+    if key is not None:
+        ts = int(time.time() * 1000)
+        sig = hmac.new(key, f"{ts}.{key_id}".encode() + line, hashlib.sha256).hexdigest()
+        line = json.dumps({"auth": {"key_id": key_id, "ts_ms": ts, "sig": sig}, **frame},
+                          separators=(",", ":"), sort_keys=True).encode()
+    with socket.create_connection(("127.0.0.1", LIVE_IPC_PORT), timeout=timeout) as s:
+        s.sendall(line + b"\n")
+        s.settimeout(timeout)
+        return json.loads(s.recv(1048576).split(b"\n")[0])
+
+
+def layer_xdp(target: str | None = None) -> int:
+    """Kernel dataplane proof on a real NIC (drives the live instance).
+
+    SKIP (exit 0) unless ALL hold: a release binary, an XDP program attached
+    to a non-lo interface (ip -d link), a live instance answering on 9999,
+    and a reachable probe target. When it runs: manual block (TTL 60s) via
+    IPC, real ingress generation, kernel counter assertions, then wait for
+    TTL expiry and assert the LPM entry is pruned. ~90s when it runs.
+    """
+    c = Check("xdp")
+
+    def skip(why: str) -> int:
+        print(f"  == xdp: SKIP — {why}\n")
+        return 0
+
+    if not BIN.exists():
+        return skip("no release binary (cargo build --release --locked --features full)")
+    _, out = sh_out("ip", "-d", "link", "show")
+    # "3: wlp2s0: <...> mtu 1500 xdpgeneric ..." → name is between idx and flags
+    xdp_iface = next((l.split(":", 2)[1].split()[0]
+                      for l in out.splitlines()
+                      if "xdpgeneric" in l or " xdp " in f" {l} "),
+                     None)
+    if xdp_iface is None or xdp_iface == "lo":
+        return skip("no kernel XDP program attached to a real interface "
+                    "(setcap + [xdp] on a real NIC + restart the live instance)")
+    try:
+        urllib.request.urlopen(f"{LIVE_DASH_URL}/healthz", timeout=2)
+    except Exception:
+        return skip(f"no live instance on {LIVE_DASH_URL} (nothing to drive)")
+
+    # Prod config carries the auth keys (gitignored; absent in CI → skip).
+    key, key_id = None, ""
+    try:
+        import tomllib
+        pcfg = tomllib.loads(PROD_CONFIG.read_text())
+        if pcfg.get("ipc", {}).get("auth_keys"):
+            key_id, key = pcfg["ipc"]["auth_keys"][0].split(":", 1)
+            key = bytes.fromhex(key)
+    except (OSError, ValueError):
+        key, key_id = None, ""
+
+    # Probe target: a real, reachable public IP that's NOT the local resolver
+    # and NOT in the active connection table (don't kill the user's browsing).
+    try:
+        resolver = {t.split()[1] for t in open("/etc/resolv.conf").read().splitlines()
+                    if t.startswith("nameserver")}
+    except OSError:
+        resolver = set()
+    active = set()
+    try:
+        active = {l.split()[3].rsplit(":", 1)[0] for l in
+                  subprocess.run(["ss", "-tn", "state", "established"],
+                                 capture_output=True, text=True, timeout=5).stdout.splitlines()[1:]}
+    except Exception:
+        pass
+    cand = [target] if target else ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
+    probe = next((t for t in cand if t not in resolver and t not in active), None)
+    if probe is None:
+        return skip("no safe probe target (candidates busy/resolver or unreachable)")
+    try:
+        urllib.request.urlopen(f"https://{probe}/", timeout=3)
+    except Exception:
+        return skip(f"probe target {probe} unreachable (no internet for ingress generation)")
+
+    print(f"  xdp kernel dataplane on {xdp_iface}; live instance @ {LIVE_DASH_URL}; "
+          f"probe {probe}; block TTL 60s")
+    try:
+        base = xdp_metrics()
+    except Exception:
+        return skip("live instance exposes no /metrics")
+    c.ok(all(k in base for k in ("ramshield_xdp_v4_drops", "ramshield_xdp_apply_failures_total",
+                                 "ramshield_xdp_attribution_gaps")),
+         "xdp counters exposed on live instance", str(base))
+
+    # 1) manual block via IPC (no auth → accept as-is; with auth → HMAC).
+    r = live_ipc({"type": "block_ip", "ip": probe, "reason": "xdp-suite", "ttl_secs": 60},
+                 key, key_id)
+    c.ok(r.get("type") == "ok" and "error" not in r, "block_ip accepted on live instance", str(r)[:120])
+
+    # 2) real ingress: keep opening connections to the blocked IP; every
+    #    inbound packet (SYN-ACK/data from it) traverses the BPF program.
+    stop = threading.Event()
+
+    def hammer() -> None:
+        while not stop.is_set():
+            try:
+                urllib.request.urlopen(f"https://{probe}/", timeout=2).read(32)
+            except Exception:
+                pass
+            time.sleep(0.15)
+
+    th = threading.Thread(target=hammer, daemon=True)
+    th.start()
+    end = time.monotonic() + 15.0
+    m = base
+    while time.monotonic() < end:
+        time.sleep(1.0)
+        m = xdp_metrics()
+        if m.get("ramshield_xdp_v4_drops", 0) > base.get("ramshield_xdp_v4_drops", 0):
+            break
+    stop.set()
+    th.join(timeout=2)
+
+    # 3) kernel dataplane assertions.
+    c.ok(m.get("ramshield_xdp_v4_drops", 0) > base.get("ramshield_xdp_v4_drops", 0),
+         f"v4_drops increases on blocked-IP ingress ({base.get('ramshield_xdp_v4_drops')} → {m.get('ramshield_xdp_v4_drops')})")
+    c.ok(m.get("ramshield_xdp_attribution_gaps", 0) == 0,
+         "attribution_gaps stays 0 (every drop attributed to the LPM entry)")
+    c.ok(m.get("ramshield_xdp_apply_failures_total", 0) == 0,
+         "apply_failures_total stays 0 (LPM update landed)")
+    c.ok(m.get("ramshield_xdp_parse_fails", 0) == 0, "parse_fails stays 0")
+    r = live_ipc({"type": "check_ip", "ip": probe}, key, key_id)
+    c.ok(bool(r.get("blocked")), "check_ip confirms the block while ingress is dropping", str(r)[:120])
+
+    # 4) TTL expiry → LPM entry pruned (reconcile).
+    end = time.monotonic() + 90.0
+    pruned = False
+    while time.monotonic() < end:
+        time.sleep(5.0)
+        r = live_ipc({"type": "check_ip", "ip": probe}, key, key_id)
+        if not r.get("blocked"):
+            pruned = True
+            break
+    c.ok(pruned, "block auto-expires and LPM entry is pruned after TTL (≤90s)", str(r)[:120])
+    return c.finish()
+
+
 def layer_load(args: argparse.Namespace) -> int:
     nexus = REPO / "scripts" / "attack_nexus.py"
     if args.load_cmd == "profiles":
@@ -296,11 +466,14 @@ def main() -> int:
     sub.add_parser("unit", help="cargo test --all")
     p_e2e = sub.add_parser("e2e", help="end-to-end protocol test on scratch ports")
     p_e2e.add_argument("--keep", action="store_true", help="(reserved) keep server after run")
+    p_xdp = sub.add_parser("xdp", help="kernel dataplane proof on a real NIC (SKIPs when N/A)")
+    p_xdp.add_argument("--target", default=None,
+                       help="probe IP to block (default: pick a safe public IP)")
     p_load = sub.add_parser("load", help="attack simulator: profiles | run | bench")
     p_load.add_argument("load_cmd", choices=["profiles", "run", "bench"])
     p_load.add_argument("--profile", default="l7_http_flood")
     p_load.add_argument("--duration", type=float, default=30)
-    sub.add_parser("all", help="lint + unit + e2e (CI order)")
+    sub.add_parser("all", help="lint + unit + e2e + xdp (CI order)")
     args = ap.parse_args()
 
     print(f"ramshield suite — repo {REPO}\n")
@@ -310,10 +483,12 @@ def main() -> int:
         return layer_unit()
     if args.layer == "e2e":
         return layer_e2e()
+    if args.layer == "xdp":
+        return layer_xdp(getattr(args, "target", None))
     if args.layer == "load":
         return layer_load(args)
     if args.layer == "all":
-        fails = layer_lint() + layer_unit() + layer_e2e()
+        fails = layer_lint() + layer_unit() + layer_e2e() + layer_xdp()
         print(f"TOTAL FAILURES: {fails}")
         return fails
     return 1
