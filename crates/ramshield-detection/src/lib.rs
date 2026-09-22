@@ -554,6 +554,12 @@ impl DetectionEngine {
             Ok(()) => {
                 self.metrics
                     .record_block_ip(&ip, BlockReason::HighRps.as_str(), "detection");
+                // Fast path bypasses flush_batch, so record_batch never sees
+                // this decision — count it here or the applied-block total
+                // (dashboard blocks_total, enforcement stage) misses it.
+                self.metrics
+                    .blocks_detection
+                    .fetch_add(1, Ordering::Relaxed);
                 trace!(ip = %ip, events, "emergency fast-path block emitted pre-flush");
             }
             Err(_) => {
@@ -1311,8 +1317,14 @@ impl DetectionEngine {
                 // enforcement command was accepted above (no double count).
                 self.metrics
                     .record_block_ip(&cidr.addr, "subnet_batch", "detection");
+                // Window consumed: this scan acted on the accumulated rate,
+                // roll the window fresh. Only here — resetting on
+                // ALLOW/CHALLENGE would zero total_rps every 500 ms tick and
+                // make the 50k TIER_BLOCK rate floor unreachable for any
+                // burst slower than 100k/s; the 4 s window expiry in
+                // merge_subnet_window keeps stale swarms from re-arming.
+                self.store.reset_subnet_window(sk);
             }
-            self.store.reset_subnet_window(sk);
         }
     }
 }
@@ -1449,7 +1461,7 @@ mod tests {
             store,
             cfg,
             etx,
-            metrics,
+            metrics.clone(),
             Arc::new(AtomicBool::new(false)),
         ));
 
@@ -1474,6 +1486,16 @@ mod tests {
         assert!(
             matches!(cmd.action, EnforceAction::Block),
             "must be a Block"
+        );
+        // Regression: the pre-flush fast path must count into the applied
+        // detection-block total, otherwise the dashboard's blocks_total and
+        // the enforcement stage under-report every emergency-path block.
+        assert_eq!(
+            metrics
+                .blocks_detection
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "emergency-path block must increment blocks_detection"
         );
 
         // Still hot in the same window: no re-emit (crossing is one-shot).
@@ -1909,6 +1931,60 @@ mod tests {
             v6_blocks.len() < 50,
             "dual gate must not pass on 60 lifetime members + 5 fresh",
         );
+    }
+
+    /// Regression: TIER_BLOCK's 50k rate floor must be reachable from a burst
+    /// spread across the 4 s subnet window. The per-scan window reset wiped
+    /// total_rps on every 500 ms tick for ANY hot subnet, so the classifier
+    /// only ever saw a single ~500 ms slice — a burst slower than 100k/s
+    /// (e.g. 55k events over 3 s) could never block the /24.
+    #[test]
+    fn subnet_rate_accumulates_across_scans_until_block() {
+        let cfg = Config::default().into_handle();
+        let store = Arc::new(Store::new(16));
+        let metrics = Arc::new(Metrics::new());
+        let (etx, mut erx) = mpsc::channel(64);
+        let eng = Arc::new(DetectionEngine::new(
+            store.clone(),
+            cfg,
+            etx,
+            metrics.clone(),
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let any: IpAddr = "192.0.2.9".parse().unwrap();
+        let net = crate::IpNetwork::of_ip(any);
+        let sk = subnet_key_u128(any).unwrap();
+        let hosts: Vec<IpAddr> = (1..=250u8)
+            .map(|o| IpAddr::V4(Ipv4Addr::new(192, 0, 2, o)))
+            .collect();
+        // 3 x 18k events, 1 s apart — all inside SUBNET_WINDOW_NS (4 s),
+        // 54k total: crosses the 50k TIER_BLOCK floor only in full.
+        let t0 = 5_000_000_000_000u64;
+        for i in 0..3u64 {
+            store.merge_subnet_window(sk, net, 18_000, Some(&hosts), t0 + i * 1_000_000_000);
+            eng.subnet_batch_scan();
+        }
+
+        let cmds: Vec<_> = {
+            let mut v = Vec::new();
+            while let Ok(c) = erx.try_recv() {
+                v.push(c);
+            }
+            v
+        };
+        let subnet_blocks: Vec<_> = cmds.iter().filter(|c| c.reason == "subnet_burst").collect();
+        assert_eq!(
+            subnet_blocks.len(),
+            1,
+            "one /24 decision for a 54k burst spread over the 4 s window"
+        );
+        assert_eq!(
+            subnet_blocks[0].cidr,
+            Some(net),
+            "decision must be the /24 prefix, not a member host"
+        );
+        assert_eq!(metrics.blocks_subnet.load(Ordering::Relaxed), 1);
     }
 
     /// A block command that cannot reach enforcement must be COUNTED. The

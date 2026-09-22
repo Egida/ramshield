@@ -222,12 +222,19 @@ def layer_e2e(keep: bool = False) -> int:
                 break
         c.ok(blocked, "EWMA auto-block fires above rps_threshold")
 
-        # subnet block: many distinct IPs from one /24
+        # subnet block: many distinct IPs from one /24. The CGNAT guard
+        # classifies a public /24 as TIER_BLOCK only above 50k events in the
+        # 4s subnet window (cgnat.rs), so drive a ~5s sustained flood at
+        # ~16k events/s: any 4s window accumulates ~65k, and the dev flush
+        # cadence (pre_aggs_flush_interval_ms=1000) can't straggle a burst
+        # out of the window. Per-IP volume (~300 ev) stays far under every
+        # per-IP gate — only the subnet decision should fire.
         events = [{"ip": f"192.0.2.{i}", "bytes": 256, "status_code": 404, "proto_fp": 0x1000}
                   for i in range(250)]
-        ipc({"type": "report_connections", "events": events})
-        ipc({"type": "report_connections", "events": events})
-        ipc({"type": "report_connections", "events": events})
+        frame = events + events  # 500 events/frame, under the 4096 batch cap
+        for _ in range(150):
+            ipc({"type": "report_connections", "events": frame})
+            time.sleep(0.03)
         subnet_blocked = False
         for _ in range(60):
             time.sleep(0.25)
