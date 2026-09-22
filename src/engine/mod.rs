@@ -222,7 +222,7 @@ impl Engine {
                 Some(BlockRecord {
                     ts_ms: since_ns / 1_000_000,
                     ip: ip.to_string(),
-                    reason: format!("{reason:?}"),
+                    reason: reason.as_str().to_string(),
                     module: "enforcement".to_string(),
                 })
             })
@@ -616,5 +616,50 @@ mod startup_tests {
             "is_healthy should flip false at ram_pct=100%"
         );
         assert_eq!(snap.health_reason, "ram pressure");
+    }
+
+    fn blocked_record(ip: std::net::IpAddr) -> crate::storage::IpRecord {
+        use crate::storage::{BlockState, IpRecord};
+        use crate::BlockReason;
+        IpRecord {
+            ip,
+            request_count: 1,
+            ewma_rps: 0.0,
+            cusum_s: 0.0,
+            baseline_rps: 0.0,
+            prev_sample_hot: false,
+            sample_count: 0,
+            pulse_samples_in_window: 0,
+            pulse_window_start_ns: 0,
+            first_seen_ns: 0,
+            last_seen_ns: 0,
+            bytes_in: 0,
+            status_dist: [0; 5],
+            proto_fingerprint: 0,
+            threat_score: 0.0,
+            block_state: BlockState::Blocked {
+                reason: BlockReason::HighRps,
+                since_ns: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn active_blocks_emit_canonical_reason_tokens() {
+        // RED: format!("{reason:?}") emitted "HighRps" from /status while every
+        // other boundary emits the canonical token "high_rps" (BlockReason::as_str).
+        let store = Arc::new(Store::new(16));
+        store
+            .insert(
+                "10.9.9.9".parse().unwrap(),
+                crate::storage::Value::IpRecord(blocked_record("10.9.9.9".parse().unwrap())),
+                None,
+                1 << 30,
+            )
+            .unwrap();
+        let engine = Engine::new(Config::default(), store, Arc::new(Metrics::new()));
+        let blocks = engine.get_active_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].reason, "high_rps");
     }
 }
