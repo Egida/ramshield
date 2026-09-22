@@ -1070,6 +1070,16 @@ impl DetectionEngine {
         (ewma_rps, threat, block, was_blocked, stored)
     }
 
+    /// 2-probe fill estimate: FP ≈ (1 - e^(-2n/b))². At 2n/b = 0.1 the FP is
+    /// ~1%; the guard fires at 2n/b = 0.25 (n ≥ b/20) — above that the
+    /// cold-skip gate has stopped skipping and the store is about to bloat.
+    /// Sizing rule: bloom_bits ≈ 20 × (promoted IPs per 8 s epoch).
+    fn bloom_saturated(&self) -> bool {
+        let bits = self.metrics.bloom_bits.load(Ordering::Relaxed);
+        let n = self.metrics.bloom_inserts_epoch.load(Ordering::Relaxed);
+        bits != 0 && n.saturating_mul(20) >= bits
+    }
+
     /// Subnet-scale batch block — reads subnet_table only, not full store key scan.
     fn subnet_batch_loop(self: Arc<Self>) {
         let tick = std::time::Duration::from_millis(500);
@@ -1090,6 +1100,23 @@ impl DetectionEngine {
                 break;
             }
             std::thread::sleep(tick);
+            // Saturation guard: a mis-sized bloom_bits (too small for the
+            // promote rate) degrades the gate long before the 8 s boundary.
+            // Self-heal: clear early; the warn carries the sizing rule so a
+            // re-raise of detection.bloom_bits is the fix.
+            if self.bloom_saturated() {
+                let saturated_at = self.metrics.bloom_inserts_epoch.load(Ordering::Relaxed);
+                let bits = self.config.load().detection.bloom_bits;
+                self.bloom.store(Arc::new(BloomFilter::new(bits)));
+                self.metrics.bloom_epoch_clear();
+                last_bloom_clear_ns = now_ns();
+                warn!(
+                    inserts_epoch = saturated_at,
+                    bloom_bits = bits,
+                    "bloom saturated before epoch end — early clear; sizing rule: \
+                     detection.bloom_bits ≈ 20 × promoted IPs per 8 s"
+                );
+            }
             if now_ns().saturating_sub(last_bloom_clear_ns) >= bloom_clear_ns {
                 // ponytail: atomic swap — no lock held during clear.
                 // Old bloom is reclaimed when last reader releases its guard.
@@ -1554,6 +1581,35 @@ mod tests {
             sent,
             "F1 loss: ingested={ingested} left={left} sent={sent}"
         );
+    }
+
+    /// Saturation guard: the sizing rule is bloom_bits ≈ 20 × (promoted IPs
+    /// per 8 s epoch) for ~1% FP on the 2-probe filter. At 2n/b ≥ 10%
+    /// (n ≥ b/20) the gate has stopped cold-skipping — the guard must fire
+    /// so the epoch clears early instead of silently thrashing the store.
+    #[test]
+    fn bloom_saturated_at_one_tenth_fill() {
+        use tokio::sync::mpsc;
+        let mut cfg = Config::default();
+        cfg.detection.bloom_bits = 1_000_000;
+        let metrics = Arc::new(Metrics::new());
+        let (etx, _erx) = mpsc::channel(64);
+        let eng = DetectionEngine::new(
+            Arc::new(Store::new(16)),
+            cfg.into_handle(),
+            etx,
+            metrics.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        metrics.set_bloom_bits(1_000_000);
+        // b/20 = 50k promotions → 10% (2n/b). Guard fires at that line.
+        metrics.record_bloom_inserts(49_999);
+        assert!(!eng.bloom_saturated(), "just under the 10% line");
+        metrics.record_bloom_inserts(1);
+        assert!(eng.bloom_saturated(), "at the 10% line the gate is dead");
+        // Fresh epoch (guard clears) → unsaturated again.
+        metrics.bloom_epoch_clear();
+        assert!(!eng.bloom_saturated());
     }
 
     /// Patch A RED: the bloom is documented as an advisory revisit cache for

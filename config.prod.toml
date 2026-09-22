@@ -43,14 +43,20 @@ block_ttl_secs = 300
 pulse_window_secs = 5
 pulse_threshold_samples = 3
 subnet_burst_ttl_secs = 60
-bloom_bits = 100000
+# Sizing rule: bloom_bits ≈ 20 × (promoted IPs per 8 s epoch) for ~1% FP.
+# 8M bits (1 MB) covers ~400k promotions/epoch; the engine self-heals a
+# mis-sized value with an early epoch clear + warn carrying this rule.
+bloom_bits = 8_000_000
 batch_max_events = 4096
 batch_window_ms = 50
 pre_aggs_flush_interval_ms = 1000
 promote_min_events = 4
 subnet_window_threshold = 12
 emergency_burst_threshold = 500
-pre_aggs_max_size = 8192
+# Force-flush trigger on shared pre_aggs. 8192 thrashed flushes under IP
+# fanout; 1M holds the full working set (bounded ~100 MB, well inside
+# engine.ram_limit_mb).
+pre_aggs_max_size = 1_000_000
 
 [xdp]
 enabled = true
