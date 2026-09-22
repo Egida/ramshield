@@ -48,8 +48,16 @@ subnet_burst_ttl_secs = 60
 # mis-sized value with an early epoch clear + warn carrying this rule.
 bloom_bits = 8_000_000
 batch_max_events = 4096
-batch_window_ms = 50
-pre_aggs_flush_interval_ms = 1000
+# Decision-sample quantum per worker: 25ms halves block-decision latency
+# (RPS crossing, emergency burst, subnet legs all sample every window).
+# Cost: flush cadence doubles — measured flush 0.4-2ms at 4096 events is
+# ~6-8% of a worker core at this cadence; well inside budget.
+batch_window_ms = 25
+# Staleness backstop for shared pre_aggs: 250ms instead of 1s. Slow
+# accumulators (low-rate attackers under the batch window) are promoted
+# to the store 4x sooner — CUSUB arms ~2s faster, pulse windows sample
+# 4x per second. Idle cost: ~3 extra near-empty flushes/s (~microseconds).
+pre_aggs_flush_interval_ms = 250
 promote_min_events = 4
 subnet_window_threshold = 12
 emergency_burst_threshold = 500
