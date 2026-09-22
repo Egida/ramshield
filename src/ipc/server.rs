@@ -274,6 +274,7 @@ impl IpcServer {
                 Err(_) => {
                     self.rejected_connections.fetch_add(1, Ordering::Relaxed);
                     self.engine.metrics.inc_rejected(1);
+                    self.engine.metrics.inc_ipc_rejected_connections(1);
                     warn!(
                         "Connection rejected from {}: semaphore exhausted ({})",
                         remote, self.max_connections
@@ -494,6 +495,7 @@ async fn handle_connection(
                     Err(reason) => {
                         warn!("IPC auth rejected: {}", reason);
                         engine.metrics.inc_rejected(1);
+                        engine.metrics.inc_ipc_auth_rejections(1);
                         let resp = Response::Error {
                             code: 401,
                             message: format!("unauthorized: {}", reason),
@@ -906,6 +908,7 @@ fn process_request(
                     // P1 fix (F2): local counter had no consumers — dashboard
                     // saw zero drops exactly when the channel saturated.
                     engine.metrics.inc_rejected(1);
+                    engine.metrics.inc_ipc_event_drops(1);
                     Response::BatchOk {
                         accepted: 0,
                         rejected: 1,
@@ -953,6 +956,7 @@ fn process_request(
                         rejected += 1;
                         dropped_events.fetch_add(1, Ordering::Relaxed);
                         engine.metrics.inc_rejected(1); // F2
+                        engine.metrics.inc_ipc_event_drops(1);
                         trace!(
                             ip = %cr.ip,
                             rejected,
@@ -976,6 +980,7 @@ fn process_request(
                     tail_dropped = dropped;
                     dropped_events.fetch_add(dropped as u64, Ordering::Relaxed);
                     engine.metrics.inc_rejected(dropped as u64); // F2
+                    engine.metrics.inc_ipc_event_drops(dropped as u64);
                     trace!(
                         tail_dropped = dropped,
                         processed = accepted + rejected - dropped,

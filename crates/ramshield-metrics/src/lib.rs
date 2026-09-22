@@ -201,7 +201,16 @@ pub struct Metrics {
     pub requests_total: Arc<AtomicU64>,
     pub blocks_total: Arc<AtomicU64>,
     pub events_ingested: Arc<AtomicU64>,
+    /// Conflated aggregate of IPC rejections: auth 401s + connection
+    /// refusals + channel-full event drops. Clean breakdown:
+    /// ipc_event_drops / ipc_auth_rejections / ipc_rejected_connections.
     pub events_rejected: Arc<AtomicU64>,
+    /// Channel-full event drops (clean breakdown of events_rejected).
+    pub ipc_event_drops: Arc<AtomicU64>,
+    /// IPC frames rejected at auth — 401s (clean breakdown of events_rejected).
+    pub ipc_auth_rejections: Arc<AtomicU64>,
+    /// Connections refused at the semaphore (clean breakdown of events_rejected).
+    pub ipc_rejected_connections: Arc<AtomicU64>,
     pub frames_rejected: Arc<AtomicU64>,
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fp, >64 KiB).
@@ -317,6 +326,9 @@ impl Metrics {
             blocks_total: Arc::new(AtomicU64::new(0)),
             events_ingested: Arc::new(AtomicU64::new(0)),
             events_rejected: Arc::new(AtomicU64::new(0)),
+            ipc_event_drops: Arc::new(AtomicU64::new(0)),
+            ipc_auth_rejections: Arc::new(AtomicU64::new(0)),
+            ipc_rejected_connections: Arc::new(AtomicU64::new(0)),
             frames_rejected: Arc::new(AtomicU64::new(0)),
             events_shed: Arc::new(AtomicU64::new(0)),
             ingest_channel_depth: Arc::new(AtomicU64::new(0)),
@@ -390,6 +402,16 @@ impl Metrics {
     }
     pub fn inc_rejected(&self, n: u64) {
         self.events_rejected.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_ipc_event_drops(&self, n: u64) {
+        self.ipc_event_drops.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_ipc_auth_rejections(&self, n: u64) {
+        self.ipc_auth_rejections.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn inc_ipc_rejected_connections(&self, n: u64) {
+        self.ipc_rejected_connections
+            .fetch_add(n, Ordering::Relaxed);
     }
     pub fn inc_frames_rejected(&self) {
         self.frames_rejected.fetch_add(1, Ordering::Relaxed);
@@ -785,7 +807,25 @@ impl Metrics {
         out.push_str(&emit!(
             "ramshield_events_rejected_total",
             self.events_rejected.load(Ordering::Relaxed),
-            "Total events rejected.",
+            "Total events rejected (conflated: auth 401s + connection refusals + channel-full drops).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_ipc_event_drops_total",
+            self.ipc_event_drops.load(Ordering::Relaxed),
+            "Event-channel-full drops (clean subset of events_rejected_total).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_ipc_auth_rejections_total",
+            self.ipc_auth_rejections.load(Ordering::Relaxed),
+            "Auth-rejected frames — 401s (clean subset of events_rejected_total).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_ipc_rejected_connections_total",
+            self.ipc_rejected_connections.load(Ordering::Relaxed),
+            "Connections refused at the accept semaphore (clean subset of events_rejected_total).",
             "counter"
         ));
         out.push_str(&emit!(
@@ -1218,6 +1258,23 @@ mod cache_tests {
         assert!(text.contains("# TYPE ramshield_ingest_channel_depth gauge"));
         assert!(text.contains("ramshield_active_cidr_blocks 7"));
         assert!(text.contains("# TYPE ramshield_active_cidr_blocks gauge"));
+    }
+
+    /// events_rejected_total conflates three failure classes (auth 401s,
+    /// connection refusals, channel-full event drops). The breakdown
+    /// counters are the only way an operator can tell "auth-spammed" from
+    /// "dropping events" — series absent = blind to the split.
+    #[test]
+    fn prometheus_exposes_ipc_rejection_breakdown() {
+        let m = Metrics::new();
+        m.inc_ipc_event_drops(5);
+        m.inc_ipc_auth_rejections(3);
+        m.inc_ipc_rejected_connections(2);
+        let text = m.render_prometheus();
+        assert!(text.contains("ramshield_ipc_event_drops_total 5"));
+        assert!(text.contains("# TYPE ramshield_ipc_event_drops_total counter"));
+        assert!(text.contains("ramshield_ipc_auth_rejections_total 3"));
+        assert!(text.contains("ramshield_ipc_rejected_connections_total 2"));
     }
 
     /// Patch A: the bloom gauges must exist and be wired to their writers.
