@@ -141,6 +141,12 @@ pub struct EnforcementService {
     processed_results: HashMap<Uuid, EnforceResult>,
     processed_order: VecDeque<Uuid>,
     blocked_ips: HashSet<IpAddr>,
+    /// Per-IP attributed XDP drops since block, keyed to userspace-blocked
+    /// IPs ONLY (bounded by |blocked_ips|; cleared on unblock / re-block).
+    /// Observability basis: audit counters + zero-drop gauge. Invariant:
+    /// this map never feeds detection or the forecaster — a drop is a
+    /// consequence of our own block, not independent threat evidence.
+    drops_by_blocked: HashMap<IpAddr, u64>,
     /// Userspace mirror of active CIDR blocks lives in `store.active_cidrs`
     /// (single owner = this actor, single reader path = check_ip/dashboard).
     /// ponytail: kernel BLOCKCIDR maps are the authoritative dataplane; this
@@ -188,6 +194,7 @@ impl EnforcementService {
             processed_results: HashMap::new(),
             processed_order: VecDeque::with_capacity(65_536),
             blocked_ips: HashSet::new(),
+            drops_by_blocked: HashMap::new(),
             expirations: HashMap::new(),
             cidr_expirations: HashMap::new(),
             buckets: BTreeMap::new(),
@@ -244,6 +251,11 @@ impl EnforcementService {
                         match self.xdp.reconcile(&expected, &expected_cidrs) {
                             Ok(_) => {
                                 self.blocked_ips = expected.into_iter().collect();
+                                // Reconcile can shrink the blocked set out-of-band
+                                // (map wipe, external unblock): drop orphan
+                                // attribution before it skews the zero-drop gauge.
+                                self.drops_by_blocked
+                                    .retain(|ip, _| self.blocked_ips.contains(ip));
                                 debug!(
                                     n = self.blocked_ips.len(),
                                     "periodic XDP reconcile ok"
@@ -256,9 +268,7 @@ impl EnforcementService {
                     }
                     // XDP kernel counters: drain ringbuf events, read counters
                     let drops = self.xdp.drain_drop_events();
-                    if !drops.is_empty() {
-                        trace!(n = drops.len(), "XDP drop events drained");
-                    }
+                    self.attribute_drops(drops);
                     match self.xdp.counters() {
                         Ok(c) => {
                             self.metrics.set_xdp_counters(c[0], c[1], c[2], c[3]);
@@ -442,6 +452,40 @@ impl EnforcementService {
         self.expirations.insert(ip, (b, idx));
     }
 
+    /// Attribute drained XDP drop events (called each 250 ms tick).
+    ///
+    /// Invariant: attribution is OBSERVABILITY ONLY — per-IP drop counts
+    /// never enter detection or the forecaster. A drop is the consequence
+    /// of our own block, not independent evidence of maliciousness; feeding
+    /// it to a learner would self-confirm every block (false positives can
+    /// never be exonerated). Counts keyed to userspace-blocked IPs bound
+    /// the map by |blocked_ips|. Unattributed drops (IP not blocked) count
+    /// as kernel/userspace drift indicators.
+    fn attribute_drops(&mut self, drops: Vec<XdpDropEvent>) {
+        let mut gaps = 0u64;
+        for ev in drops {
+            if self.blocked_ips.contains(&ev.ip) {
+                *self.drops_by_blocked.entry(ev.ip).or_insert(0) += 1;
+            } else {
+                gaps += 1;
+            }
+        }
+        if gaps > 0 {
+            self.metrics
+                .xdp_attribution_gaps
+                .fetch_add(gaps, Ordering::Relaxed);
+        }
+        // Map holds only IPs with >=1 drop; the rest of the blocked set is
+        // zero-drop. saturating_sub guards a transient reconcile skew.
+        let zero = self
+            .blocked_ips
+            .len()
+            .saturating_sub(self.drops_by_blocked.len());
+        self.metrics
+            .xdp_blocked_ips_zero_drops
+            .store(zero as u64, Ordering::Relaxed);
+    }
+
     /// P1-4: re-arm the TTL ring with blocks restored from WAL replay.
     /// `replay_wal_into_store` returns remaining-TTL pairs; call before
     /// `run()` so restored blocks expire on schedule instead of forever.
@@ -620,6 +664,8 @@ impl EnforcementService {
                     .map_err(|e| EnforcementError::Storage(e.to_string()))?;
 
                 self.blocked_ips.insert(cmd.ip);
+                // Re-block resets attribution — a new block is a new epoch.
+                self.drops_by_blocked.remove(&cmd.ip);
                 if let Some(network) = cmd.cidr {
                     self.store.active_cidrs.insert(network, ());
                 }
@@ -715,6 +761,7 @@ impl EnforcementService {
                         .map_err(|e| EnforcementError::Storage(e.to_string()))?;
                 }
                 self.blocked_ips.remove(&cmd.ip);
+                self.drops_by_blocked.remove(&cmd.ip);
                 // Ponytail: mesh CRDT unbans — publish so dashboard reflects
                 // live unblock activity.
                 if let Some(mesh) = &self.mesh_blocklist {
@@ -1041,6 +1088,106 @@ mod tests {
         );
         assert!(s.expirations.is_empty() && s.buckets.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P2 audit + early-release basis: XDP drop events are attributed to
+    /// userspace-blocked IPs ONLY. Invariant: attribution is observability
+    /// (audit counters, zero-drop gauge) — it never enters detection or the
+    /// forecaster/learning path, because a drop is a consequence of our own
+    /// block, not independent threat evidence. Drops with no matching block
+    /// are kernel/userspace drift indicators, counted separately.
+    #[tokio::test]
+    async fn drop_attribution_counts_blocked_ips_only() {
+        let target = ip([10, 70, 0, 1]);
+        let stranger = ip([10, 70, 0, 2]);
+        let mut applier = DroppingApplier::new();
+        applier.events = vec![
+            XdpDropEvent {
+                ip: target,
+                ts_ns: 1,
+                slot: 0,
+            },
+            XdpDropEvent {
+                ip: target,
+                ts_ns: 2,
+                slot: 0,
+            },
+            XdpDropEvent {
+                ip: stranger,
+                ts_ns: 3,
+                slot: 0,
+            },
+        ];
+        let mut s = svc(Box::new(applier));
+        s.enforce(block_cmd(target, 60)).await.unwrap();
+        let drops = s.xdp.drain_drop_events();
+        s.attribute_drops(drops);
+        assert_eq!(s.drops_by_blocked.get(&target), Some(&2));
+        assert_eq!(
+            s.drops_by_blocked.len(),
+            1,
+            "unblocked IP must not accrue attribution"
+        );
+        assert_eq!(s.metrics.xdp_attribution_gaps.load(Ordering::Relaxed), 1);
+        // target now has drops → no zero-drop blocked IPs.
+        assert_eq!(
+            s.metrics.xdp_blocked_ips_zero_drops.load(Ordering::Relaxed),
+            0
+        );
+        // Unblock clears attribution — a later re-block starts at zero.
+        s.enforce(unblock_cmd(target)).await.unwrap();
+        assert!(s.drops_by_blocked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_drop_gauge_tracks_unseen_blocks() {
+        let a = ip([10, 71, 0, 1]);
+        let b = ip([10, 71, 0, 2]);
+        let mut s = svc(Box::new(DroppingApplier::new()));
+        s.enforce(block_cmd(a, 60)).await.unwrap();
+        s.enforce(block_cmd(b, 60)).await.unwrap();
+        s.attribute_drops(Vec::new());
+        assert_eq!(
+            s.metrics.xdp_blocked_ips_zero_drops.load(Ordering::Relaxed),
+            2
+        );
+        s.attribute_drops(vec![XdpDropEvent {
+            ip: a,
+            ts_ns: 1,
+            slot: 0,
+        }]);
+        assert_eq!(
+            s.metrics.xdp_blocked_ips_zero_drops.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    struct DroppingApplier {
+        events: Vec<XdpDropEvent>,
+    }
+    impl DroppingApplier {
+        fn new() -> Self {
+            Self { events: Vec::new() }
+        }
+    }
+    #[async_trait::async_trait]
+    impl XdpApplier for DroppingApplier {
+        fn apply_block(&mut self, _: IpAddr, _: Uuid, _: u64) -> Result<(), EnforcementError> {
+            Ok(())
+        }
+        fn apply_unblock(&mut self, _: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
+            Ok(())
+        }
+        fn reconcile(
+            &mut self,
+            _: &[IpAddr],
+            _: &[IpNetwork],
+        ) -> Result<ReconciliationState, EnforcementError> {
+            Ok(ReconciliationState::default())
+        }
+        fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
+            std::mem::take(&mut self.events)
+        }
     }
 
     fn block_cmd(ip: IpAddr, ttl: u64) -> EnforceCommand {

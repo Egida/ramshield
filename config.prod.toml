@@ -1,0 +1,58 @@
+# Local prod-shape run: XDP on (lo/skb), WAL on (GroupCommit), all cores.
+# NOTE: contains the shared TEST key from /home/m/ramshield_ddos_v*.py — never commit.
+[engine]
+shard_count = 256
+worker_threads = 0
+ram_limit_mb = 14512
+
+[ipc]
+tcp_addr = "127.0.0.1:7890"
+max_connections = 1000000
+max_line_length = 33554432
+auth_keys = ["k1:3a641884b03746881b3dd2abf37d75cb1f5b25cb8e813c6b3d3abff5d07dbfcc"]
+
+[dashboard]
+enabled = true
+max_login_attempts = 50
+max_password_length = 1024
+
+[wal]
+enabled = true
+dir = "/tmp/ramshield_wal"
+durability = "GroupCommit"
+compress = false
+seg_max_bytes = 67108864
+retention_max_bytes = 1073741824
+
+[forecasting]
+enabled = true
+ewma_alpha = 0.3
+hw_beta = 0.1
+hw_gamma = 0.1
+seasonality_period = 60
+anomaly_zscore = 3.0
+min_entropy = 4.5
+
+[detection]
+rps_threshold = 500
+rate_window_secs = 10
+subnet_batch_threshold = 800
+subnet_batch_min_events = 500
+batch_block_enabled = true
+block_ttl_secs = 300
+pulse_window_secs = 5
+pulse_threshold_samples = 3
+subnet_burst_ttl_secs = 60
+bloom_bits = 100000
+batch_max_events = 4096
+batch_window_ms = 50
+pre_aggs_flush_interval_ms = 1000
+promote_min_events = 4
+subnet_window_threshold = 12
+emergency_burst_threshold = 500
+pre_aggs_max_size = 8192
+
+[xdp]
+enabled = true
+interface = "lo"
+mode = "skb"
