@@ -537,9 +537,8 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
 #[cfg(test)]
 mod startup_tests {
     //! BACKLOG #14 — engine startup integration tests.
-    //! Lives in-tree rather than in `tests/` because the bin currently
-    //! fails to compile (pre-existing rot, out of scope for this atomic
-    //! task); in-tree tests ride `cargo test --lib`.
+    //! Lives in-tree (not `tests/`) so it can reach crate-private engine
+    //! internals; rides `cargo test --lib`.
     use super::*;
     use crate::Config;
     use crate::metrics::Metrics;
