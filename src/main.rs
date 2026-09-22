@@ -4,6 +4,40 @@ use std::sync::Arc;
 use tracing::info; // Add debug
 use tracing_subscriber::EnvFilter;
 
+/// CLI contract: `--config <path>` and a bare positional `<path>` both select
+/// the config file. Unknown flags and missing values are FATAL — the old
+/// parser silently dropped unrecognized arguments, so `./ramshield config.toml`
+/// (positional) booted on compiled-in defaults with the file ignored.
+fn parse_args(args: &[String]) -> Result<Option<String>> {
+    let mut config_path: Option<String> = None;
+    let mut i = 1; // skip program name
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" | "-c" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--config requires a path"))?;
+                if config_path.is_some() {
+                    anyhow::bail!("multiple config paths given");
+                }
+                config_path = Some(v.clone());
+                i += 2;
+            }
+            s if s.starts_with('-') && s.len() > 1 => {
+                anyhow::bail!("unknown argument: {s}");
+            }
+            _ => {
+                if config_path.is_some() {
+                    anyhow::bail!("multiple config paths given");
+                }
+                config_path = Some(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    Ok(config_path)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     ramshield::install_panic_hook();
@@ -19,19 +53,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    let mut config_path: Option<String> = None;
-
-    // Parse CLI arguments
-    let mut i = 1; // Start from 1 to skip program name
-    while i < args.len() {
-        if args[i] == "--config" && i + 1 < args.len() {
-            config_path = Some(args[i + 1].clone());
-            i += 2; // Consume both --config and its value
-        } else {
-            // Unrecognized argument, or argument without value
-            i += 1;
-        }
-    }
+    let config_path = parse_args(&args)?;
 
     let config = match config_path {
         Some(path) => {
@@ -165,4 +187,60 @@ async fn main() -> Result<()> {
 
     info!("Shutdown complete.");
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::parse_args;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        std::iter::once("ramshield".to_string())
+            .chain(v.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn config_flag_selects_path() {
+        assert_eq!(
+            parse_args(&args(&["--config", "a.toml"])).unwrap(),
+            Some("a.toml".into())
+        );
+        assert_eq!(
+            parse_args(&args(&["-c", "a.toml"])).unwrap(),
+            Some("a.toml".into())
+        );
+    }
+
+    #[test]
+    fn positional_path_selects_config() {
+        // Regression: the old parser silently dropped this — the file was
+        // never loaded and the process booted on compiled-in defaults.
+        assert_eq!(
+            parse_args(&args(&["config.toml"])).unwrap(),
+            Some("config.toml".into())
+        );
+    }
+
+    #[test]
+    fn unknown_flag_is_fatal() {
+        // Fail-closed: a typo'd flag must not boot with an ignored argument.
+        assert!(parse_args(&args(&["--confg", "a.toml"])).is_err());
+        assert!(parse_args(&args(&["--x"])).is_err());
+    }
+
+    #[test]
+    fn missing_flag_value_is_fatal() {
+        assert!(parse_args(&args(&["--config"])).is_err());
+    }
+
+    #[test]
+    fn duplicate_config_path_is_fatal() {
+        assert!(parse_args(&args(&["--config", "a.toml", "b.toml"])).is_err());
+        assert!(parse_args(&args(&["a.toml", "--config", "b.toml"])).is_err());
+    }
+
+    #[test]
+    fn empty_is_none() {
+        assert_eq!(parse_args(&args(&[])).unwrap(), None);
+    }
 }
