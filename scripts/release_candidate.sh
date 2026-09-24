@@ -21,7 +21,7 @@ if command -v setcap >/dev/null 2>&1; then
 fi
 getcap target/release/ramshield
 
-CFG=config.prod.toml.example \
+CFG=config.baseline.toml \
 IPC_PORT=17890 \
 DASH_ADDR=127.0.0.1:19999 \
 WAL_DIR="${WAL_DIR:-/tmp/ramshield-release-candidate-wal}" \

@@ -285,6 +285,14 @@ pub struct Metrics {
     pub last_batch_events: Arc<AtomicU64>,
     pub last_batch_promoted: Arc<AtomicU64>,
     pub last_batch_blocks: Arc<AtomicU64>,
+    /// Dashboard login attempts that failed (wrong password, lockout).
+    pub auth_login_failures_total: Arc<AtomicU64>,
+    /// Dashboard login attempts that succeeded.
+    pub auth_login_successes_total: Arc<AtomicU64>,
+    /// Dashboard API requests blocked by the cross-origin CSRF guard.
+    pub csrf_blocked_total: Arc<AtomicU64>,
+    /// Dashboard API requests allowed through the CSRF guard.
+    pub csrf_allowed_total: Arc<AtomicU64>,
     /// Bloom advisory-cache observability (Patch A). The bloom is a revisit
     /// cache for *promoted* IPs, not a block list, so its fill must be
     /// measurable: `bloom_inserts_epoch` counts distinct promotes since the
@@ -295,6 +303,14 @@ pub struct Metrics {
     pub bloom_bits: Arc<AtomicU64>,
     pub bloom_inserts_epoch: Arc<AtomicU64>,
     pub bloom_clears_total: Arc<AtomicU64>,
+    pub bloom_saturation_clears_total: Arc<AtomicU64>,
+    /// Seconds since the last successful XDP reconciliation. 0 if never reconciled.
+    pub reconcile_age_seconds: Arc<AtomicU64>,
+    /// Unix timestamp of the last successful reconciliation.
+    pub reconcile_last_success_unix: Arc<AtomicU64>,
+    /// Total reconciliation failures.
+    pub reconcile_failures_total: Arc<AtomicU64>,
+    pub reconcile_successes_total: Arc<AtomicU64>,
     pub last_batch: Arc<Mutex<Option<Arc<BatchRecord>>>>,
     pub batch_history: Arc<Mutex<VecDeque<Arc<BatchRecord>>>>,
     pub block_log: Arc<Mutex<VecDeque<BlockRecord>>>,
@@ -375,9 +391,18 @@ impl Metrics {
             last_batch_events: Arc::new(AtomicU64::new(0)),
             last_batch_promoted: Arc::new(AtomicU64::new(0)),
             last_batch_blocks: Arc::new(AtomicU64::new(0)),
+            auth_login_failures_total: Arc::new(AtomicU64::new(0)),
+            auth_login_successes_total: Arc::new(AtomicU64::new(0)),
+            csrf_blocked_total: Arc::new(AtomicU64::new(0)),
+            csrf_allowed_total: Arc::new(AtomicU64::new(0)),
             bloom_bits: Arc::new(AtomicU64::new(0)),
             bloom_inserts_epoch: Arc::new(AtomicU64::new(0)),
             bloom_clears_total: Arc::new(AtomicU64::new(0)),
+            bloom_saturation_clears_total: Arc::new(AtomicU64::new(0)),
+            reconcile_age_seconds: Arc::new(AtomicU64::new(0)),
+            reconcile_last_success_unix: Arc::new(AtomicU64::new(0)),
+            reconcile_failures_total: Arc::new(AtomicU64::new(0)),
+            reconcile_successes_total: Arc::new(AtomicU64::new(0)),
             last_batch: Arc::new(Mutex::new(None)),
             batch_history: Arc::new(Mutex::new(VecDeque::with_capacity(HISTORY))),
             block_log: Arc::new(Mutex::new(VecDeque::with_capacity(block_log_size.max(1)))),
@@ -454,6 +479,12 @@ impl Metrics {
         self.bloom_inserts_epoch.store(0, Ordering::Relaxed);
         self.bloom_clears_total.fetch_add(1, Ordering::Relaxed);
     }
+    /// D6: count saturation-driven clears (n≥m/20 threshold) separately from
+    /// timed epoch clears. Ops can alert on chronic undersize without
+    /// drowning in routine 8s clear noise.
+    pub fn record_bloom_saturation_clear(&self) {
+        self.bloom_saturation_clears_total.fetch_add(1, Ordering::Relaxed);
+    }
     /// Gauge: bounded ingest-queue occupancy. Written by the engine snapshot
     /// path (dashboard refresh + SSE), same source value on both writers.
     pub fn set_channel_depth(&self, depth: usize) {
@@ -476,6 +507,48 @@ impl Metrics {
     }
     pub fn set_pending_expirations(&self, n: u64) {
         self.pending_expirations.store(n, Ordering::Relaxed);
+    }
+    /// Record a successful XDP reconciliation. Age resets to 0 and the
+    /// success timestamp moves to now.
+    pub fn record_reconcile_success(&self, now_unix: u64) {
+        self.reconcile_successes_total.fetch_add(1, Ordering::Relaxed);
+        self.reconcile_last_success_unix.store(now_unix, Ordering::Relaxed);
+        self.reconcile_age_seconds.store(0, Ordering::Relaxed);
+    }
+    /// Record a failed XDP reconciliation attempt. Age keeps growing until
+    /// the next success (the gauge drifts upward — that drift is the alert).
+    pub fn record_reconcile_failure(&self, now_unix: u64, last_success_unix: u64) {
+        self.reconcile_failures_total.fetch_add(1, Ordering::Relaxed);
+        if last_success_unix > 0 {
+            self.reconcile_age_seconds
+                .store(now_unix.saturating_sub(last_success_unix), Ordering::Relaxed);
+        }
+    }
+    /// Refresh the age gauge on every tick (successful or not) so it tracks
+    /// wall time even when reconcile attempts succeed silently.
+    /// Record a failed dashboard login attempt. Increments the per-IP
+    /// failure window in AuthState and the global counter.
+    pub fn inc_auth_login_failure(&self) {
+        self.auth_login_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a successful dashboard login.
+    pub fn inc_auth_login_success(&self) {
+        self.auth_login_successes_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a dashboard API request blocked by the cross-origin CSRF guard.
+    pub fn inc_csrf_blocked(&self) {
+        self.csrf_blocked_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a dashboard API request allowed through the CSRF guard.
+    pub fn inc_csrf_allowed(&self) {
+        self.csrf_allowed_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn tick_reconcile_age(&self, now_unix: u64) {
+        let last = self.reconcile_last_success_unix.load(Ordering::Relaxed);
+        if last > 0 {
+            self.reconcile_age_seconds
+                .store(now_unix.saturating_sub(last), Ordering::Relaxed);
+        }
     }
     // ponytail: P2/P3 module counters — writer methods so the dashboard reads
     // live values instead of dead zeros. Each caller owns its Arc<Metrics>
@@ -922,6 +995,12 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_bloom_saturation_clears_total",
+            self.bloom_saturation_clears_total.load(Ordering::Relaxed),
+            "Bloom saturation-driven clears (n≥m/20).",
+            "counter"
+        ));
+        out.push_str(&emit!(
             "ramshield_bloom_fp_ppm",
             bloom_fp_ppm,
             "Estimated bloom false-positive rate in parts per million (k=2).",
@@ -1105,6 +1184,54 @@ impl Metrics {
             "ramshield_xdp_apply_failures_total",
             self.xdp_apply_failures.load(Ordering::Relaxed),
             "Block/unblock decisions that failed to reach the kernel; the wire keeps passing the target while userspace+ WAL believe it is blocked (CIDR trie full / XDP failure).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_reconcile_age_seconds",
+            self.reconcile_age_seconds.load(Ordering::Relaxed),
+            "Seconds since the last successful store→XDP reconciliation (grows when reconcile is failing).",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_reconcile_last_success_unix",
+            self.reconcile_last_success_unix.load(Ordering::Relaxed),
+            "Unix timestamp of the last successful reconciliation.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_reconcile_failures_total",
+            self.reconcile_failures_total.load(Ordering::Relaxed),
+            "Failed reconciliation attempts (kernel-side map update or read errors).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_reconcile_successes_total",
+            self.reconcile_successes_total.load(Ordering::Relaxed),
+            "Successful reconciliation runs.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_auth_login_failures_total",
+            self.auth_login_failures_total.load(Ordering::Relaxed),
+            "Dashboard login attempts that failed (wrong password or lockout).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_auth_login_successes_total",
+            self.auth_login_successes_total.load(Ordering::Relaxed),
+            "Dashboard login attempts that succeeded.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_csrf_blocked_total",
+            self.csrf_blocked_total.load(Ordering::Relaxed),
+            "Dashboard API requests blocked by the cross-origin CSRF guard.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_csrf_allowed_total",
+            self.csrf_allowed_total.load(Ordering::Relaxed),
+            "Dashboard API requests allowed through the CSRF guard.",
             "counter"
         ));
         // No trailing println! here — every emit stanza already ends in '\n',

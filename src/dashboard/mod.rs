@@ -38,6 +38,7 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         cfg.dashboard
             .cookie_secure
             .unwrap_or(cfg.dashboard.tls_enabled),
+        Arc::new(ramshield_metrics::Metrics::new()),
     );
     let app_state = AppState {
         engine: engine.clone(),
@@ -271,21 +272,39 @@ async fn api_set_config(
         .map(str::to_lowercase);
 
     fn is_cross_origin(origin: Option<&str>, referer: Option<&str>, host: Option<&str>) -> bool {
-        // If Origin present, use it; otherwise check Referer
-        let header = origin.or(referer);
-        // Both missing (curl/operator) => fail-open, allow
-        let Some(header) = header else { return false };
-        // Parse as URL: take everything after :// up to next / (path/query)
-        let header = header.trim();
-        let scheme_end = header.find("://").map(|i| i + 3).unwrap_or(0);
-        let authority = &header[scheme_end..];
-        let authority = authority.split('/').next().unwrap_or("");
-        let authority = authority.split('?').next().unwrap_or("");
-        // Compare authority against Host header; empty => allow
-        !host.is_some_and(|h| h == authority)
-    }
+            // If Origin present, use it; otherwise check Referer
+            let header = origin.or(referer);
+            // On non-loopback binds, require Origin or Referer to prevent CSRF
+            // On loopback (dev), allow missing Origin/Referer for curl/operator convenience
+            if header.is_none() {
+                // Check if this is a non-loopback bind by looking for non-localhost host
+                let is_non_loopback = host.as_ref().map(|h| {
+                    !h.eq_ignore_ascii_case("localhost") && 
+                    !h.eq_ignore_ascii_case("127.0.0.1") && 
+                    !h.starts_with("[::1]") &&
+                    !h.starts_with("fe80:")
+                }).unwrap_or(false);
+                if is_non_loopback {
+                    return true; // fail-closed: treat as cross-origin
+                }
+                // Both missing (curl/operator) on loopback => fail-open, allow
+                return false;
+            }
+            // Compare authority against Host header; empty => allow
+            let Some(header) = header else { return false };
+            // Parse as URL: take everything after :// up to next / (path/query)
+            let header = header.trim();
+            let scheme_end = header.find("://").map(|i| i + 3).unwrap_or(0);
+            let authority = &header[scheme_end..];
+            let authority = authority.split('/').next().unwrap_or("");
+            let authority = authority.split('?').next().unwrap_or("");
+            // Compare authority against Host header; empty => allow
+            !host.is_some_and(|h| h.eq_ignore_ascii_case(authority))
+        }
 
-    if is_cross_origin(origin.as_deref(), referer.as_deref(), host.as_deref()) {
+    let cross_origin = is_cross_origin(origin.as_deref(), referer.as_deref(), host.as_deref());
+    if cross_origin {
+        state.auth.metrics.inc_csrf_blocked();
         return (
             StatusCode::FORBIDDEN,
             Json(ConfigResponse {
@@ -294,6 +313,7 @@ async fn api_set_config(
             }),
         );
     }
+    state.auth.metrics.inc_csrf_allowed();
     // P2 fix: GET /api/config returns auth_keys as "id:<redacted>" and
     // admin_password_hash as "<redacted>". An operator (or UI) POSTing the
     // viewed config back used to PASS validate() — the placeholder strings
@@ -324,6 +344,8 @@ async fn api_set_config(
     if let Some(v) = patch.forecasting {
         cfg.forecasting = v;
     }
+    // D4: capture the new password hash before moving the dashboard config
+    let new_pw_hash = patch.dashboard.as_ref().and_then(|d| d.admin_password_hash.clone());
     if let Some(v) = patch.dashboard {
         cfg.dashboard = v;
     }
@@ -338,6 +360,10 @@ async fn api_set_config(
         );
     }
     state.engine.config.store(Arc::new(cfg.clone()));
+    // D4 fix: hot-refresh dashboard password hash on config change
+    if new_pw_hash.is_some() {
+        state.auth.set_password_hash(new_pw_hash);
+    }
     (
         StatusCode::OK,
         Json(ConfigResponse {
@@ -447,7 +473,7 @@ mod tests {
             Arc::new(Store::new(16)),
             Arc::new(Metrics::new()),
         ));
-        let auth = Arc::new(auth::AuthState::new(None, 3600, 50, 1024, vec![], true));
+        let auth = Arc::new(auth::AuthState::new(None, 3600, 50, 1024, vec![], true, Arc::new(Metrics::new())));
         AppState { engine, auth }
     }
 
@@ -594,6 +620,26 @@ mod tests {
                 Request::post("/api/config")
                     .header("content-type", "application/json")
                     .header("origin", "https://evil.example")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn post_config_non_loopback_missing_origin_forbidden() {
+        let state = test_app_state();
+        let app = Router::new()
+            .route("/api/config", post(api_set_config))
+            .with_state(state);
+        let body = serde_json::json!({"engine": {"worker_threads": 2, "ram_limit_mb": 128, "shard_count": 8}});
+        let response = app
+            .oneshot(
+                Request::post("/api/config")
+                    .header("content-type", "application/json")
+                    .header("host", "10.0.0.1:9999")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
             )

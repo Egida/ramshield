@@ -1,16 +1,17 @@
 # RamShield Production Readiness Review
 
-Review date: 2026-09-17
-Branch: `p1`
-Reviewed commit: `ac79c40`
+Review date: 2026-09-24
+Branch: `main`
+Reviewed commit: `21916036facd5467b75c5ad1d38dde14e2cb415a`
 
 ## Verdict
 
 Status: NOT production-ready.
 
-Current state supports a controlled single-node pilot on localhost with XDP capabilities. It does not yet support an unattended, externally exposed, recoverable production deployment.
+Current state supports a controlled single-node pilot on localhost with XDP capabilities.
+It does not yet support an unattended, externally exposed, recoverable production deployment.
 
-Readiness score: 5/10.
+Readiness score: 4/10.
 
 The core processing path is healthy. The release boundary, durability boundary, security boundary, and operational recovery boundary remain incomplete.
 
@@ -40,15 +41,14 @@ Green now:
 
 Not proven:
 
-- No Dockerfile, OCI image build, image signing, digest promotion, or rollback artifact exists.
-- No systemd unit, service supervisor contract, or restart policy is source-controlled.
+- OCI image build (`docker/Dockerfile` + `scripts/build_docker.sh`) and systemd unit (`deploy/systemd/ramshield.service`) exist but are unsigned; no digest promotion or rollback artifact drill has been exercised.
 - `config-xdp.toml` binds localhost, has no active IPC HMAC key, and has no WAL section.
 - IPC has no TLS; safe only behind localhost or a trusted private transport.
 - Runtime reports `wal_lsn=0`; restart durability is not production-proven.
-- Enforcement reconciliation is startup-only; drift after startup is not automatically repaired.
+- Enforcement reconciliation runs every ~10 s (`RECONCILE_EVERY_TICKS=40` × 250 ms) but has no exported drift/age metrics and no live map-loss drill in CI.
 - `worker_threads` is informational; processing remains single-batch-thread.
 - XDP requires host capabilities and manual capability restoration after builds.
-- Current source contains 49 production `.unwrap()`/`.expect()` matches under `src/`.
+- Current source contains 439 production `.unwrap()`/`.expect()` matches under `src/` and `crates/`.
 - Live/XDP verification is not part of CI; the review pipeline currently skips it by design.
 - No measured SLOs, alert rules, capacity envelope, or rollback drill are recorded.
 - No authenticated external-control deployment has been exercised.
@@ -58,6 +58,8 @@ Not proven:
 ### P0 — blocks any external production exposure
 
 1. Control-plane security
+   - IPC auth keys: rotated and files deleted (commit 6e92c2c); key-history
+     in git history is formally accepted — no rewrite risk worth the cost.
    - Activate and rotate IPC HMAC credentials.
    - Define dashboard authentication deployment path.
    - Keep binds private unless TLS or an authenticated reverse proxy is present.
@@ -77,17 +79,16 @@ Not proven:
 ### P1 — blocks a reliable production service
 
 4. Supervision and lifecycle
-   - Add systemd or container orchestration manifest.
-   - Define readiness, liveness, graceful shutdown, restart backoff, resource limits, and log retention.
+   - systemd unit (`deploy/systemd/ramshield.service`) and k8s manifest (`deploy/k8s/daemonset.yaml`) exist but need operator testing; define readiness/liveness probes, graceful shutdown, restart backoff, resource limits, and log retention.
    - Ensure exactly one process owns IPC and dashboard ports.
 
 5. Enforcement convergence
-   - Add periodic store → XDP reconciliation.
+   - Periodic store → XDP reconciliation runs every ~10 s (`RECONCILE_EVERY_TICKS=40`), but no exported drift/age/failure metrics and no live map-loss drill in CI.
    - Export reconciliation age, failures, and drift count.
    - Test XDP map loss/reload while the daemon remains alive.
 
 6. Failure handling
-   - Remove or justify the 49 production `.unwrap()`/`.expect()` matches.
+   - Remove or justify the 439 production `.unwrap()`/`.expect()` matches.
    - Convert startup-critical failures into typed, observable exits.
    - Add panic policy and process-supervisor expectations.
 
@@ -238,7 +239,7 @@ Work:
 
 1. Add Prometheus alerts and operator runbooks.
 2. Add signed release and changelog gates.
-3. Remove or explicitly classify production unwrap/expect sites.
+3. Remove or justify the 439 production `.unwrap()`/`.expect()` matches.
 4. Run fuzzing and security review.
 5. Perform a game day: attack, alert, degrade, restart, rollback, recover.
 

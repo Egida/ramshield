@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![XDP/eBPF](https://img.shields.io/badge/eBPF-XDP-4f8ef7?logo=linux)](https://prototype-kernel.readthedocs.io/en/latest/bpf/)
-[![Version](https://img.shields.io/badge/version-0.2.0--rc6-2ea44f)](https://github.com/grep999/ramshield/releases)
+[![Version](https://img.shields.io/badge/version-0.2.0-2ea44f)](https://github.com/grep999/ramshield/releases)
 [![CI](https://img.shields.io/badge/CI-review%20pipeline-6a737d?logo=githubactions)](https://github.com/grep999/ramshield/actions)
 [![Tests](https://img.shields.io/badge/tests-273%20passed%2C%200%20failed-2ea44f)](https://github.com/grep999/ramshield/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -251,7 +251,7 @@ The current readiness review does **not** claim:
 
 - authenticated external control without deployment-specific TLS / trusted-proxy setup;
 - systemd or orchestration supervision and restart policy;
-- periodic enforcement reconciliation after runtime map loss;
+|- zero-drop enforcement under 32 concurrent enforcement writers (single-writer model);
 - a documented capacity envelope or latency SLO;
 - a verified immutable OCI digest, signed artifact, SBOM, or rollback image;
 - general production readiness for unattended public deployment.
