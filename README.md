@@ -114,12 +114,12 @@ scripts/review_pipeline.sh
 # Release binary (full feature set: tokio, dashboard, XDP)
 cargo build --release --locked --features full
 
-# Run (loopback, no XDP) — copy and edit the config first
-cp config.prod.toml.example config.prod.toml
-./target/release/ramshield --config config.prod.toml
+# Run (loopback, no XDP) — copy the config first
+cp config.baseline.toml config.toml
+./target/release/ramshield --config config.toml
 ```
 
-`config.prod.toml.example` is **fail-closed**: it binds `0.0.0.0` and `Config::validate()` refuses to start until you set an Argon2 dashboard password hash and an IPC HMAC key. Keep listeners on loopback or behind a trusted authenticated transport during development. Never commit the secret-bearing config.
+`config.baseline.toml` is **loopback-safe by default**: binds `127.0.0.1` for IPC and dashboard, enabling safe local development without authentication. For external access, set `[dashboard].http_addr` and `[ipc].tcp_addr` to your interface, then provide `[dashboard].admin_password_hash` (via `RAMSHIELD_DASHBOARD__ADMIN_PASSWORD` env) and `[ipc].auth_keys` (via `RAMSHIELD_IPC__AUTH_KEYS` env) to avoid startup validation errors.
 
 For host-NIC XDP, set `[xdp].enabled = true`, pick the interface and mode, and run with the required capabilities. Verify `xdp_active` via `/healthz` or `/api/snapshot`.
 
@@ -163,7 +163,7 @@ The request contract lives in [`crates/ramshield-protocol/src/message.rs`](crate
 
 ## Dashboard & API
 
-Default production-like listeners: IPC `0.0.0.0:7890`, dashboard `0.0.0.0:9999`.
+Default listeners: IPC `127.0.0.1:7890`, dashboard `127.0.0.1:9999` (loopback).
 
 | Route | Purpose |
 |---|---|
@@ -182,7 +182,7 @@ Default production-like listeners: IPC `0.0.0.0:7890`, dashboard `0.0.0.0:9999`.
 
 ## Configuration
 
-Config is TOML (`config.toml`, `config.prod.toml` for production-like, `config.debug.toml`, etc.). The tracked production template (`config.prod.toml.example`) baseline:
+Config is TOML (`config.toml`, `config.prod.toml` for production-like, `config.debug.toml`, etc.). The tracked canonical template (`config.baseline.toml`) baseline:
 
 | Setting | Value | Meaning |
 |---|---|---|
@@ -200,7 +200,7 @@ Config is TOML (`config.toml`, `config.prod.toml` for production-like, `config.d
 | `wal.compress` | `true` | zstd-compressed segments |
 | `xdp.enabled` | `false` | Fail-closed default |
 
-Full reference: [`config.prod.toml.example`](config.prod.toml.example) and [`crates/ramshield-config/src/lib.rs`](crates/ramshield-config/src/lib.rs).
+Full reference: [`config.baseline.toml`](config.baseline.toml) and [`crates/ramshield-config/src/lib.rs`](crates/ramshield-config/src/lib.rs).
 
 ## Performance
 
@@ -231,7 +231,7 @@ scripts/review_pipeline.sh
 cargo test --workspace --locked --features full
 
 # Isolated production-like smoke
-CFG=config.prod.toml.example \
+CFG=config.baseline.toml \
 IPC_PORT=17890 DASH_ADDR=127.0.0.1:19999 \
 WAL_DIR=/tmp/ramshield-release-wal \
 bash scripts/prod_smoke.sh
