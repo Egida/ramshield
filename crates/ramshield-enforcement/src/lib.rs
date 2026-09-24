@@ -229,9 +229,26 @@ impl EnforcementService {
         match self.xdp.reconcile(&expected, &expected_cidrs) {
             Ok(_) => {
                 self.blocked_ips = expected.into_iter().collect();
+                let now_unix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.metrics.record_reconcile_success(now_unix);
                 info!("XDP reconciled with {} blocked IPs", self.blocked_ips.len());
             }
-            Err(e) => error!("Initial XDP reconciliation failed: {}", e),
+            Err(e) => {
+                let now_unix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.metrics.record_reconcile_failure(
+                    now_unix,
+                    self.metrics
+                        .reconcile_last_success_unix
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
+                error!("Initial XDP reconciliation failed: {}", e)
+            }
         }
 
         let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -244,6 +261,11 @@ impl EnforcementService {
             tokio::select! {
                 _ = tick.tick() => {
                     self.expire_due().await;
+                    let now_unix = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    self.metrics.tick_reconcile_age(now_unix);
                     reconcile_ticks = reconcile_ticks.wrapping_add(1);
                     if reconcile_ticks.is_multiple_of(RECONCILE_EVERY_TICKS) {
                         let expected = self.store.get_all_blocked_ips();
@@ -256,12 +278,27 @@ impl EnforcementService {
                                 // attribution before it skews the zero-drop gauge.
                                 self.drops_by_blocked
                                     .retain(|ip, _| self.blocked_ips.contains(ip));
+                                let now_unix = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                self.metrics.record_reconcile_success(now_unix);
                                 debug!(
                                     n = self.blocked_ips.len(),
                                     "periodic XDP reconcile ok"
                                 );
                             }
                             Err(e) => {
+                                let now_unix = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                self.metrics.record_reconcile_failure(
+                                    now_unix,
+                                    self.metrics
+                                        .reconcile_last_success_unix
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                );
                                 error!("periodic XDP reconciliation failed: {e}");
                             }
                         }

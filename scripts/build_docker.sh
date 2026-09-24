@@ -20,9 +20,9 @@ cp docker/Dockerfile "$CTX/"
 cp /dev/null "$CTX/.dockerignore" && echo 'config.prod*' >> "$CTX/.dockerignore"
 
 docker build -q -t "ramshield:$TAG" -f "$CTX/Dockerfile" "$CTX"
-docker tag "ramshield:$TAG" "grep999/ramshield:$TAG"
-echo "built: ramshield:$TAG (grep999/ramshield:$TAG)"
+docker tag "ramshield:$TAG" "idunnoman/ramshield:$TAG"
+echo "built: ramshield:$TAG (idunnoman/ramshield:$TAG)"
 # push only when explicitly asked and logged in:
 if [ "${PUSH:-0}" = "1" ]; then
-  docker push "grep999/ramshield:$TAG"
+  docker push "idunnoman/ramshield:$TAG"
 fi
