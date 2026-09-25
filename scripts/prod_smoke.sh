@@ -130,5 +130,24 @@ WAL_FILES=$(find "$WAL_DIR" -type f 2>/dev/null | wc -l)
 [ "$WAL_FILES" -ge 1 ] || fail "no WAL segments written to $WAL_DIR (block never persisted)"
 green "✓ WAL: $WAL_FILES files in $WAL_DIR"
 
+# P0#3: SIGKILL then restart — block from WAL must still be present.
+# Re-block first (unblock above cleared live state; WAL still has history).
+RESP=$(ipc_send "$(sign_payload '{"type":"block_ip","ip":"203.0.113.99","reason":"manual","ttl_secs":300}')")
+echo "$RESP" | grep -q "block queued" || fail "pre-kill block_ip: $RESP"
+sleep 0.5
+kill -9 "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+PID=""
+"$BIN" --config "$SMOKE_CFG" --no-xdp > "$LOG" 2>&1 &
+PID=$!
+for i in {1..20}; do
+    if curl -sf -m 1 "http://$DASH_ADDR/healthz" >/dev/null 2>&1; then break; fi
+    sleep 0.3
+    if [ "$i" = "20" ]; then fail "binary never became healthy after SIGKILL restart"; fi
+done
+RESP=$(ipc_send "$(sign_payload '{"type":"check_ip","ip":"203.0.113.99"}')")
+echo "$RESP" | grep -q '"blocked":true' || fail "WAL restore after SIGKILL: $RESP"
+green "✓ WAL: block restored after SIGKILL restart"
+
 green ""
 green "ALL PROD SMOKE CHECKS PASSED"
