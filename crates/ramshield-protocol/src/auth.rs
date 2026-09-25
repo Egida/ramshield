@@ -93,6 +93,28 @@ pub fn verify(
     Ok(())
 }
 
+/// Authenticated principal after HMAC + replay checks.
+/// Role assignment is IPC config, not this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedPrincipal {
+    pub key_id: String,
+}
+
+/// Production verifier: replay store is required, never `None`.
+pub fn verify_authenticated(
+    keys: &[(String, Vec<u8>)],
+    key_id: &str,
+    ts_ms: u64,
+    sig_hex: &str,
+    payload: &[u8],
+    replay: &ReplayStore,
+) -> Result<AuthenticatedPrincipal, &'static str> {
+    verify(keys, key_id, ts_ms, sig_hex, payload, Some(replay))?;
+    Ok(AuthenticatedPrincipal {
+        key_id: key_id.to_string(),
+    })
+}
+
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -260,5 +282,80 @@ mod replay_tests {
         // Each frame still validates under its own key_id.
         assert!(verify(&keys, "k1", now, &sig1, payload, None).is_ok());
         assert!(verify(&keys, "k2", now, &sig2, payload, None).is_ok());
+    }
+}
+#[cfg(test)]
+mod verify_authenticated_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn first_valid_frame_accepted() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let payload = br#"{"type":"check_ip"}"#;
+        let sig = sign(b"secret-key", "k1", now, payload).unwrap();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        let p = verify_authenticated(&keys, "k1", now, &sig, payload, &store).unwrap();
+        assert_eq!(p.key_id, "k1");
+    }
+
+    #[test]
+    fn same_frame_again_rejected() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let payload = br#"{"type":"check_ip"}"#;
+        let sig = sign(b"secret-key", "k1", now, payload).unwrap();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        assert!(verify_authenticated(&keys, "k1", now, &sig, payload, &store).is_ok());
+        assert_eq!(
+            verify_authenticated(&keys, "k1", now, &sig, payload, &store),
+            Err("replay")
+        );
+    }
+
+    #[test]
+    fn different_payload_independently_authenticated() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        let s1 = sign(b"secret-key", "k1", now, b"a").unwrap();
+        let s2 = sign(b"secret-key", "k1", now, b"b").unwrap();
+        assert!(verify_authenticated(&keys, "k1", now, &s1, b"a", &store).is_ok());
+        assert!(verify_authenticated(&keys, "k1", now, &s2, b"b", &store).is_ok());
+    }
+
+    #[test]
+    fn expired_timestamp_rejected() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let old = now - MAX_CLOCK_SKEW_MS - 1000;
+        let sig = sign(b"secret-key", "k1", old, b"x").unwrap();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        assert!(verify_authenticated(&keys, "k1", old, &sig, b"x", &store).is_err());
+    }
+
+    #[test]
+    fn invalid_signature_rejected() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        assert!(verify_authenticated(&keys, "k1", now, "00", b"x", &store).is_err());
+    }
+
+    #[test]
+    fn unknown_key_rejected() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = now_ms();
+        let sig = sign(b"secret-key", "k1", now, b"x").unwrap();
+        let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
+        assert!(verify_authenticated(&keys, "nope", now, &sig, b"x", &store).is_err());
     }
 }
