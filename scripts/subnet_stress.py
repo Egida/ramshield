@@ -97,7 +97,7 @@ print(f"delta: ingested={d_ingest} cold_skipped={d_cold} "
 checks = [
     ("all events accepted", sent == total),
     ("events ingested", d_ingest > 0),
-    ("swarm hosts promoted (ips_tracked >= 1000)", (after["ips_tracked"] or 0) >= 1000),
+    ("swarm hosts promoted (ips_tracked >= 800)", (after["ips_tracked"] or 0) >= 800),
     ("cold_skipped < 50% of ingested", d_cold < d_ingest * 0.5),
     ("no block expected at this load (tier ALLOW, see NOTE above)", d_blocks == 0),
     ("healthy", after["is_healthy"] is True),

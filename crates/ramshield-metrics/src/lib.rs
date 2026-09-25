@@ -483,7 +483,8 @@ impl Metrics {
     /// timed epoch clears. Ops can alert on chronic undersize without
     /// drowning in routine 8s clear noise.
     pub fn record_bloom_saturation_clear(&self) {
-        self.bloom_saturation_clears_total.fetch_add(1, Ordering::Relaxed);
+        self.bloom_saturation_clears_total
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// Gauge: bounded ingest-queue occupancy. Written by the engine snapshot
     /// path (dashboard refresh + SSE), same source value on both writers.
@@ -511,17 +512,22 @@ impl Metrics {
     /// Record a successful XDP reconciliation. Age resets to 0 and the
     /// success timestamp moves to now.
     pub fn record_reconcile_success(&self, now_unix: u64) {
-        self.reconcile_successes_total.fetch_add(1, Ordering::Relaxed);
-        self.reconcile_last_success_unix.store(now_unix, Ordering::Relaxed);
+        self.reconcile_successes_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.reconcile_last_success_unix
+            .store(now_unix, Ordering::Relaxed);
         self.reconcile_age_seconds.store(0, Ordering::Relaxed);
     }
     /// Record a failed XDP reconciliation attempt. Age keeps growing until
     /// the next success (the gauge drifts upward — that drift is the alert).
     pub fn record_reconcile_failure(&self, now_unix: u64, last_success_unix: u64) {
-        self.reconcile_failures_total.fetch_add(1, Ordering::Relaxed);
+        self.reconcile_failures_total
+            .fetch_add(1, Ordering::Relaxed);
         if last_success_unix > 0 {
-            self.reconcile_age_seconds
-                .store(now_unix.saturating_sub(last_success_unix), Ordering::Relaxed);
+            self.reconcile_age_seconds.store(
+                now_unix.saturating_sub(last_success_unix),
+                Ordering::Relaxed,
+            );
         }
     }
     /// Refresh the age gauge on every tick (successful or not) so it tracks
@@ -529,11 +535,13 @@ impl Metrics {
     /// Record a failed dashboard login attempt. Increments the per-IP
     /// failure window in AuthState and the global counter.
     pub fn inc_auth_login_failure(&self) {
-        self.auth_login_failures_total.fetch_add(1, Ordering::Relaxed);
+        self.auth_login_failures_total
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// Record a successful dashboard login.
     pub fn inc_auth_login_success(&self) {
-        self.auth_login_successes_total.fetch_add(1, Ordering::Relaxed);
+        self.auth_login_successes_total
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// Record a dashboard API request blocked by the cross-origin CSRF guard.
     pub fn inc_csrf_blocked(&self) {
