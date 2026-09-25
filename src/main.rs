@@ -8,9 +8,10 @@ use tracing_subscriber::EnvFilter;
 /// the config file. Unknown flags and missing values are FATAL — the old
 /// parser silently dropped unrecognized arguments, so `./ramshield config.toml`
 /// (positional) booted on compiled-in defaults with the file ignored.
-fn parse_args(args: &[String]) -> Result<Option<String>> {
+fn parse_args(args: &[String]) -> Result<(Option<String>, bool)> {
     let mut config_path: Option<String> = None;
-    let mut i = 1; // skip program name
+    let mut no_xdp = false;
+    let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--config" | "-c" => {
@@ -22,6 +23,10 @@ fn parse_args(args: &[String]) -> Result<Option<String>> {
                 }
                 config_path = Some(v.clone());
                 i += 2;
+            }
+            "--no-xdp" => {
+                no_xdp = true;
+                i += 1;
             }
             s if s.starts_with('-') && s.len() > 1 => {
                 anyhow::bail!("unknown argument: {s}");
@@ -35,7 +40,7 @@ fn parse_args(args: &[String]) -> Result<Option<String>> {
             }
         }
     }
-    Ok(config_path)
+    Ok((config_path, no_xdp))
 }
 
 #[tokio::main]
@@ -53,9 +58,9 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    let config_path = parse_args(&args)?;
+    let (config_path, no_xdp) = parse_args(&args)?;
 
-    let config = match config_path {
+    let mut config = match config_path {
         Some(path) => {
             let absolute_path = std::fs::canonicalize(&path)
                 .map_err(|e| anyhow::anyhow!("Error canonicalizing path {}: {}", path, e))?;
@@ -80,6 +85,10 @@ async fn main() -> Result<()> {
             c
         }
     };
+    // --no-xdp: run the detect/block pipeline without attaching the XDP program.
+    if no_xdp {
+        config.xdp.enabled = false;
+    }
     // ponytail: Config::load() already calls apply_env_overrides() once
     // internally. A second call here was harmless (idempotent) but wasteful
     // and confusing — removed.
@@ -199,26 +208,30 @@ mod cli_tests {
             .collect()
     }
 
+    fn cfg(v: &[&str]) -> Option<String> {
+        parse_args(&args(v)).unwrap().0
+    }
+
     #[test]
     fn config_flag_selects_path() {
-        assert_eq!(
-            parse_args(&args(&["--config", "a.toml"])).unwrap(),
-            Some("a.toml".into())
-        );
-        assert_eq!(
-            parse_args(&args(&["-c", "a.toml"])).unwrap(),
-            Some("a.toml".into())
-        );
+        assert_eq!(cfg(&["--config", "a.toml"]), Some("a.toml".into()));
+        assert_eq!(cfg(&["-c", "a.toml"]), Some("a.toml".into()));
     }
 
     #[test]
     fn positional_path_selects_config() {
         // Regression: the old parser silently dropped this — the file was
         // never loaded and the process booted on compiled-in defaults.
-        assert_eq!(
-            parse_args(&args(&["config.toml"])).unwrap(),
-            Some("config.toml".into())
-        );
+        assert_eq!(cfg(&["config.toml"]), Some("config.toml".into()));
+    }
+
+    #[test]
+    fn no_xdp_flag_is_recognized() {
+        // prod_smoke.sh boots with --no-xdp; the parser must not reject it.
+        let (path, no_xdp) = parse_args(&args(&["--no-xdp", "--config", "a.toml"])).unwrap();
+        assert!(no_xdp);
+        assert_eq!(path, Some("a.toml".into()));
+        assert!(!parse_args(&args(&["--config", "a.toml"])).unwrap().1);
     }
 
     #[test]
@@ -241,6 +254,6 @@ mod cli_tests {
 
     #[test]
     fn empty_is_none() {
-        assert_eq!(parse_args(&args(&[])).unwrap(), None);
+        assert_eq!(parse_args(&args(&[])).unwrap().0, None);
     }
 }
