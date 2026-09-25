@@ -1667,6 +1667,35 @@ mod tests {
         );
     }
 
+    /// P5 case 2/3: WAL committed, then replay twice is safe (no double-apply).
+    #[tokio::test]
+    async fn replay_twice_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("rs_wal_idemp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = svc_with_wal(Box::new(RecordingApplier::new()), dir.to_str().unwrap());
+        let target = ip([10, 91, 0, 2]);
+        s.enforce(block_cmd(target, 3600)).await.unwrap();
+        drop(s);
+
+        let wal = Arc::new(
+            Wal::open(
+                dir.to_str().unwrap(),
+                false,
+                ramshield_types::Durability::None,
+                64 * 1024 * 1024,
+                0,
+            )
+            .unwrap(),
+        );
+        let a = Arc::new(Store::new(16));
+        let first = replay_wal_into_store(&a, &wal).unwrap();
+        let second = replay_wal_into_store(&a, &wal).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].0, second[0].0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
