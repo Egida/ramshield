@@ -59,14 +59,16 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         .route("/api/config", get(api_get_config).post(api_set_config))
         .merge(login)
         .with_state(app_state.clone())
+        // CORS must be OUTERMOST layer (applied first in chain) so that
+        // preflight OPTIONS and Origin/Referer checks run before auth middleware.
         // Auth on → same-origin only. Open dashboard (loopback, no password)
         // keeps permissive CORS for local tooling.
+        .layer(axum_mw::from_fn_with_state(app_state.clone(), auth::require_auth))
         .layer(if app_state.auth.enabled() {
             CorsLayer::new()
         } else {
             CorsLayer::permissive()
-        })
-        .layer(axum_mw::from_fn_with_state(app_state, auth::require_auth));
+        });
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
