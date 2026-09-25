@@ -40,9 +40,14 @@ deliberate remainder, sorted by who owes the next move.
 - **WAL rotation never observed under load** (44 B/block, flat curve,
   D3/B6). The rotation path is exercised in unit tests but never under
   a real sustained storm — acceptable, noted honestly.
-- **Old IPC auth key sits in public git history.** Key is dead (rotated
-  2026-09-22) but the scrub (orphan rewrite + force-push, remotes
-  re-pointed) is still a pending user decision.
+- **Old IPC auth key sits in public git history — formally accepted.**
+  The key was rotated on 2026-09-22 (commit `6e92c2c`) and the
+  key-bearing config files (`config.bench.toml`, `config.prod.toml`)
+  were removed from tracking in the same commit. The decision is to
+  leave the history intact: the key is dead, the branch is private,
+  and any rewrite would invalidate every existing clone, tag, and
+  remote ref (`master`, `daily-gauntlet`, `v0.2.0`) for a nil risk
+  reduction. This is a documented accepted trade, not a defect.
 - **Launch/promo assets stay local-only until explicit go** — HN and
   Docker Hub accounts do not exist yet; crates.io publish unstarted.
 - **Cron hygiene**: the RamShield operator code re-enables paused cron

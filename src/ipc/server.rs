@@ -18,7 +18,7 @@ use crate::engine::Engine;
 use crate::storage::Store;
 use ramshield_config::ConfigHandle;
 use ramshield_types::ConnectionEvent;
-use ramshield_types::{EnforceAction, EnforceCommand};
+use ramshield_types::{EnforceAction, EnforceCommand, IpNetwork};
 
 /// Connection handling configuration
 #[derive(Clone)]
@@ -69,13 +69,6 @@ fn sanitize_ttl(ttl: Option<u64>) -> Result<u64, String> {
         Some(t) => Ok(t),
         None => Ok(0),
     }
-}
-
-fn parse_cidr(value: &str) -> Result<ramshield_types::IpNetwork, &'static str> {
-    let (addr, prefix) = value.split_once('/').ok_or("CIDR requires prefix")?;
-    let addr = addr.parse().map_err(|_| "invalid address")?;
-    let prefix = prefix.parse().map_err(|_| "invalid prefix")?;
-    ramshield_types::IpNetwork::new(addr, prefix)
 }
 
 // Ingest channel capacity — single source of truth: the detection engine's
@@ -376,6 +369,27 @@ async fn handle_connection(
     let mut total_bytes_read = 0usize;
     let mut last_activity = Instant::now();
 
+    // Parse auth keys once per connection. Config is validated before storage (api_set_config),
+    // so parse never fails here. Clients reconnect to pick up rotated keys.
+    let live_keys = {
+        let cfg = config.config.load();
+        match parse_ipc_keys(&cfg) {
+            Ok(k) => k,
+            Err(e) => {
+                error!(error = %e, "IPC auth keys invalid in live config — closing connection");
+                let resp = Response::Error {
+                    code: 500,
+                    message: "internal configuration error: invalid auth state".into(),
+                };
+                let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
+                return Err(std::io::Error::other(format!(
+                    "invalid runtime auth keys: {e}"
+                )));
+            }
+        }
+    };
+    let auth_enforced = !live_keys.is_empty();
+
     loop {
         if last_activity.elapsed() > config.idle_timeout {
             debug!("Connection idle timeout");
@@ -436,33 +450,6 @@ async fn handle_connection(
             // pipelines a batch pays quadratically in the buffered bytes.
             // BytesMut::split_to is O(1) (advances the start pointer).
             let frame = buf.split_to(pos + 1);
-            // H3: resolve auth_keys from live config per frame — a reload via
-            // PATCH /api/config rotates credentials without server restart.
-            // F2-fix: fail-closed. If parse_ipc_keys errors (malformed config),
-            // reject the frame rather than silently disabling auth.
-            let live_keys = {
-                let cfg = config.config.load();
-                match parse_ipc_keys(&cfg) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        // Fail closed AND answer the client. The old path
-                        // `debug!(..); continue;` dropped the frame silently,
-                        // leaving the client blocked on a read that never comes
-                        // while the fault (bad keys in a swapped-in config) was
-                        // invisible at default log level.
-                        error!(error = %e, "IPC auth keys invalid in live config — closing connection");
-                        let resp = Response::Error {
-                            code: 500,
-                            message: "internal configuration error: invalid auth state".into(),
-                        };
-                        let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
-                        return Err(std::io::Error::other(format!(
-                            "invalid runtime auth keys: {e}"
-                        )));
-                    }
-                }
-            };
-            let auth_enforced = !live_keys.is_empty();
             let req = if auth_enforced {
                 // HMAC auth gate: enforced only when keys configured. The auth
                 // object rides OUTSIDE the Request enum so deny_unknown_fields
@@ -696,7 +683,7 @@ fn process_request(
             reason,
             ttl_secs,
         } => {
-            let network = match parse_cidr(&cidr) {
+            let network = match cidr.parse::<IpNetwork>() {
                 Ok(network) => network,
                 Err(_) => {
                     return Response::Error {
@@ -776,7 +763,7 @@ fn process_request(
             }
         }
         Request::UnblockCidr { cidr } => {
-            let network = match parse_cidr(&cidr) {
+            let network = match cidr.parse::<IpNetwork>() {
                 Ok(network) => network,
                 Err(e) => {
                     return Response::Error {
@@ -1059,7 +1046,8 @@ fn verify_frame_auth(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cidr, sanitize_ttl};
+    use super::sanitize_ttl;
+    use ramshield_types::IpNetwork;
 
     #[test]
     fn sanitize_ttl_clamps_overflow_class() {
@@ -1074,9 +1062,9 @@ mod tests {
 
     #[test]
     fn parse_cidr_normalizes_and_rejects_invalid_prefixes() {
-        let net = parse_cidr("192.0.2.123/24").unwrap();
+        let net: IpNetwork = "192.0.2.123/24".parse().unwrap();
         assert_eq!(net.to_string(), "192.0.2.0/24");
-        assert!(parse_cidr("192.0.2.1/33").is_err());
-        assert!(parse_cidr("not-cidr").is_err());
+        assert!("192.0.2.1/33".parse::<IpNetwork>().is_err());
+        assert!("not-cidr".parse::<IpNetwork>().is_err());
     }
 }
