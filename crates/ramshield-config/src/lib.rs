@@ -213,6 +213,11 @@ pub struct IpcConfig {
     /// `auth_keys` is empty. Use in CI/staging to force auth coverage.
     #[serde(default)]
     pub require_auth: bool,
+    /// Operator assertion that a TLS/mTLS proxy terminates in front of a
+    /// non-loopback IPC bind. HMAC does not encrypt transport; public bind
+    /// without this flag fails `validate()`. Loopback never needs it.
+    #[serde(default)]
+    pub behind_tls_proxy: bool,
 }
 
 /// IPC key roles (P2 authorization).
@@ -257,6 +262,7 @@ impl Default for IpcConfig {
             auth_keys: Vec::new(),
             key_roles: Vec::new(),
             require_auth: false,
+            behind_tls_proxy: false,
         }
     }
 }
@@ -665,6 +671,14 @@ impl Config {
                 self.ipc.tcp_addr
             );
         }
+        // HMAC authenticates; it does not encrypt. A public bind is only
+        // allowed when the operator asserts a TLS proxy in front.
+        if is_public_bind(&self.ipc.tcp_addr) && !self.ipc.behind_tls_proxy {
+            anyhow::bail!(
+                "ipc.tcp_addr binds a public interface ({}) without ipc.behind_tls_proxy — bind 127.0.0.1 or set behind_tls_proxy=true after placing a TLS/mTLS proxy in front",
+                self.ipc.tcp_addr
+            );
+        }
         if self.ipc.require_auth && self.ipc.auth_keys.is_empty() {
             anyhow::bail!(
                 "ipc.require_auth=true but auth_keys is empty — set HMAC keys or disable require_auth"
@@ -964,7 +978,8 @@ mod tests {
         cfg.ipc.tcp_addr = "0.0.0.0:7890".into();
         cfg.ipc.auth_keys =
             vec!["k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into()];
-        // validate() still permits (operator may TLS-front); warnings must flag it.
+        cfg.ipc.behind_tls_proxy = true;
+        // validate() still permits (operator asserted TLS-front); warnings must flag it.
         cfg.validate().unwrap();
         let w = cfg.exposure_warnings();
         assert!(
@@ -991,8 +1006,30 @@ mod tests {
         let mut cfg = Config::default();
         cfg.ipc.tcp_addr = "0.0.0.0:7890".into();
         cfg.ipc.auth_keys.clear();
+        cfg.ipc.behind_tls_proxy = true;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("auth_keys"), "{err}");
+    }
+
+    #[test]
+    fn public_ipc_without_tls_proxy_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.ipc.tcp_addr = "0.0.0.0:7890".into();
+        cfg.ipc.auth_keys =
+            vec!["k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into()];
+        cfg.ipc.behind_tls_proxy = false;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("behind_tls_proxy"), "{err}");
+    }
+
+    #[test]
+    fn public_ipc_with_tls_proxy_and_keys_validates() {
+        let mut cfg = Config::default();
+        cfg.ipc.tcp_addr = "0.0.0.0:7890".into();
+        cfg.ipc.auth_keys =
+            vec!["k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into()];
+        cfg.ipc.behind_tls_proxy = true;
+        cfg.validate().unwrap();
     }
 
     #[test]
