@@ -1,19 +1,16 @@
 # RamShield Production Readiness Review
 
-Review date: 2026-09-24
-Branch: `main`
-Reviewed commit: `21916036facd5467b75c5ad1d38dde14e2cb415a`
+Review date: 2026-09-26
+Branch: `master`
+Reviewed commit: `4d0dc80` (P1–P8 merged)
 
 ## Verdict
 
-Status: NOT production-ready.
+Status: NOT production-ready — **security boundary (Phase 1) is closed**. Remaining blockers: unsigned release artifacts, WAL restart drill under load, capacity envelope (P9), deploy/rollback (P10).
 
-Current state supports a controlled single-node pilot on localhost with XDP capabilities.
-It does not yet support an unattended, externally exposed, recoverable production deployment.
+Current state supports a controlled single-node pilot with HMAC-authenticated IPC, role-based authorization, mandatory replay protection, and fail-closed public bind.
 
-Readiness score: 4/10.
-
-The core processing path is healthy. The release boundary, durability boundary, security boundary, and operational recovery boundary remain incomplete.
+Readiness score: 6/10 (was 4/10 before P1–P8).
 
 ## Evidence
 
@@ -43,7 +40,7 @@ Not proven:
 
 - OCI image build (`docker/Dockerfile` + `scripts/build_docker.sh`) and systemd unit (`deploy/systemd/ramshield.service`) exist but are unsigned; no digest promotion or rollback artifact drill has been exercised.
 - `config-xdp.toml` binds localhost, has no active IPC HMAC key, and has no WAL section.
-- IPC has no TLS; safe only behind localhost or a trusted private transport.
+- IPC HMAC authenticates; it does not encrypt. Public bind without `ipc.behind_tls_proxy = true` now fails `validate()` at startup (P4). Loopback remains the default. TLS termination is still the operator's job.
 - Runtime reports `wal_lsn=0`; restart durability is not production-proven.
 - Enforcement reconciliation runs every ~10 s (`RECONCILE_EVERY_TICKS=40` × 250 ms) but has no exported drift/age metrics and no live map-loss drill in CI.
 - `worker_threads` is informational; processing remains single-batch-thread.

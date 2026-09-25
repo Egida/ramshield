@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **P1: Authenticated key identity** — `verify_frame_auth` returns the verified `key_id`; enforcement commands attribute `actor` to the real caller, not a hard-coded `"admin"`.
+- **P2: Centralized authorization** — `KeyRole` enum (`Telemetry` < `ReadOnly` < `Operator` < `Admin`) in `ramshield-config`; `key_roles` config assigns roles per `key_id`. IPC enforces before dispatch: 403 on insufficient role, 401 on unauthenticated frame.
+- **P3: Mandatory replay protection** — `verify_authenticated` in `ramshield-protocol::auth` requires a `&ReplayStore`; production IPC never passes `None`. `AuthenticatedPrincipal` returned with `key_id`.
+- **P4: Transport bind safety** — `ipc.behind_tls_proxy` config flag. A non-loopback `ipc.tcp_addr` without it fails `validate()` at startup. HMAC authenticates; it does not encrypt.
+- **P5: WAL replay idempotency** — qualification test proves replay twice into a fresh store produces the same state (no double-apply).
+- **P6: XDP reconcile qualification** — in-memory `MapApplier` tests prove missing/stale IP and CIDR converge via existing `reconcile` trait method. No second reconciler.
+- **P8: Backpressure** — enforcement queue full returns explicit `503 "enforcement queue full"`, not silent drop. Bounded `mpsc::channel(8192)` with `try_send`.
+- **`--no-xdp` CLI flag** — run the detect/block pipeline without attaching XDP (CI, smoke tests without root).
+- **`prod_smoke.sh`** — signs IPC frames with HMAC, asserts WAL wrote segments, validates dashboard endpoints end-to-end.
 - **IPC frame authentication** — HMAC-SHA256 per-frame auth for TCP clients.
 - **Dashboard admin auth** — Argon2-hashed admin password + session-cookie middleware (`admin_password_hash` config or env).
 - **Prometheus `/metrics` export** endpoint on the dashboard.
