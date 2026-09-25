@@ -209,6 +209,9 @@ pub struct Metrics {
     pub ipc_event_drops: Arc<AtomicU64>,
     /// IPC frames rejected at auth — 401s (clean breakdown of events_rejected).
     pub ipc_auth_rejections: Arc<AtomicU64>,
+    /// IPC frames rejected at authorization — 403s (clean breakdown of
+    /// events_rejected). Auth passed but role insufficient for the request.
+    pub ipc_authz_rejections: Arc<AtomicU64>,
     /// Connections refused at the semaphore (clean breakdown of events_rejected).
     pub ipc_rejected_connections: Arc<AtomicU64>,
     pub frames_rejected: Arc<AtomicU64>,
@@ -344,6 +347,7 @@ impl Metrics {
             events_rejected: Arc::new(AtomicU64::new(0)),
             ipc_event_drops: Arc::new(AtomicU64::new(0)),
             ipc_auth_rejections: Arc::new(AtomicU64::new(0)),
+            ipc_authz_rejections: Arc::new(AtomicU64::new(0)),
             ipc_rejected_connections: Arc::new(AtomicU64::new(0)),
             frames_rejected: Arc::new(AtomicU64::new(0)),
             events_shed: Arc::new(AtomicU64::new(0)),
@@ -433,6 +437,10 @@ impl Metrics {
     }
     pub fn inc_ipc_auth_rejections(&self, n: u64) {
         self.ipc_auth_rejections.fetch_add(n, Ordering::Relaxed);
+    }
+    /// P2: frames rejected at authorization (403 — auth ok, role insufficient).
+    pub fn inc_ipc_authz_rejections(&self, n: u64) {
+        self.ipc_authz_rejections.fetch_add(n, Ordering::Relaxed);
     }
     pub fn inc_ipc_rejected_connections(&self, n: u64) {
         self.ipc_rejected_connections

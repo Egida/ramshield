@@ -199,14 +199,37 @@ pub struct IpcConfig {
     #[serde(default)]
     pub max_line_length: Option<usize>,
     /// HMAC-SHA256 keys as `key_id:hex_key` pairs. When non-empty, every IPC
-    /// frame MUST carry a valid `"auth":{"key_id","ts_ms","sig"}` envelope
+    /// frame MUST carry a valid `{"auth":{"key_id","ts_ms","sig"}}` envelope
     /// (see protocol::auth). Empty = open server (loopback dev default).
     #[serde(default)]
     pub auth_keys: Vec<String>,
+    /// Role assignment per key_id. Keys not listed default to `Telemetry`.
+    /// Valid roles: `Telemetry` (report only), `ReadOnly` (stats/read),
+    /// `Operator` (block/unblock), `Admin` (all).
+    /// Example: `key_roles = [{ key_id = "k1", role = "Admin" }]`
+    #[serde(default)]
+    pub key_roles: Vec<KeyRoleConfig>,
     /// When true, refuse to start (and reject frames) even on loopback if
     /// `auth_keys` is empty. Use in CI/staging to force auth coverage.
     #[serde(default)]
     pub require_auth: bool,
+}
+
+/// IPC key roles (P2 authorization).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum KeyRole {
+    Telemetry,
+    ReadOnly,
+    Operator,
+    Admin,
+}
+
+/// Role assignment for an IPC auth key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyRoleConfig {
+    pub key_id: String,
+    pub role: KeyRole,
 }
 
 fn default_max_connection_bytes() -> Option<usize> {
@@ -232,6 +255,7 @@ impl Default for IpcConfig {
             connection_idle_timeout_ms: None,
             max_line_length: None,
             auth_keys: Vec::new(),
+            key_roles: Vec::new(),
             require_auth: false,
         }
     }
