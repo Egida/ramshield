@@ -105,13 +105,19 @@ impl AuthState {
     }
 
     pub fn enabled(&self) -> bool {
-        self.password_hash.read().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.password_hash
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Hot-swap the password hash without restarting the dashboard.
     /// Callers must have already validated the new PHC string.
     pub fn set_password_hash(&self, new_hash: Option<String>) {
-        let mut guard = self.password_hash.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .password_hash
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         *guard = new_hash;
     }
 
@@ -162,7 +168,12 @@ impl AuthState {
     /// inline on an async handler blocks the Tokio worker for every other
     /// request on that thread.
     fn verify_password(&self, password: &str) -> Option<String> {
-        let hash = self.password_hash.read().unwrap_or_else(|e| e.into_inner()).as_ref()?.clone();
+        let hash = self
+            .password_hash
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()?
+            .clone();
         let parsed = argon2::PasswordHash::new(&hash).ok()?;
         // Constant-time verify inside argon2; cap work on garbage input.
         if password.len() > self.max_password_length {
