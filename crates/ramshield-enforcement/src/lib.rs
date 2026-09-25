@@ -1696,6 +1696,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    struct MapApplier {
+        blocked: std::collections::HashSet<IpAddr>,
+        cidrs: std::collections::HashSet<IpNetwork>,
+    }
+    impl MapApplier {
+        fn new() -> Self {
+            Self { blocked: Default::default(), cidrs: Default::default() }
+        }
+    }
+    #[async_trait::async_trait]
+    impl XdpApplier for MapApplier {
+        fn apply_block(&mut self, ip: IpAddr, _: Uuid, _: u64) -> Result<(), EnforcementError> {
+            self.blocked.insert(ip);
+            Ok(())
+        }
+        fn apply_unblock(&mut self, ip: IpAddr, _: Uuid) -> Result<(), EnforcementError> {
+            self.blocked.remove(&ip);
+            Ok(())
+        }
+        fn apply_cidr_block(&mut self, n: IpNetwork, _: Uuid, _: u64) -> Result<(), EnforcementError> {
+            self.cidrs.insert(n);
+            Ok(())
+        }
+        fn apply_cidr_unblock(&mut self, n: IpNetwork, _: Uuid) -> Result<(), EnforcementError> {
+            self.cidrs.remove(&n);
+            Ok(())
+        }
+        fn reconcile(&mut self, expected: &[IpAddr], expected_cidrs: &[IpNetwork]) -> Result<ReconciliationState, EnforcementError> {
+            let want: std::collections::HashSet<_> = expected.iter().copied().collect();
+            let stale: Vec<_> = self.blocked.difference(&want).copied().collect();
+            let missing: Vec<_> = want.difference(&self.blocked).copied().collect();
+            for ip in &stale { self.blocked.remove(ip); }
+            for ip in &missing { self.blocked.insert(*ip); }
+            let want_c: std::collections::HashSet<_> = expected_cidrs.iter().copied().collect();
+            let stale_c: Vec<_> = self.cidrs.difference(&want_c).copied().collect();
+            let missing_c: Vec<_> = want_c.difference(&self.cidrs).copied().collect();
+            for c in &stale_c { self.cidrs.remove(c); }
+            for c in &missing_c { self.cidrs.insert(*c); }
+            Ok(ReconciliationState { last_wal_lsn: 0, pending_blocks: missing, pending_unblocks: stale })
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_repairs_missing_and_stale_ip() {
+        let mut a = MapApplier::new();
+        let live = ip([10, 1, 0, 1]);
+        let stale_ip = ip([10, 1, 0, 2]);
+        a.blocked.insert(stale_ip);
+        a.reconcile(&[live], &[]).unwrap();
+        assert!(a.blocked.contains(&live));
+        assert!(!a.blocked.contains(&stale_ip));
+    }
+
+    #[tokio::test]
+    async fn reconcile_repairs_missing_and_stale_cidr() {
+        let mut a = MapApplier::new();
+        let live = IpNetwork::new("198.51.100.0".parse().unwrap(), 24).unwrap();
+        let stale_c = IpNetwork::new("203.0.113.0".parse().unwrap(), 24).unwrap();
+        a.cidrs.insert(stale_c);
+        a.reconcile(&[], &[live]).unwrap();
+        assert!(a.cidrs.contains(&live));
+        assert!(!a.cidrs.contains(&stale_c));
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
