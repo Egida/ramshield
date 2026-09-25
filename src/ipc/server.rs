@@ -20,6 +20,16 @@ use ramshield_config::ConfigHandle;
 use ramshield_types::ConnectionEvent;
 use ramshield_types::{EnforceAction, EnforceCommand, IpNetwork};
 
+/// Authenticated principal resolved from the IPC auth envelope. Carries the
+/// key identity so enforcement commands are attributed to the real caller.
+/// P1: introduced to replace the hard-coded `actor: "admin"` on IPC
+/// enforcement commands. Authorization role is assigned at the IPC layer
+/// (P2); this only holds identity.
+#[derive(Clone, Debug)]
+struct Principal {
+    key_id: String,
+}
+
 /// Connection handling configuration
 #[derive(Clone)]
 struct ConnectionConfig {
@@ -450,15 +460,19 @@ async fn handle_connection(
             // pipelines a batch pays quadratically in the buffered bytes.
             // BytesMut::split_to is O(1) (advances the start pointer).
             let frame = buf.split_to(pos + 1);
-            let req = if auth_enforced {
+            // P1: both branches yield (Request, Option<Principal>). Auth path
+            // supplies the authenticated key_id; open-loopback path has none,
+            // so enforcement attribution falls back (see process_request).
+            let (req, principal) = if auth_enforced {
                 // HMAC auth gate: enforced only when keys configured. The auth
                 // object rides OUTSIDE the Request enum so deny_unknown_fields
                 // on the wire contract stays intact.
                 match verify_frame_auth(&live_keys, &frame, &config.replay_store) {
-                    // P1-5: verify_frame_auth returns the auth-stripped Value;
-                    // from_value deserializes without a second JSON parse.
-                    Ok(v) => match serde_json::from_value::<Request>(v) {
-                        Ok(req) => req,
+                    // P1-5: verify_frame_auth returns the auth-stripped Value
+                    // and the authenticated key_id; from_value deserializes
+                    // without a second JSON parse.
+                    Ok((v, key_id)) => match serde_json::from_value::<Request>(v) {
+                        Ok(req) => (req, Some(Principal { key_id })),
                         Err(e) => {
                             trace!(
                                 error = %e,
@@ -499,7 +513,7 @@ async fn handle_connection(
             } else {
                 // No auth keys configured - accept all frames
                 match serde_json::from_slice(&frame) {
-                    Ok(req) => req,
+                    Ok(req) => (req, None),
                     Err(e) => {
                         trace!(
                             error = %e,
@@ -526,6 +540,7 @@ async fn handle_connection(
             engine.metrics.inc_requests();
             let resp = process_request(
                 req,
+                principal.as_ref(),
                 &engine,
                 &event_tx,
                 &store,
@@ -570,12 +585,21 @@ const SHED_WATERMARK: usize = (CHANNEL_CAPACITY as usize * 3) / 4;
 
 fn process_request(
     req: Request,
+    principal: Option<&Principal>,
     engine: &Arc<Engine>,
     event_tx: &Sender<ConnectionEvent>,
     store: &Store,
     enforcement_tx: &mpsc::Sender<EnforceCommand>,
     dropped_events: Arc<AtomicU64>,
 ) -> Response {
+    // P1: attribute enforcement commands to the authenticated principal.
+    // When no principal is available (open loopback / unauthenticated path),
+    // fall back to the historical hard-coded actor so behaviour is unchanged
+    // for the zero-config dev path. P2 will close that gap with real
+    // authorization.
+    let actor = principal
+        .map(|p| p.key_id.clone())
+        .unwrap_or_else(|| "admin".to_string());
     match req {
         Request::CheckIp { ip } => {
             let ip_addr = match ip.parse() {
@@ -654,7 +678,7 @@ fn process_request(
                 decision_id: Uuid::new_v4(),
                 policy_version: 1,
                 source: "ipc".into(),
-                actor: "admin".into(),
+                actor: actor.clone(),
                 timestamp_utc: now_ms() as i64 / 1000,
                 ttl_seconds: ttl_secs,
                 reason,
@@ -705,7 +729,7 @@ fn process_request(
                 decision_id: Uuid::new_v4(),
                 policy_version: 1,
                 source: "ipc".into(),
-                actor: "admin".into(),
+                actor: actor.clone(),
                 timestamp_utc: now_ms() as i64 / 1000,
                 ttl_seconds: ttl_secs,
                 reason: if reason.is_empty() {
@@ -743,7 +767,7 @@ fn process_request(
                 decision_id: Uuid::new_v4(),
                 policy_version: 1,
                 source: "ipc".into(),
-                actor: "admin".into(),
+                actor: actor.clone(),
                 timestamp_utc: now_ms() as i64 / 1000,
                 ttl_seconds: 0,
                 reason: "manual_unblock".into(),
@@ -776,7 +800,7 @@ fn process_request(
                 decision_id: Uuid::new_v4(),
                 policy_version: 1,
                 source: "ipc".into(),
-                actor: "admin".into(),
+                actor: actor.clone(),
                 timestamp_utc: now_ms() as i64 / 1000,
                 ttl_seconds: 0,
                 reason: "manual_unblock".into(),
@@ -1012,11 +1036,15 @@ fn process_request(
 /// including its auth object? No — sig must cover payload WITHOUT auth object,
 /// else self-reference. Client signs `ts.payload_without_auth`; server removes
 /// the auth object, re-serializes compactly and compares.
+///
+/// P1: returns the authenticated `key_id` alongside the auth-stripped frame so
+/// IPC enforcement commands can attribute their `actor` to the real principal
+/// instead of a hard-coded `"admin"`.
 fn verify_frame_auth(
     keys: &[(String, Vec<u8>)],
     line: &[u8],
     replay: &ramshield_protocol::auth::ReplayStore,
-) -> Result<serde_json::Value, &'static str> {
+) -> Result<(serde_json::Value, String), &'static str> {
     let mut v: serde_json::Value =
         serde_json::from_slice(line).map_err(|_| "frame is not valid JSON")?;
     let auth = v
@@ -1041,13 +1069,16 @@ fn verify_frame_auth(
     // Payload = compact serialization of the frame without the auth object.
     let payload = serde_json::to_vec(&v).map_err(|_| "reserialize failed")?;
     ramshield_protocol::auth::verify(keys, key_id, ts_ms, sig, &payload, Some(replay))?;
-    Ok(v)
+    Ok((v, key_id.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::sanitize_ttl;
+    use super::verify_frame_auth;
+    use ramshield_protocol::auth::{self, ReplayStore};
     use ramshield_types::IpNetwork;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn sanitize_ttl_clamps_overflow_class() {
@@ -1066,5 +1097,47 @@ mod tests {
         assert_eq!(net.to_string(), "192.0.2.0/24");
         assert!("192.0.2.1/33".parse::<IpNetwork>().is_err());
         assert!("not-cidr".parse::<IpNetwork>().is_err());
+    }
+
+    fn signed_frame(key_id: &str, key: &[u8]) -> Vec<u8> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let payload = br#"{"type":"get_status"}"#;
+        let sig = auth::sign(key, key_id, now, payload).expect("sign");
+        format!(
+            "{{\"auth\":{{\"key_id\":\"{}\",\"ts_ms\":{},\"sig\":\"{}\"}},\"type\":\"get_status\"}}\n",
+            key_id, now, sig
+        )
+        .into_bytes()
+    }
+
+    /// P1: authenticated key identity must survive frame verification and be
+    /// returned to the requester for enforcement attribution.
+    #[test]
+    fn verify_frame_auth_returns_authenticated_key_id() {
+        let keys = vec![
+            ("key-a".to_string(), b"secret-a".to_vec()),
+            ("key-b".to_string(), b"secret-b".to_vec()),
+        ];
+        let store = ReplayStore::new(64, Duration::from_secs(65));
+
+        let (_, a) =
+            verify_frame_auth(&keys, &signed_frame("key-a", b"secret-a"), &store).unwrap();
+        assert_eq!(a, "key-a");
+
+        let (_, b) =
+            verify_frame_auth(&keys, &signed_frame("key-b", b"secret-b"), &store).unwrap();
+        assert_eq!(b, "key-b");
+    }
+
+    /// P1: an unauthenticated frame must fail verification; there is no
+    /// principal to attribute.
+    #[test]
+    fn verify_frame_auth_rejects_unknown_key() {
+        let keys = vec![("key-a".to_string(), b"secret-a".to_vec())];
+        let store = ReplayStore::new(64, Duration::from_secs(65));
+        assert!(verify_frame_auth(&keys, &signed_frame("key-zz", b"secret-a"), &store).is_err());
     }
 }
