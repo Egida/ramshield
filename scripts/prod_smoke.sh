@@ -42,7 +42,7 @@ SMOKE_CFG="${SMOKE_CFG:-/tmp/ramshield-prod-smoke.toml}"
 DASH_PORT="${DASH_ADDR##*:}"
 sed -e "s|^[[:space:]]*tcp_addr = .*|tcp_addr = \"127.0.0.1:$IPC_PORT\"|" \
     -e "s|^[[:space:]]*http_addr = .*|http_addr = \"127.0.0.1:$DASH_PORT\"|" \
-    -e "s|^dir = \"/var/lib/ramshield/wal\"|dir = \"$WAL_DIR\"|" \
+    -e "s|^[[:space:]]*dir = \"/tmp/ramshield_wal\"|dir = \"$WAL_DIR\"|" \
     "$CFG" > "$SMOKE_CFG"
 
 echo "→ booting binary with $SMOKE_CFG (WAL=$WAL_DIR)"
@@ -73,8 +73,24 @@ s.close()
 " "$IPC_HOST" "$IPC_PORT" "$1"
 }
 
+# Sign a request with the configured k1 test key -> compact signed frame.
+# HMAC input is <ts_ms>.<key_id><payload>; payload must be the request object
+# reserialized compactly with sorted keys (serde_json::Map is a BTreeMap).
+sign_payload() {
+    python3 -c "
+import hmac, hashlib, time, json, sys
+key = bytes.fromhex('0b8d647fda3a0ae3c38207e0d7e61edfdfe59bda7359c89f953f76ed68f3768b')
+key_id, ts = 'k1', int(time.time() * 1000)
+req = json.loads(sys.argv[1])
+payload = json.dumps(req, separators=(',', ':'), sort_keys=True).encode()
+sig = hmac.new(key, f'{ts}.{key_id}'.encode() + payload, hashlib.sha256).hexdigest()
+print(json.dumps({'auth': {'key_id': key_id, 'ts_ms': ts, 'sig': sig}, **req},
+                 separators=(',', ':'), sort_keys=True))
+" "$1"
+}
+
 # Block via IPC
-RESP=$(ipc_send '{"type":"block_ip","ip":"203.0.113.7","reason":"manual","ttl_secs":300}')
+RESP=$(ipc_send "$(sign_payload '{"type":"block_ip","ip":"203.0.113.7","reason":"manual","ttl_secs":300}')")
 echo "$RESP" | grep -q "block queued" || fail "block_ip did not respond: $RESP"
 green "✓ IPC: block_ip queued"
 
@@ -101,7 +117,7 @@ echo "$MT" | grep -q "ramshield_blocks_total" || fail "Prometheus metrics missin
 green "✓ DASH: /metrics serves Prometheus format"
 
 # Unblock
-RESP=$(ipc_send '{"type":"unblock_ip","ip":"203.0.113.7"}')
+RESP=$(ipc_send "$(sign_payload '{"type":"unblock_ip","ip":"203.0.113.7"}')")
 echo "$RESP" | grep -q "unblock queued" || fail "unblock_ip did not respond: $RESP"
 green "✓ IPC: unblock_ip queued"
 
@@ -111,7 +127,7 @@ green "✓ DASH: /api/hot-subnets reachable ($(echo "$HS" | wc -c) bytes)"
 
 # WAL
 WAL_FILES=$(find "$WAL_DIR" -type f 2>/dev/null | wc -l)
-[ "$WAL_FILES" -ge 0 ] || fail "WAL inspection failed"
+[ "$WAL_FILES" -ge 1 ] || fail "no WAL segments written to $WAL_DIR (block never persisted)"
 green "✓ WAL: $WAL_FILES files in $WAL_DIR"
 
 green ""
