@@ -1115,6 +1115,7 @@ impl DetectionEngine {
                 let bits = self.config.load().detection.bloom_bits;
                 self.bloom.store(Arc::new(BloomFilter::new(bits)));
                 self.metrics.bloom_epoch_clear();
+                self.metrics.record_bloom_saturation_clear();
                 last_bloom_clear_ns = now_ns();
                 warn!(
                     inserts_epoch = saturated_at,

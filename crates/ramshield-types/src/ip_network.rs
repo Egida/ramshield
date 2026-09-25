@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
 /// IP network prefix with configurable CIDR length.
 /// Supports both IPv4 and IPv6 with normalized byte order (network byte order).
@@ -193,6 +194,26 @@ impl IpNetwork {
 impl fmt::Display for IpNetwork {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.addr, self.prefix_len)
+    }
+}
+
+/// Parse `"192.0.2.0/24"` or `"2001:db8::/64"` into an `IpNetwork`.
+/// Centralised here so the IPC layer and any other caller don't
+/// duplicate CIDR parsing rules (prefix validation, address family).
+impl FromStr for IpNetwork {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (addr, prefix) = s
+            .split_once('/')
+            .ok_or("CIDR requires a prefix length (e.g. 10.0.0.0/24)")?;
+        let addr: IpAddr = addr
+            .parse()
+            .map_err(|_| "invalid IP address in CIDR")?;
+        let prefix: u8 = prefix
+            .parse()
+            .map_err(|_| "prefix length must be a number")?;
+        Self::new(addr, prefix)
     }
 }
 

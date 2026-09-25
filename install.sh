@@ -40,7 +40,7 @@ detect_os() {
     case "$(uname -s)" in
         Linux*)  echo "linux" ;;
         Darwin*) echo "macos" ;;
-        *)       die "Unsupported OS: $(uname -s)" ;;
+        *)       die "Unsupported OS: $(uname -s). RamShield XDP requires Linux; use a Linux host or build from source." ;;
     esac
 }
 
@@ -51,7 +51,7 @@ download_binary() {
     target="${arch}"
 
     if [ "$os" = "macos" ]; then
-        target="apple-darwin"
+        target="${arch/unknown-linux-gnu/apple-darwin}"
     fi
 
     url="https://github.com/${REPO}/releases/download/v${VERSION}/ramshield-${target}.tar.gz"
@@ -70,11 +70,41 @@ download_binary() {
     info "Extracting..."
     tar -xzf "${tmpdir}/ramshield.tar.gz" -C "${tmpdir}"
 
+    info "Verifying checksum..."
+    local checksum_url="${url}.sha256"
+    if ! curl -fsSL "$checksum_url" -o "${tmpdir}/ramshield.tar.gz.sha256"; then
+        error "Checksum sidecar unavailable: $checksum_url"
+        exit 1
+    fi
+    (cd "${tmpdir}" && sha256sum -c ramshield.tar.gz.sha256) || {
+        error "Checksum verification failed"
+        exit 1
+    }
+
     info "Installing to ${PREFIX}/bin/..."
     sudo install -m 755 "${tmpdir}/ramshield" "${PREFIX}/bin/ramshield" 2>/dev/null \
         || install -m 755 "${tmpdir}/ramshield" "${PREFIX}/bin/ramshield"
 
     info "Installed: $(command -v ramshield || echo "${PREFIX}/bin/ramshield")"
+
+    apply_xdp_caps
+}
+
+apply_xdp_caps() {
+    local bin="${PREFIX}/bin/ramshield"
+    if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        info "Non-root install: capabilities require sudo. Run later:"
+        info "  sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' ${bin}"
+        return 0
+    fi
+    local caps='cap_net_admin,cap_perfmon,cap_bpf+eip'
+    if setcap "${caps}" "${bin}" 2>/dev/null \
+        || sudo -n setcap "${caps}" "${bin}" 2>/dev/null; then
+        info "XDP capabilities applied: ${caps}"
+    else
+        info "WARNING: could not apply XDP file capabilities — XDP will fail to attach."
+        info "  Fix: sudo setcap '${caps}' ${bin} (or rely on the systemd unit)"
+    fi
 }
 
 install_config() {
@@ -124,7 +154,12 @@ LimitNOFILE=65536
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${CONFIG_DIR}
+ReadWritePaths=${CONFIG_DIR} /var/lib/ramshield
+
+# XDP capabilities (required for eBPF/XDP dataplane; ignored when XDP is disabled)
+# Requires systemd ≥245 for CapabilityBoundingSet support
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 
 [Install]
 WantedBy=multi-user.target
@@ -161,6 +196,9 @@ print_next_steps() {
     echo "  ramshield --config ${CONFIG_DIR}/config.toml &"
     echo "  curl http://localhost:9999/healthz"
     echo ""
+    echo "XDP note: after any binary replace, re-apply capabilities:"
+    echo "  sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' ${PREFIX}/bin/ramshield"
+    echo ""
     echo "Docs: https://github.com/grep999/ramshield"
 }
 
@@ -168,6 +206,29 @@ main() {
     echo -e "${BOLD}RamShield Installer${NC}"
     echo "DDoS detection engine — single binary, zero dependencies"
     echo ""
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version)
+                shift
+                [ "$#" -gt 0 ] || die "--version requires a value"
+                VERSION="$1"
+                ;;
+            --prefix)
+                shift
+                [ "$#" -gt 0 ] || die "--prefix requires a value"
+                PREFIX="$1"
+                ;;
+            -h|--help)
+                echo "Usage: bash install.sh [--version 0.2.0] [--prefix /usr/local]"
+                exit 0
+                ;;
+            *)
+                die "Unknown argument: $1"
+                ;;
+        esac
+        shift
+    done
 
     check_deps
     download_binary
