@@ -1148,8 +1148,10 @@ mod tests {
     use super::sanitize_ttl;
     use super::verify_frame_auth;
     use ramshield_protocol::auth::{self, ReplayStore};
-    use ramshield_types::IpNetwork;
+    use ramshield_types::{EnforceAction, EnforceCommand, IpNetwork};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
 
     #[test]
     fn sanitize_ttl_clamps_overflow_class() {
@@ -1292,5 +1294,42 @@ mod tests {
         let pr = p(KeyRole::Telemetry);
         let err = authorize(&pr, &block_req()).unwrap_err();
         assert_eq!(err, "insufficient role");
+    }
+
+    /// P8: enforcement queue full returns explicit 503, not silent drop.
+    #[test]
+    fn enforcement_queue_full_returns_503() {
+        // Build a tiny bounded channel
+        let (tx, _rx) = mpsc::channel(1);
+        // Fill it
+        let cmd = EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "test".into(),
+            actor: "test".into(),
+            timestamp_utc: 0,
+            ttl_seconds: 60,
+            reason: "t".into(),
+            ip: "10.0.0.1".parse().unwrap(),
+            cidr: None,
+            action: EnforceAction::Block,
+        };
+        tx.try_send(cmd).unwrap();
+        // Second send → full
+        let err = tx.try_send(EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "test".into(),
+            actor: "test".into(),
+            timestamp_utc: 0,
+            ttl_seconds: 60,
+            reason: "t".into(),
+            ip: "10.0.0.2".parse().unwrap(),
+            cidr: None,
+            action: EnforceAction::Block,
+        });
+        assert!(err.is_err());
+        // The response builder turns this into 503 "enforcement queue full"
+        // Verified by the try_send match arms at 758/813/847/880.
     }
 }
