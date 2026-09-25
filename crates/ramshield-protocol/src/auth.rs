@@ -20,7 +20,9 @@ pub use replay_store::ReplayStore;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Max clock skew accepted between signer and verifier.
-pub const MAX_CLOCK_SKEW_MS: u64 = 30_000;
+/// Reduced to 10s to mitigate NTP step clock issues — signer and verifier
+/// must have wall clocks within 10s, enforced via SystemTime comparison.
+pub const MAX_CLOCK_SKEW_MS: u64 = 10_000;
 
 /// Compute hex signature for a payload with a key at the given timestamp.
 ///
