@@ -30,7 +30,8 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlocklistKey(pub [u8; 16]);
 
-// Required if using Aya as your eBPF loader:
+// SAFETY: BlocklistKey is `#[repr(C, align(8))]` and contains only a
+// `[u8; 16]`; it has no uninitialized bytes or invalid bit patterns.
 unsafe impl aya::Pod for BlocklistKey {}
 
 impl BlocklistKey {
@@ -117,6 +118,10 @@ fn cidr_map_for(network: IpNetwork) -> &'static str {
 
 fn cidr_key(network: IpNetwork) -> LpmKey<[u64; 2]> {
     let bytes = BlocklistKey::from_ip(network.addr).0;
+    // SAFETY: BlocklistKey is #[repr(C, align(8))] with a 16-byte payload.
+    // 16 bytes fits exactly in two u64s (data.len() == 16), and both pointers
+    // are valid for 16 bytes. Nonoverlapping: data is a fresh local and bytes
+    // is an owned field — no overlap.
     let mut data = [0u64; 2];
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.as_mut_ptr() as *mut u8, 16);
@@ -373,6 +378,7 @@ impl XdpApplier for AyaXdpApplier {
         if rc != 0 {
             return Err(map_err(std::io::Error::last_os_error()));
         }
+        // SAFETY: ts was written by clock_gettime — rc == 0 means initialization succeeded.
         let ts = unsafe { ts.assume_init() };
         let now_ns = (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64;
         self.with_map(xdp_map_for(ip), |m| {
