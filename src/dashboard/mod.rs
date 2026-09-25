@@ -63,7 +63,10 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         // preflight OPTIONS and Origin/Referer checks run before auth middleware.
         // Auth on → same-origin only. Open dashboard (loopback, no password)
         // keeps permissive CORS for local tooling.
-        .layer(axum_mw::from_fn_with_state(app_state.clone(), auth::require_auth))
+        .layer(axum_mw::from_fn_with_state(
+            app_state.clone(),
+            auth::require_auth,
+        ))
         .layer(if app_state.auth.enabled() {
             CorsLayer::new()
         } else {
@@ -274,35 +277,38 @@ async fn api_set_config(
         .map(str::to_lowercase);
 
     fn is_cross_origin(origin: Option<&str>, referer: Option<&str>, host: Option<&str>) -> bool {
-            // If Origin present, use it; otherwise check Referer
-            let header = origin.or(referer);
-            // On non-loopback binds, require Origin or Referer to prevent CSRF
-            // On loopback (dev), allow missing Origin/Referer for curl/operator convenience
-            if header.is_none() {
-                // Check if this is a non-loopback bind by looking for non-localhost host
-                let is_non_loopback = host.as_ref().map(|h| {
-                    !h.eq_ignore_ascii_case("localhost") && 
-                    !h.eq_ignore_ascii_case("127.0.0.1") && 
-                    !h.starts_with("[::1]") &&
-                    !h.starts_with("fe80:")
-                }).unwrap_or(false);
-                if is_non_loopback {
-                    return true; // fail-closed: treat as cross-origin
-                }
-                // Both missing (curl/operator) on loopback => fail-open, allow
-                return false;
+        // If Origin present, use it; otherwise check Referer
+        let header = origin.or(referer);
+        // On non-loopback binds, require Origin or Referer to prevent CSRF
+        // On loopback (dev), allow missing Origin/Referer for curl/operator convenience
+        if header.is_none() {
+            // Check if this is a non-loopback bind by looking for non-localhost host
+            let is_non_loopback = host
+                .as_ref()
+                .map(|h| {
+                    !h.eq_ignore_ascii_case("localhost")
+                        && !h.eq_ignore_ascii_case("127.0.0.1")
+                        && !h.starts_with("[::1]")
+                        && !h.starts_with("fe80:")
+                })
+                .unwrap_or(false);
+            if is_non_loopback {
+                return true; // fail-closed: treat as cross-origin
             }
-            // Compare authority against Host header; empty => allow
-            let Some(header) = header else { return false };
-            // Parse as URL: take everything after :// up to next / (path/query)
-            let header = header.trim();
-            let scheme_end = header.find("://").map(|i| i + 3).unwrap_or(0);
-            let authority = &header[scheme_end..];
-            let authority = authority.split('/').next().unwrap_or("");
-            let authority = authority.split('?').next().unwrap_or("");
-            // Compare authority against Host header; empty => allow
-            !host.is_some_and(|h| h.eq_ignore_ascii_case(authority))
+            // Both missing (curl/operator) on loopback => fail-open, allow
+            return false;
         }
+        // Compare authority against Host header; empty => allow
+        let Some(header) = header else { return false };
+        // Parse as URL: take everything after :// up to next / (path/query)
+        let header = header.trim();
+        let scheme_end = header.find("://").map(|i| i + 3).unwrap_or(0);
+        let authority = &header[scheme_end..];
+        let authority = authority.split('/').next().unwrap_or("");
+        let authority = authority.split('?').next().unwrap_or("");
+        // Compare authority against Host header; empty => allow
+        !host.is_some_and(|h| h.eq_ignore_ascii_case(authority))
+    }
 
     let cross_origin = is_cross_origin(origin.as_deref(), referer.as_deref(), host.as_deref());
     if cross_origin {
@@ -347,7 +353,10 @@ async fn api_set_config(
         cfg.forecasting = v;
     }
     // D4: capture the new password hash before moving the dashboard config
-    let new_pw_hash = patch.dashboard.as_ref().and_then(|d| d.admin_password_hash.clone());
+    let new_pw_hash = patch
+        .dashboard
+        .as_ref()
+        .and_then(|d| d.admin_password_hash.clone());
     if let Some(v) = patch.dashboard {
         cfg.dashboard = v;
     }
@@ -475,7 +484,15 @@ mod tests {
             Arc::new(Store::new(16)),
             Arc::new(Metrics::new()),
         ));
-        let auth = Arc::new(auth::AuthState::new(None, 3600, 50, 1024, vec![], true, Arc::new(Metrics::new())));
+        let auth = Arc::new(auth::AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(Metrics::new()),
+        ));
         AppState { engine, auth }
     }
 

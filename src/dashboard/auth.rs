@@ -105,13 +105,13 @@ impl AuthState {
     }
 
     pub fn enabled(&self) -> bool {
-        self.password_hash.read().unwrap().is_some()
+        self.password_hash.read().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     /// Hot-swap the password hash without restarting the dashboard.
     /// Callers must have already validated the new PHC string.
     pub fn set_password_hash(&self, new_hash: Option<String>) {
-        let mut guard = self.password_hash.write().unwrap();
+        let mut guard = self.password_hash.write().unwrap_or_else(|e| e.into_inner());
         *guard = new_hash;
     }
 
@@ -162,7 +162,7 @@ impl AuthState {
     /// inline on an async handler blocks the Tokio worker for every other
     /// request on that thread.
     fn verify_password(&self, password: &str) -> Option<String> {
-        let hash = self.password_hash.read().unwrap().as_ref()?.clone();
+        let hash = self.password_hash.read().unwrap_or_else(|e| e.into_inner()).as_ref()?.clone();
         let parsed = argon2::PasswordHash::new(&hash).ok()?;
         // Constant-time verify inside argon2; cap work on garbage input.
         if password.len() > self.max_password_length {
@@ -401,7 +401,15 @@ mod tests {
 
     #[test]
     fn login_sets_session_and_validates() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 50, 1024, vec![], true, Arc::new(ramshield_metrics::Metrics::new()));
+        let a = AuthState::new(
+            Some(hash_of("hunter2")),
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+        );
         assert!(a.enabled());
         assert!(login(&a, "wrong").is_none());
         let tok = login(&a, "hunter2").expect("good pw logs in");
@@ -411,14 +419,30 @@ mod tests {
 
     #[test]
     fn disabled_auth_has_no_sessions() {
-        let a = AuthState::new(None, 3600, 50, 1024, vec![], true, Arc::new(ramshield_metrics::Metrics::new()));
+        let a = AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+        );
         assert!(!a.enabled());
         assert!(login(&a, "x").is_none()); // no hash → nothing validates
     }
 
     #[test]
     fn lockout_is_per_ip_not_global() {
-        let a = AuthState::new(Some(hash_of("hunter2")), 3600, 3, 1024, vec![], true, Arc::new(ramshield_metrics::Metrics::new()));
+        let a = AuthState::new(
+            Some(hash_of("hunter2")),
+            3600,
+            3,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+        );
         let attacker = IpAddr::from([1, 2, 3, 4]);
         let admin = IpAddr::from([5, 6, 7, 8]);
         for _ in 0..4 {

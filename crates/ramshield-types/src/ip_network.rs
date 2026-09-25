@@ -207,9 +207,7 @@ impl FromStr for IpNetwork {
         let (addr, prefix) = s
             .split_once('/')
             .ok_or("CIDR requires a prefix length (e.g. 10.0.0.0/24)")?;
-        let addr: IpAddr = addr
-            .parse()
-            .map_err(|_| "invalid IP address in CIDR")?;
+        let addr: IpAddr = addr.parse().map_err(|_| "invalid IP address in CIDR")?;
         let prefix: u8 = prefix
             .parse()
             .map_err(|_| "prefix length must be a number")?;
