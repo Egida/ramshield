@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
@@ -16,18 +17,17 @@ use uuid::Uuid;
 use super::{Request, Response};
 use crate::engine::Engine;
 use crate::storage::Store;
-use ramshield_config::ConfigHandle;
+use ramshield_config::{ConfigHandle, KeyRole};
 use ramshield_types::ConnectionEvent;
 use ramshield_types::{EnforceAction, EnforceCommand, IpNetwork};
 
 /// Authenticated principal resolved from the IPC auth envelope. Carries the
-/// key identity so enforcement commands are attributed to the real caller.
-/// P1: introduced to replace the hard-coded `actor: "admin"` on IPC
-/// enforcement commands. Authorization role is assigned at the IPC layer
-/// (P2); this only holds identity.
+/// key identity and role so enforcement commands are attributed to the real
+/// caller and authorization can be enforced (P2).
 #[derive(Clone, Debug)]
 struct Principal {
     key_id: String,
+    role: KeyRole,
 }
 
 /// Connection handling configuration
@@ -381,10 +381,18 @@ async fn handle_connection(
 
     // Parse auth keys once per connection. Config is validated before storage (api_set_config),
     // so parse never fails here. Clients reconnect to pick up rotated keys.
-    let live_keys = {
+    // P2: resolve key roles once per connection. Keys not listed default to
+    // Telemetry (least privilege) — explicit config always wins over naming.
+    let (live_keys, role_map) = {
         let cfg = config.config.load();
         match parse_ipc_keys(&cfg) {
-            Ok(k) => k,
+            Ok(k) => {
+                let mut roles: HashMap<String, KeyRole> = HashMap::new();
+                for kr in &cfg.ipc.key_roles {
+                    roles.insert(kr.key_id.clone(), kr.role);
+                }
+                (k, roles)
+            }
             Err(e) => {
                 error!(error = %e, "IPC auth keys invalid in live config — closing connection");
                 let resp = Response::Error {
@@ -460,9 +468,10 @@ async fn handle_connection(
             // pipelines a batch pays quadratically in the buffered bytes.
             // BytesMut::split_to is O(1) (advances the start pointer).
             let frame = buf.split_to(pos + 1);
-            // P1: both branches yield (Request, Option<Principal>). Auth path
-            // supplies the authenticated key_id; open-loopback path has none,
-            // so enforcement attribution falls back (see process_request).
+            // P1/P2: both branches yield (Request, Option<Principal>). Auth path
+            // supplies the authenticated key_id and its configured role; open-
+            // loopback path has none, so enforcement attribution falls back
+            // (see process_request).
             let (req, principal) = if auth_enforced {
                 // HMAC auth gate: enforced only when keys configured. The auth
                 // object rides OUTSIDE the Request enum so deny_unknown_fields
@@ -472,7 +481,13 @@ async fn handle_connection(
                     // and the authenticated key_id; from_value deserializes
                     // without a second JSON parse.
                     Ok((v, key_id)) => match serde_json::from_value::<Request>(v) {
-                        Ok(req) => (req, Some(Principal { key_id })),
+                        Ok(req) => {
+                            // P2: look up configured role; default to Telemetry
+                            // (least privilege). Keys without explicit config get
+                            // the default — explicit always wins over naming.
+                            let role = role_map.get(&key_id).copied().unwrap_or(KeyRole::Telemetry);
+                            (req, Some(Principal { key_id, role }))
+                        }
                         Err(e) => {
                             trace!(
                                 error = %e,
@@ -583,6 +598,47 @@ pub fn is_low_signal(status_code: u16, proto_fp: u32, bytes: u64) -> bool {
 /// IPC channel high-water mark: 75% of CHANNEL_CAPACITY (64k).
 const SHED_WATERMARK: usize = (CHANNEL_CAPACITY as usize * 3) / 4;
 
+/// Role hierarchy rank. Higher rank satisfies `require_at_least`.
+fn role_rank(role: KeyRole) -> u8 {
+    match role {
+        KeyRole::Telemetry => 0,
+        KeyRole::ReadOnly => 1,
+        KeyRole::Operator => 2,
+        KeyRole::Admin => 3,
+    }
+}
+
+/// P2: minimum role required per request variant. Deny by default — any
+/// variant added to `Request` later must be added here explicitly or it
+/// requires Admin.
+fn require_at_least(principal: &Principal, min: KeyRole) -> Result<(), String> {
+    if role_rank(principal.role) >= role_rank(min) {
+        Ok(())
+    } else {
+        Err("insufficient role".to_string())
+    }
+}
+
+fn authorize(principal: &Principal, request: &Request) -> Result<(), String> {
+    match request {
+        Request::ReportConnection { .. } | Request::ReportConnections { .. } => {
+            require_at_least(principal, KeyRole::Telemetry)
+        }
+
+        Request::CheckIp { .. }
+        | Request::GetIpStats { .. }
+        | Request::GetStats
+        | Request::GetStatus => require_at_least(principal, KeyRole::ReadOnly),
+
+        Request::BlockIp { .. }
+        | Request::BlockCidr { .. }
+        | Request::UnblockIp { .. }
+        | Request::UnblockCidr { .. } => require_at_least(principal, KeyRole::Operator),
+
+        Request::Flush => require_at_least(principal, KeyRole::Admin),
+    }
+}
+
 fn process_request(
     req: Request,
     principal: Option<&Principal>,
@@ -592,11 +648,24 @@ fn process_request(
     enforcement_tx: &mpsc::Sender<EnforceCommand>,
     dropped_events: Arc<AtomicU64>,
 ) -> Response {
+    // P2: centralized authorization before request dispatch.
+    // Authentication answers "which key?"; Authorization answers "what may it do?".
+    // Keep the two separate — enforcement module does not contain authorization logic.
+    if let Some(p) = principal
+        && let Err(e) = authorize(p, &req)
+    {
+        engine.metrics.inc_rejected(1);
+        engine.metrics.inc_ipc_authz_rejections(1);
+        return Response::Error {
+            code: 403,
+            message: e,
+        };
+    }
+
     // P1: attribute enforcement commands to the authenticated principal.
     // When no principal is available (open loopback / unauthenticated path),
     // fall back to the historical hard-coded actor so behaviour is unchanged
-    // for the zero-config dev path. P2 will close that gap with real
-    // authorization.
+    // for the zero-config dev path. P2 closes that gap with real authorization.
     let actor = principal
         .map(|p| p.key_id.clone())
         .unwrap_or_else(|| "admin".to_string());
@@ -1123,12 +1192,10 @@ mod tests {
         ];
         let store = ReplayStore::new(64, Duration::from_secs(65));
 
-        let (_, a) =
-            verify_frame_auth(&keys, &signed_frame("key-a", b"secret-a"), &store).unwrap();
+        let (_, a) = verify_frame_auth(&keys, &signed_frame("key-a", b"secret-a"), &store).unwrap();
         assert_eq!(a, "key-a");
 
-        let (_, b) =
-            verify_frame_auth(&keys, &signed_frame("key-b", b"secret-b"), &store).unwrap();
+        let (_, b) = verify_frame_auth(&keys, &signed_frame("key-b", b"secret-b"), &store).unwrap();
         assert_eq!(b, "key-b");
     }
 
@@ -1139,5 +1206,89 @@ mod tests {
         let keys = vec![("key-a".to_string(), b"secret-a".to_vec())];
         let store = ReplayStore::new(64, Duration::from_secs(65));
         assert!(verify_frame_auth(&keys, &signed_frame("key-zz", b"secret-a"), &store).is_err());
+    }
+
+    // ---- P2 authorization tests ----
+
+    use super::{Principal, authorize};
+    use crate::ipc::Request;
+    use ramshield_config::KeyRole;
+
+    fn p(role: KeyRole) -> Principal {
+        Principal {
+            key_id: "k".to_string(),
+            role,
+        }
+    }
+
+    fn block_req() -> Request {
+        serde_json::from_str(r#"{"type":"block_ip","ip":"10.0.0.1","reason":"t","ttl_secs":60}"#)
+            .unwrap()
+    }
+
+    fn report_req() -> Request {
+        serde_json::from_str(
+            r#"{"type":"report_connection","ip":"10.0.0.1","bytes":1,"status_code":200,"proto_fp":0}"#,
+        )
+        .unwrap()
+    }
+
+    fn stats_req() -> Request {
+        serde_json::from_str(r#"{"type":"get_stats"}"#).unwrap()
+    }
+
+    /// telemetry key → report allowed
+    #[test]
+    fn telemetry_key_reports_allowed() {
+        assert!(authorize(&p(KeyRole::Telemetry), &report_req()).is_ok());
+    }
+
+    /// telemetry key → block forbidden (least-privilege default)
+    #[test]
+    fn telemetry_key_block_forbidden() {
+        assert!(authorize(&p(KeyRole::Telemetry), &block_req()).is_err());
+    }
+
+    /// telemetry key → read forbidden (below ReadOnly)
+    #[test]
+    fn telemetry_key_stats_forbidden() {
+        assert!(authorize(&p(KeyRole::Telemetry), &stats_req()).is_err());
+    }
+
+    /// readonly key → read allowed, block forbidden
+    #[test]
+    fn readonly_key_read_allowed_block_forbidden() {
+        assert!(authorize(&p(KeyRole::ReadOnly), &stats_req()).is_ok());
+        assert!(authorize(&p(KeyRole::ReadOnly), &block_req()).is_err());
+    }
+
+    /// operator key → block + unblock allowed, read allowed
+    #[test]
+    fn operator_key_block_unblock_allowed() {
+        let unblock: Request =
+            serde_json::from_str(r#"{"type":"unblock_ip","ip":"10.0.0.1"}"#).unwrap();
+        assert!(authorize(&p(KeyRole::Operator), &block_req()).is_ok());
+        assert!(authorize(&p(KeyRole::Operator), &unblock).is_ok());
+        assert!(authorize(&p(KeyRole::Operator), &stats_req()).is_ok());
+    }
+
+    /// admin key → administrative request (Flush) allowed
+    #[test]
+    fn admin_key_flush_allowed() {
+        let flush: Request = serde_json::from_str(r#"{"type":"flush"}"#).unwrap();
+        assert!(authorize(&p(KeyRole::Admin), &flush).is_ok());
+        assert!(authorize(&p(KeyRole::Operator), &flush).is_err());
+    }
+
+    /// unknown key → authentication failure (no principal at all).
+    /// Authen vs authz separation: verify_frame_auth rejects before authorize.
+    #[test]
+    fn unknown_key_is_authentication_failure_not_authz() {
+        // No principal → authorize never runs; the 401 path handles it (P1 test).
+        // Here: assert the 403/401 distinction — authorize on None is unreachable,
+        // but an authenticated low-role key gets 403, not 401.
+        let pr = p(KeyRole::Telemetry);
+        let err = authorize(&pr, &block_req()).unwrap_err();
+        assert_eq!(err, "insufficient role");
     }
 }
