@@ -26,6 +26,10 @@ pub struct Engine {
     /// for StubXdpApplier (degraded mode: in-band enforcement only). Read by
     /// `dashboard_snapshot()` so the UI can surface a "XDP inactive" chip.
     xdp_active: Arc<AtomicBool>,
+    /// False until `boot_pipeline` returns Ok. Process-alive ≠ pipeline-ready.
+    pipeline_ready: Arc<AtomicBool>,
+    /// Set when `boot_pipeline` returns Err. `/healthz` stays 503.
+    pipeline_failed: Arc<AtomicBool>,
     /// Shared depth counter for IPC event channel.
     /// Watch channel for async shutdown signaling (replaces AtomicBool polling).
     shutdown_tx: watch::Sender<bool>,
@@ -47,6 +51,8 @@ impl Engine {
             enforcement_tx,
             enforcement_rx: std::sync::Mutex::new(Some(enforcement_rx)),
             xdp_active: Arc::new(AtomicBool::new(false)),
+            pipeline_ready: Arc::new(AtomicBool::new(false)),
+            pipeline_failed: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
         }
     }
@@ -80,8 +86,14 @@ impl Engine {
                     }
                 };
                 rt.block_on(async move {
-                    if let Err(e) = boot_pipeline(self).await {
-                        tracing::error!("pipeline: {}", e);
+                    match boot_pipeline(self.clone()).await {
+                        Ok(()) => {
+                            self.pipeline_ready.store(true, Ordering::Release);
+                        }
+                        Err(e) => {
+                            tracing::error!("pipeline: {}", e);
+                            self.pipeline_failed.store(true, Ordering::Release);
+                        }
                     }
                 });
             })
@@ -98,6 +110,12 @@ impl Engine {
 
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Tests construct Engine without boot_pipeline. Production never calls this.
+    #[cfg(test)]
+    pub fn mark_pipeline_ready_for_test(&self) {
+        self.pipeline_ready.store(true, Ordering::Release);
     }
 
     /// F9: join detection batch/subnet threads with a grace cap. Call after
@@ -172,9 +190,16 @@ impl Engine {
             },
             wal_lsn: self.metrics.wal_lsn.load(Ordering::Relaxed),
             pending_expirations: self.metrics.pending_expirations.load(Ordering::Relaxed),
-            is_healthy: !self.is_shutting_down() && ram_pct < 95.0,
+            is_healthy: !self.is_shutting_down()
+                && ram_pct < 95.0
+                && self.pipeline_ready.load(Ordering::Acquire)
+                && !self.pipeline_failed.load(Ordering::Acquire),
             health_reason: if self.is_shutting_down() {
                 "shutting down".into()
+            } else if self.pipeline_failed.load(Ordering::Acquire) {
+                "pipeline failed".into()
+            } else if !self.pipeline_ready.load(Ordering::Acquire) {
+                "starting".into()
             } else if ram_pct >= 95.0 {
                 "ram pressure".into()
             } else {
@@ -563,6 +588,7 @@ mod startup_tests {
         );
         #[allow(deprecated)]
         engine.start();
+        engine.mark_pipeline_ready_for_test();
         let snap = engine.dashboard_snapshot();
         assert!(snap.is_healthy);
         assert_eq!(snap.ips_tracked, 0);
@@ -602,6 +628,26 @@ mod startup_tests {
     }
 
     #[test]
+    fn engine_snapshot_unhealthy_until_pipeline_ready() {
+        let engine = Engine::new(
+            Config::default(),
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        );
+        let snap = engine.dashboard_snapshot();
+        assert!(!snap.is_healthy);
+        assert_eq!(snap.health_reason, "starting");
+        engine.mark_pipeline_ready_for_test();
+        let snap = engine.dashboard_snapshot();
+        assert!(snap.is_healthy);
+        assert_eq!(snap.health_reason, "running");
+        engine.pipeline_failed.store(true, Ordering::Release);
+        let snap = engine.dashboard_snapshot();
+        assert!(!snap.is_healthy);
+        assert_eq!(snap.health_reason, "pipeline failed");
+    }
+
+    #[test]
     fn engine_snapshot_unhealthy_when_ram_pressure() {
         // RED: set ram_limit_mb=1 MB and ram_bytes = 1.5 MB → ram_pct > 95%.
         // Broken code (8c159cc): is_healthy stays true. Fixed code: flips to false.
@@ -609,6 +655,7 @@ mod startup_tests {
         store.set_ram_limit_mb_for_testing(1);
         store.set_ram_bytes_for_testing(1_572_864); // 1.5 MB > 1 MB → ram_pct = 100.0
         let engine = Engine::new(Config::default(), store, Arc::new(Metrics::new()));
+        engine.mark_pipeline_ready_for_test();
         let snap = engine.dashboard_snapshot();
         assert!(
             !snap.is_healthy,
