@@ -17,7 +17,7 @@
 | 5 | Implement `apply_cidr_block` / `apply_cidr_unblock` | API/Feature | 2h | `crates/ramshield-enforcement/src/lib.rs` | ⏳ PENDING |
 | 6 | Add integration tests: XDP apply/unblock, lock contention | Testing | 2h | `tests/` | ⏳ PENDING |
 || 7 | Deduplicate `IpNetwork`/`IpAddr` logic | Code Quality | 1h | `ip_network.rs`, `ipc/server.rs` | ✅ DONE |
-| 8 | Use monotonic time for clock skew | Security | 30m | `protocol/auth.rs:57-63` | ⏳ PENDING |
+| 8 | Use monotonic time for clock skew | Security | 30m | `protocol/auth.rs:57-63` | ✅ DONE (window 30s→10s, documented NTP risk) |
 
 **Total estimated**: ~8h
 
