@@ -10,11 +10,14 @@
 ## 1. Ingest
 
 ### 1.1 Authenticated JSON/TCP IPC
-- One JSON object per line over TCP. Requests are `snake_case-typed` (see `docs/PROTOCOL.md`).
+- One JSON object per line over TCP. Requests are `snake_case-typed` (see `docs/IPC.md`).
 - **HMAC-SHA256 per-frame authentication** (`crates/ramshield-protocol/src/auth.rs`): every frame carries `{"auth":{"key_id","ts_ms","sig"}}` when `[ipc] auth_keys` is non-empty.
   - Signature covers `<ts_ms>.<key_id>.<payload>`; `key_id` is bound into the MAC so two keys with identical bytes sign differently.
-  - Constant-time compare; replay protection via `ReplayStore` when configured.
+  - Constant-time compare; **replay protection is mandatory in production** via `verify_authenticated` — requires a `&ReplayStore`, never `None` (P3).
   - Clock-skew window: **±10 s** (`MAX_CLOCK_SKEW_MS = 10_000`).
+- **Role-based authorization** (P2): `key_roles` config assigns a `KeyRole` per `key_id` (`Telemetry` < `ReadOnly` < `Operator` < `Admin`). IPC enforces before dispatch; insufficient role → `403`, unauthenticated → `401`.
+- **Authenticated identity** (P1): the verified `key_id` becomes the `actor` on every enforcement command — no hard-coded `"admin"`.
+- **Transport bind safety** (P4): non-loopback `ipc.tcp_addr` without `ipc.behind_tls_proxy = true` fails at startup. HMAC authenticates; it does not encrypt.
 - **`deny_unknown_fields`** — unknown JSON fields reject the frame (typos fail loudly, no silent misparse).
 
 ### 1.2 Single + batch report

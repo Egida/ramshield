@@ -66,7 +66,7 @@ It is a **controlled single-node pilot**, not a turnkey internet-facing product.
 - **Bounded-memory detection** — 8 GiB budget, sharded pre-aggregator, 0.0004% RAM growth per million events at the 21.3 M-event benchmark.
 - **eBPF/XDP dataplane** — IPv4 + IPv6 block prefixes loaded into kernel maps with longest-prefix matching; XDP optional, daemon degrades to userspace blocking.
 - **WAL-backed enforcement** — enforcement state survives `SIGKILL`; verified restore of live blocks on restart, shared-backend WAL planned for GA.
-- **Authenticated IPC** — HMAC-SHA256 per-frame signing (key rotation-ready `key_id`), clock-skew window ±10 s, `deny_unknown_fields` so typos fail loudly.
+- **Authenticated IPC** — HMAC-SHA256 per-frame signing (key rotation-ready `key_id`), clock-skew window ±10 s, `deny_unknown_fields` so typos fail loudly. Mandatory replay protection (bound LRU `ReplayStore` via `verify_authenticated`), role-based authorization (`key_roles`), and transport-bind safety (`behind_tls_proxy`).
 - **Argon2-protected dashboard** — admin password hash, session-cookie middleware, CSRF-checked config POST.
 - **Forecast-driven detection stack** — EWMA α=0.3, Holt-Winters β=γ=0.1 (seasonality 60 s, z=3.0), SPOT-lite extreme-quantile alarms, CUSUM with debounce.
 - **Operator CLI** — zero-dependency `ramshield-cli` binary for check/block/unblock/status.
@@ -141,11 +141,17 @@ Commands:
   info <ip>               Per-IP stats
 ```
 
-Auth key comes from `RAMSHIELD_IPC_KEY` (hex) or `--key`; when set, frames are HMAC-SHA256-signed. Omitted on open/loopback servers means unsigned frames.
+Auth key comes from `RAMSHIELD_IPC_KEY` (hex) or `--key`; when set, frames are HMAC-SHA256-signed. On a server where `auth_keys` is configured, unsigned frames are rejected (`401`). `key_roles` config governs what each key may do (`Telemetry`/`ReadOnly`/`Operator`/`Admin`); a role below the command's requirement returns `403`.
 
-## IPC Protocol
+### IPC Protocol
 
-The request contract lives in [`crates/ramshield-protocol/src/message.rs`](crates/ramshield-protocol/src/message.rs). Requests are newline-delimited JSON; unknown fields are rejected.
+The request contract lives in [`crates/ramshield-protocol/src/message.rs`](crates/ramshield-protocol/src/message.rs). Requests are newline-delimited JSON; unknown fields are rejected. When `[ipc] auth_keys` is non-empty, every frame must carry an `auth` envelope:
+
+```json
+{"auth":{"key_id":"k1","ts_ms":1696000000000,"sig":"<hex>"},"type":"check_ip","ip":"1.2.3.4"}
+```
+
+The verified `key_id` becomes the enforcement `actor` and drives `key_roles` authorization. Replay of a frame within the ±10 s clock-skew window is rejected (mandatory `ReplayStore`). Full wire contract + signed-frame example: [`docs/IPC.md`](docs/IPC.md).
 
 ```json
 {"type":"check_ip","ip":"203.0.113.10"}
@@ -249,7 +255,7 @@ Release procedure: [`docs/PRODUCTION_RELEASE_PROCESS.md`](docs/PRODUCTION_RELEAS
 
 The current readiness review does **not** claim:
 
-- authenticated external control without deployment-specific TLS / trusted-proxy setup;
+- authenticated *encrypted* external control without operator TLS / trusted-proxy (`behind_tls_proxy` only asserts the proxy exists; HMAC does not encrypt);
 - systemd or orchestration supervision and restart policy;
 |- zero-drop enforcement under 32 concurrent enforcement writers (single-writer model);
 - a documented capacity envelope or latency SLO;

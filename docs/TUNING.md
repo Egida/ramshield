@@ -52,6 +52,8 @@ cd /home/m/vehicle_of_rationalismark config-checks and env overrides.
 | `ipc.max_line_length` | `33554432` (32 MB) | Max single JSON line. Do not reduce unless you want to reject giant payloads. |
 | `ipc.auth_keys` | `[]` (empty) | **⚠️** Must be `key_id:hex_key` pairs when `ipc.require_auth = true`. Put real keys in a gitignored overlay (e.g. `config.prod.toml`) or via `RAMSHIELD_IPC__AUTH_KEYS` env. Empty + loopback = open server (dev default). |
 | `ipc.require_auth` | `false` | **⚠️** If `true` and `auth_keys` is empty → refuses to start. Use in CI/staging to enforce auth coverage. |
+| `ipc.behind_tls_proxy` | `false` | **⚠️** Set `true` when binding a non-loopback `tcp_addr` behind a TLS/mTLS proxy. Without it, `validate()` rejects public binds — HMAC authenticates but does not encrypt. Loopback never needs it. |
+| `ipc.key_roles` | `[]` | Assigns a `KeyRole` per `key_id`. Example: `key_roles = [{ key_id = "k1", role = "Admin" }]`. Keys not listed default to `Telemetry`. Roles: `Telemetry` < `ReadOnly` < `Operator` < `Admin` (P2). |
 | `ipc.read_timeout_ms` / `write_timeout_ms` | `5000` | Per-connection idle timeout. Raise if clients disconnect prematurely. |
 | `ipc.connection_idle_timeout_ms` | `30000` | Accepted connection idle timeout. |
 
