@@ -484,6 +484,7 @@ mod tests {
             Arc::new(Store::new(16)),
             Arc::new(Metrics::new()),
         ));
+        engine.mark_pipeline_ready_for_test();
         let auth = Arc::new(auth::AuthState::new(
             None,
             3600,
