@@ -4,7 +4,7 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-26
 
 ### Added
 - Authenticated IPC with HMAC-SHA256 frame auth, key identity, role-based authorization (Telemetry < ReadOnly < Operator < Admin), and replay protection.
@@ -88,5 +88,5 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 
 - Removed dead imports and unused constants that blocked verification.
 
-[Unreleased]: https://github.com/grep999/ramshield/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/grep999/ramshield/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/grep999/ramshield/releases/tag/v0.2.0
