@@ -12,9 +12,9 @@
 [engine]
 # 0 = all cores (tokio auto). Pin an integer only on fixed-shape nodes.
 worker_threads = 0
-# Pin the engine's RAM budget explicitly (0 = schema default 512). 14512 =
-# this laptop's ceiling; shrink for small VMs.
-ram_limit_mb = 14512
+# Pin the engine's RAM budget explicitly (0 = schema default 512). 1024 =
+# safe default for small VMs; raise for production traffic.
+ram_limit_mb = 1024
 # Lock-free shard fanout for the store: 256 = 2^8, power of two.
 shard_count = 256
 
