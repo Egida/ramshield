@@ -14,9 +14,9 @@ The baseline file intentionally contains explicit values for development/testing
 
 | Key | Baseline | Built-in default | Notes |
 |---|---:|---:|---|
+| `ram_limit_mb` | `1024` | `1024` | Hard store budget; validation requires at least 64 MB. |
+| `shard_count` | `8` | `4` | Must be a power of two. |
 | `worker_threads` | `0` | `0` | `0` lets Tokio choose worker count. |
-| `ram_limit_mb` | `14512` | `512` | Hard store budget; validation requires at least 64 MB. |
-| `shard_count` | `256` | `256` | Must be a power of two. |
 
 ## `[detection]`
 
