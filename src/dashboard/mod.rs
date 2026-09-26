@@ -108,6 +108,7 @@ async fn api_healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_j
             "status": status,
             "reason": snapshot.health_reason,
             "uptime_secs": snapshot.uptime_secs,
+            "xdp_active": snapshot.xdp_active,
         })),
     )
 }

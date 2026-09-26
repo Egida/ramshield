@@ -531,6 +531,10 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         engine.enforcement_tx.clone(),
     )
     .await?;
+    // Pipeline is genuinely serving: enforcement, detection, IPC all running.
+    // boot_pipeline blocks in select! below until shutdown, so this is the
+    // one place readiness can be observed while the daemon is live.
+    engine.pipeline_ready.store(true, Ordering::Release);
 
     // Graceful shutdown: wait for signal, then join tasks.
     tokio::select! {
