@@ -234,10 +234,12 @@ fn run_doctor() {
             problems.push("IPC auth_keys empty".into());
         }
         let iface = c.xdp.interface;
-        let iface_ok =
-            std::process::Command::new("ip")
-                .arg("link").arg("show").arg(iface.clone())
-                .output().is_ok();
+        let iface_ok = std::process::Command::new("ip")
+            .arg("link")
+            .arg("show")
+            .arg(iface.clone())
+            .output()
+            .is_ok();
         if iface_ok {
             info!("doctor: XDP interface {iface} exists");
         } else {
@@ -299,7 +301,8 @@ mod cli_tests {
     #[test]
     fn no_xdp_flag_is_recognized() {
         // prod_smoke.sh boots with --no-xdp; the parser must not reject it.
-        let (path, no_xdp, _doctor) = parse_args(&args(&["--no-xdp", "--config", "a.toml"])).unwrap();
+        let (path, no_xdp, _doctor) =
+            parse_args(&args(&["--no-xdp", "--config", "a.toml"])).unwrap();
         assert!(no_xdp);
         assert_eq!(path, Some("a.toml".into()));
         assert!(!parse_args(&args(&["--config", "a.toml"])).unwrap().1);

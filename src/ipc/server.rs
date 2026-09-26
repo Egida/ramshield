@@ -1137,9 +1137,8 @@ fn verify_frame_auth(
 
     // Payload = compact serialization of the frame without the auth object.
     let payload = serde_json::to_vec(&v).map_err(|_| "reserialize failed")?;
-    let principal = ramshield_protocol::auth::verify_authenticated(
-        keys, key_id, ts_ms, sig, &payload, replay,
-    )?;
+    let principal =
+        ramshield_protocol::auth::verify_authenticated(keys, key_id, ts_ms, sig, &payload, replay)?;
     Ok((v, principal.key_id))
 }
 
