@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # RamShield installer — single binary, systemd service, config
 # Usage: curl -fsSL https://get.ramshield.dev | bash
-#    or: bash install.sh [--version 0.2.0] [--prefix /usr/local]
+#    or: bash install.sh [--version 0.3.0] [--prefix /usr/local]
 set -euo pipefail
 
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.3.0}"
 PREFIX="${PREFIX:-/usr/local}"
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/ramshield}"
 REPO="grep999/ramshield"
@@ -220,7 +220,7 @@ main() {
                 PREFIX="$1"
                 ;;
             -h|--help)
-                echo "Usage: bash install.sh [--version 0.2.0] [--prefix /usr/local]"
+                echo "Usage: bash install.sh [--version 0.3.0] [--prefix /usr/local]"
                 exit 0
                 ;;
             *)
