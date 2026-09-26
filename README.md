@@ -1,5 +1,9 @@
 # RamShield
 
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/grep999/ramshield?label=release&color=0A0)](https://github.com/grep999/ramshield/releases/latest)
+[![GitHub tag](https://img.shields.io/github/v/tag/grep999/ramshield?label=tag&color=7C3AED)](https://github.com/grep999/ramshield/tags)
+[![Build](https://img.shields.io/github/actions/workflow/status/grep999/ramshield/ci.yml?branch=master&label=build)](https://github.com/grep999/ramshield/actions/workflows/ci.yml)
+
 **Linux-native traffic protection with eBPF/XDP.**
 
 RamShield watches traffic from your proxy, spots abusive patterns, and can block offending IPs or networks directly at the kernel level.

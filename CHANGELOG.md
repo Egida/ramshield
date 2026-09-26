@@ -48,7 +48,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - One subnet decision, one owner (no split-brain detection).
 - WAL replay idempotency qualification (replay twice → same state).
 - XDP reconcile qualification against userspace truth.
-- Enfocement queue full → 503 response.
+- Enforcement queue full → 503 response.
 - Bloom caches promoted IPs, becomes observable.
 - Config: invalid env override values fail startup loudly.
 - Dashboard panels stay live; SSE stream recovery.
