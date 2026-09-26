@@ -1,4 +1,8 @@
-# RamShield
+# RamShield — autonomous DDoS defense in Rust
+Detects and blocks abusive traffic at the kernel (XDP/eBPF) level.
+For self-hosted/sovereign infra operators who can't afford enterprise DDoS mitigation.
+Run it locally or behind your reverse proxy.
+No cloud dependency. No subscription. Just Rust.
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/grep999/ramshield?label=release&color=0A0)](https://github.com/grep999/ramshield/releases/latest)
 
@@ -7,51 +11,21 @@
 
 RamShield watches traffic from your proxy, spots abusive patterns, and can block offending IPs or networks directly at the kernel level.
 
-```text
-                    traffic
-                       │
-                       ▼
-                reverse proxy
-                       │
-                   telemetry
-                       │
-                       ▼
-                  RamShield
-                ┌──────┴──────┐
-                │             │
-            detection       state
-                │             │
-                └──────┬──────┘
-                       │
-                    decision
-                       │
-                       ▼
-                    XDP/eBPF
-                       │
-                       ▼
-                  application
-```
-
 The basic loop is simple:
 
 **observe → detect → decide → block → expire**
 
-## Run it
-
-Build from source:
+Run it:
 
 ```bash
 git clone https://github.com/grep999/ramshield.git
 cd ramshield
-
 cargo build --release --locked --features full
-```
 
 Start locally:
 
 ```bash
 cp config.baseline.toml config.toml
-
 ./target/release/ramshield \
   --config config.toml \
   --no-xdp
@@ -74,13 +48,13 @@ A block can then move through:
 
 ```text
 detection
-   ↓
+  ↓
 decision
-   ↓
+  ↓
 WAL
-   ↓
+  ↓
 enforcement
-   ↓
+  ↓
 XDP
 ```
 
