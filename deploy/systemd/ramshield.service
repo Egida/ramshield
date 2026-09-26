@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ramshield --config /etc/ramshield/config.prod.toml
+ExecStart=/usr/local/bin/ramshield --config /etc/ramshield/config.toml
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65535
