@@ -64,7 +64,7 @@ When `ipc.auth_keys` is non-empty, every frame MUST carry an `auth` envelope:
 # Sign and send a block_ip request with key k1
 python3 -c "
 import hmac, hashlib, time, json, socket, sys
-key = bytes.fromhex('0b8d647fda3a0ae3c38207e0d7e61edfdfe59bda7359c89f953f76ed68f3768b')
+key = bytes.fromhex('ReplaceWithYourOwn256BitKeyInHex')
 ts = int(time.time() * 1000)
 req = {'type':'check_ip','ip':'1.2.3.4'}
 payload = json.dumps(req, separators=(',',':'), sort_keys=True).encode()
