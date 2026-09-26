@@ -1,82 +1,84 @@
-# Security Policy
+# Security
 
-## Reporting a Vulnerability
+RamShield is a security-sensitive system component. Treat the network-facing interfaces and the XDP process as privileged boundaries.
 
-We take the security of RamShield seriously. If you have discovered a security vulnerability, **please do not open a public issue.**
+## Reporting a vulnerability
 
-Instead, please email **autodafeyolo@gmail.com** with details.
+Please do not open a public issue for a security vulnerability.
 
-We will aim to acknowledge your report within 48 hours and provide an update on the investigation and remediation steps.
+Report vulnerabilities to **autodafeyolo@gmail.com** with enough detail to reproduce the issue. The project aims to acknowledge reports within 48 hours and provide an update on investigation and remediation.
 
-## Supported Versions
+## Current security model
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.2.x   | ✅ Yes             |
-| 0.1.x   | ❌ No (EOL)        |
+### IPC
 
-The 0.1.x line is no longer maintained. Sites on 0.1.x should upgrade to
-0.2.x — see [CHANGELOG](CHANGELOG.md) for the migration notes (breaking:
-`deny_unknown_fields` on protocol requests, subnet batch now keyed on
-distinct source IPs, CUSUM warm-up allowance).
+IPC uses HMAC-SHA256 authenticated frames when keys are configured. The protocol also supports key roles and replay protection.
+
+Authentication is not encryption. A network observer can still see IPC traffic unless the connection is kept on loopback or protected by a TLS/mTLS proxy.
+
+For exposed IPC:
+
+- bind only to a trusted network,
+- configure `auth_keys`,
+- use role-based keys,
+- set `behind_tls_proxy = true` only when a real TLS/mTLS boundary is in front.
+
+### Dashboard
+
+The dashboard supports an Argon2 password hash and session-cookie authentication. Config changes have CSRF checks.
+
+RamShield does not provide a built-in TLS server. Do not expose the dashboard directly to an untrusted network without an appropriate TLS boundary.
+
+The safest default is the loopback bind:
+
+```toml
+[dashboard]
+http_addr = "127.0.0.1:9999"
+```
+
+### XDP
+
+XDP requires elevated kernel capabilities. The current documented runtime set is:
+
+```text
+CAP_NET_ADMIN
+CAP_BPF
+CAP_PERFMON
+```
+
+Apply them to the actual release binary when needed:
+
+```bash
+sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' target/release/ramshield
+```
+
+A rebuild replaces the binary and therefore requires the capabilities to be applied again.
+
+### Persistent state
+
+When WAL is enabled, block state is replayed during startup and restored block expirations are re-armed. WAL failures are surfaced in logs; operators should not assume persistence is working merely because the process is running.
+
+## Security boundaries and limitations
+
+RamShield does not provide:
+
+- transport encryption by itself;
+- protection against attacks that saturate the upstream link;
+- a replicated multi-node control plane;
+- a guarantee that every detected block reaches the kernel;
+- immunity from false positives, especially around shared/CGNAT addresses.
+
+## Operational guidance
+
+Prefer:
+
+1. loopback IPC/dashboard for local deployments;
+2. a dedicated service user;
+3. the minimum capabilities needed for XDP;
+4. a writable, access-controlled WAL directory when persistence is enabled;
+5. a TLS/mTLS proxy for network-exposed management interfaces;
+6. explicit monitoring of health, XDP state, and enforcement failures.
 
 ## Fuzzing
 
-The IPC protocol parser and the config loader are exercised by `proptest`
-harnesses (`crates/ramshield-protocol/tests/fuzz.rs`,
-`crates/ramshield-config/tests/fuzz.rs`). The protocol harness runs
-2,048 cases per `cargo test`; the config harness runs 1,024. Both can be
-overridden at runtime via `PROPTEST_CASES=N`. The harnesses assert:
-
-- `serde_json` deserialization of `Request`/`Response` never panics on
-  arbitrary bytes.
-- A signature produced from a different key is always rejected.
-- `Config::from_toml_file` never panics on arbitrary bytes, and
-  `Config::validate` rejects `ram_limit_mb=0` and non-power-of-two
-  `shard_count`.
-
-Continuous fuzzing (oss-fuzz) is **not** yet wired in CI. Tracked in
-ROADMAP.md 0.3 — added when budget allows. Until then, fuzzing runs in
-`cargo test` on every push.
-
-## Disclosure Policy
-
-We follow a policy of responsible disclosure. We ask that you give us a reasonable amount of time to investigate and fix the vulnerability before publicly disclosing it. We appreciate your efforts to improve the security of our project.
-
-## Threat Model & Assumptions
-
-RamShield is designed to operate in a **trusted network zone** (localhost or isolated management network). The following are explicit non-goals:
-
-| Threat | Status | Mitigation |
-|--------|--------|------------|
-| IPC eavesdropping | ❌ Not protected | Deploy on localhost or VPC |
-| IPC spoofing | ❌ Not protected | Firewall `:7890` to trusted sources only |
-| Unprivileged XDP attach | ❌ Requires CAP_SYS_ADMIN | Documented requirement |
-| Kernel eBPF verifier bypass | ✅ Mitigated | Minimal eBPF surface; verifier enforced |
-| Memory exhaustion | ✅ Mitigated | Hard RAM limit + promotion filter |
-| Blocklist replay | ✅ Mitigated | UUID `decision_id` idempotency |
-| IPC channel flood | ✅ Mitigated | 64k event channel + drop-newest backpressure + per-connection byte cap |
-
-## Security Best Practices for Operators
-
-1. **Bind IPC to localhost only** — `tcp_addr = "127.0.0.1:7890"`
-2. **Firewall dashboard port** — `:9999` should not be public
-3. **HTTPS required for dashboard login over the network** — the session
-   cookie always carries the `Secure` flag, so browsers only send it over
-   HTTPS. Loopback-only deploys work over plain HTTP (RFC 6265bis treats
-   `Secure` on `http://localhost` as trustworthy), but any non-loopback
-   bind needs a TLS-terminating reverse proxy or login loops forever
-   (Set-Cookie accepted, never sent back).
-4. **Run as non-root user** — XDP requires `CAP_SYS_ADMIN` capability only
-5. **Use dedicated NIC for XDP** — isolate from management traffic
-6. **Monitor RAM usage** — alert at 80% of `ram_limit_mb`
-7. **Rotate logs** — structured JSON logs via `RUST_LOG`
-
-## Dashboard behind a reverse proxy
-
-Login lockout is keyed on the TCP peer address (`ConnectInfo<SocketAddr>`).
-RamShield deliberately does NOT trust `X-Forwarded-For`. Deployed behind
-nginx/traefik, every admin shares the proxy IP — one attacker exhausting
-`max_login_attempts` locks out all administrators until the window decays
-(15 min). Run the dashboard direct-connected, or terminate proxy identity at
-the proxy and rate-limit there.
+The repository includes property-based tests for the configuration and IPC protocol parsers. Continuous OSS-Fuzz integration is not currently enabled.

@@ -1,201 +1,178 @@
-# RamShield Troubleshooting Guide
+# Troubleshooting
 
-## XDP Unhealthy
+Start with the symptom, then check the component that owns it.
 
-**Symptom:** `/healthz` returns `503` with `reason: xdp_unhealthy` or `status: degraded`.
-**Likely causes:**
-- Kernel <5.15 (missing BPF features)
-- BPF disabled in kernel config
-- Interface does not exist or is down
-- Missing capabilities (CAP_BPF, CAP_NET_ADMIN)
-- XDP program unloadable (incompatible BPF bytecode)
+## RamShield will not start
 
-**Diagnostic:**
+Check the actual error:
+
 ```bash
-ramshield --doctor
-uname -r
-getcap $(which ramshield)
-ip link show
-bpftool net
+RUST_LOG=ramshield=debug ./target/release/ramshield --config config.toml
 ```
 
-**Remediation:**
-1. Verify kernel ≥5.15: `uname -r`
-2. Set capabilities: `setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' $(which ramshield)`
-3. Verify interface: `ip link show eth0`
-4. Check kernel config: `cat /proc/sys/kernel/kernel.unprivileged_bpf_disabled` (should be 1)
+Common causes:
 
-**Escalation:** If XDP cannot be enabled, RamShield runs in degraded mode (in-band enforcement only — blocks are tracked but packets reach the proxy). This is better than no protection but should be temporary.
+- invalid TOML or configuration values;
+- public IPC/dashboard bind without the required credentials/boundary;
+- missing WAL directory or permissions;
+- XDP configuration/interface problems;
+- an unknown command-line argument.
 
----
+The daemon intentionally fails on unknown flags rather than silently ignoring them.
 
-## WAL Unhealthy
+## Health is 503 / degraded
 
-**Symptom:** `/healthz` returns `503` with `reason: wal_unhealthy`. Dashboard shows `wal_lsn: 0`.
-**Likely causes:**
-- WAL directory does not exist or is not writable
-- Disk full
-- Filesystem permissions incorrect
-- WAL segment corruption
+Check:
 
-**Diagnostic:**
-```bash
-ramshield --doctor
-ls -la /var/lib/ramshield/wal/
-df -h /var/lib/ramshield/wal/
-```
-
-**Remediation:**
-1. Create directory: `mkdir -p /var/lib/ramshield/wal && chown ramshield:ramshield /var/lib/ramshield/wal`
-2. Free disk space or increase `wal.retention_max_bytes`
-3. If corrupted, truncate the WAL directory (blocks lost — start fresh)
-
-**Escalation:** WAL is non-critical for runtime (blocks are in-memory + XDP). Only durability of blocks across restart is lost. All other protection remains active.
-
----
-
-## Detector Unavailable
-
-**Symptom:** No new blocks being created despite visible attack traffic. `ramshield_batches_total` counter stops incrementing.
-**Likely causes:**
-- Detection channel full (64k capacity)
-- Detection thread panicked
-- IPC events not reaching the engine
-
-**Diagnostic:**
 ```bash
 curl http://127.0.0.1:9999/healthz
-curl http://127.0.0.1:9999/metrics | grep ramshield_events
-journalctl -u ramshield -n 100 | grep -i detect
+./target/release/ramshield-cli status
 ```
 
-**Remediation:**
-1. Check `ramshield_ingest_channel_depth` gauge — if near 64000, the IPC ingest is saturated.
-2. Restart the service: `systemctl restart ramshield`
-3. Check proxy is sending telemetry to the correct IPC address.
+Look at the returned `reason` and recent logs.
 
-**Escalation:** Process restart. If detection remains unavailable, the proxy is still serving traffic (just with no abuse filtering).
+Also check memory:
 
----
-
-## High Memory
-
-**Symptom:** `ramshield_store_ram_pct` > 90. Dashboard shows high RSS.
-**Likely causes:**
-- Too many tracked IPs under active attack
-- `engine.ram_limit_mb` too low for current traffic
-- Memory leak (report as bug)
-
-**Diagnostic:**
 ```bash
-curl http://127.0.0.1:9999/metrics | grep ramshield_ram
 curl http://127.0.0.1:9999/api/snapshot | jq '.ram_pct, .memory_usage_mb, .ips_tracked'
 ```
 
-**Remediation:**
-1. Increase `engine.ram_limit_mb` (requires restart)
-2. Under severe attack, tracked IPs = attacker IPs — this is expected. The store evicts oldest tracked IPs when RAM limit is reached. Blocked IPs are never evicted.
+A high store-memory percentage can move the process into an unhealthy state.
 
-**Escalation:** If `ram_limit_mb` is exhausted and IPs are being evicted, the missed attackers may not be detected. Increase limit or add more RAM to the host.
+## XDP is inactive
 
----
+Check:
 
-## High CPU
-
-**Symptom:** `ramshield` process uses >100% CPU on multi-core host.
-**Likely causes:**
-- Very high event ingestion rate (>100k events/s)
-- Detection engine saturated
-- Dashboard polling too aggressive
-
-**Diagnostic:**
 ```bash
-top -b -n 1 | grep ramshield
-curl http://127.0.0.1:9999/metrics | grep ramshield_events_ingested
+./target/release/ramshield-cli status
+getcap target/release/ramshield
+ip link show
+bpftool net
+uname -r
 ```
 
-**Remediation:**
-1. Increase `detection.batch_window_ms` (reduces detection frequency)
-2. Increase `detection.promote_min_events` (reduces tracked IPs)
-3. Reduce dashboard polling frequency
+Then confirm:
 
----
+- `[xdp].enabled = true`;
+- the configured interface exists;
+- the binary has the required capabilities;
+- the binary was built with the `full` feature.
 
-## Blocks Not Appearing
+Re-apply capabilities after every rebuild:
 
-**Symptom:** Attack traffic visible but no blocks created.
-**Likely causes:**
-- Detection thresholds too high
-- Detection channel dropping events (check `ramshield_enforcement_dropped_total`)
-- Config `detection.batch_block_enabled = false`
-
-**Diagnostic:**
 ```bash
-ramshield-cli stats
-curl http://127.0.0.1:9999/metrics | grep -E 'ramshield_(blocks|enforcement_dropped)'
+sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' target/release/ramshield
 ```
 
-**Remediation:**
-1. Lower `detection.rps_threshold`
-2. Verify `detection.batch_block_enabled = true`
-3. Check IPC is receiving events: `ramshield-cli stats`
+If XDP still cannot attach, RamShield can fall back to in-band enforcement. That means the daemon may remain usable, but kernel-level packet drops are not active.
 
----
+## Blocks are not appearing
 
-## Blocks Not Expiring
+Check:
 
-**Symptom:** IPs remain blocked past their TTL.
-**Likely causes:**
-- Enforcement actor tick not running
-- Clock skew (RAMShield uses system monotonic clock)
-- TTL scheduling ring stalled
+```bash
+./target/release/ramshield-cli stats
+curl http://127.0.0.1:9999/metrics | grep ramshield_
+```
 
-**Diagnostic:**
+Then verify:
+
+- the proxy is sending events to the configured IPC address;
+- the configured detection thresholds are appropriate;
+- `detection.batch_block_enabled` is true if automatic batch blocking is expected;
+- the enforcement queue is not under pressure.
+
+The current enforcement queue is bounded. Queue pressure is surfaced through metrics/errors; do not assume a successful detection decision automatically means an applied XDP block.
+
+## Blocks do not expire
+
+Check the block state:
+
+```bash
+./target/release/ramshield-cli check <ip>
+./target/release/ramshield-cli info <ip>
+```
+
+Then inspect logs for TTL/enforcement errors.
+
+Do not delete the WAL as a first response. Doing so can destroy the persisted history that is needed to understand a recovery problem.
+
+## Restart did not restore an expected block
+
+Check the configured WAL:
+
+```bash
+grep -nA8 '^\[wal\]' config.toml
+ls -la /var/lib/ramshield/wal
+df -h /var/lib/ramshield/wal
+```
+
+Then restart with debug logging and inspect WAL replay messages.
+
+Remember:
+
+- WAL must be enabled for restart persistence;
+- expired blocks are intentionally not resurrected;
+- a WAL/open/replay failure is different from a healthy, durable restart.
+
+## IPC authentication fails
+
+Verify:
+
+- the client uses the correct key;
+- the key is valid hexadecimal;
+- the key ID is configured;
+- the server requires the expected role;
+- the client clock is sane for replay protection.
+
+Do not expose an unauthenticated IPC listener on a non-loopback network.
+
+## Dashboard login fails
+
+Check:
+
 ```bash
 curl http://127.0.0.1:9999/healthz
 ```
 
-**Remediation:** Restart the service.
+Then verify `dashboard.admin_password_hash` and the bind/HTTPS setup.
 
----
+RamShield does not provide built-in TLS. A network-exposed dashboard needs an external TLS boundary.
 
-## Dashboard Unavailable
+## High CPU
 
-**Symptom:** `curl http://127.0.0.1:9999/healthz` fails.
-**Likely causes:**
-- Dashboard disabled in config (`dashboard.enabled = false`)
-- Dashboard thread panicked
-- Port conflict
+Inspect:
 
-**Diagnostic:**
 ```bash
-ss -tlnp | grep 9999
-journalctl -u ramshield -n 50 | grep dashboard
+top
+curl http://127.0.0.1:9999/api/snapshot | jq '.cpu_usage, .events_ingested, .channel_depth'
 ```
 
-**Remediation:**
-1. Enable dashboard: `dashboard.enabled = true`
-2. Check port: `ss -tlnp | grep 9999`
-3. Restart service
+Review event volume and detection batching before changing thresholds.
 
----
+Do not tune the system from a single CPU sample.
 
-## Restart Recovery Failed
+## High memory
 
-**Symptom:** After restart, blocks are not restored. `/healthz` shows degraded state.
-**Likely causes:**
-- WAL replay failed
-- WAL directory permissions changed
-- WAL segment corruption
+Inspect:
 
-**Diagnostic:**
 ```bash
-journalctl -u ramshield -n 100 | grep -i wal
-journalctl -u ramshield -n 100 | grep -i replay
+curl http://127.0.0.1:9999/api/snapshot | jq '.ram_pct, .memory_usage_mb, .ips_tracked, .ram_limit_mb'
 ```
 
-**Remediation:**
-1. Run `ramshield --doctor`
-2. Run `ramshield recovery test`
-3. Check WAL directory permissions
-4. Restart service
+Then review `engine.ram_limit_mb`.
+
+A larger limit is not automatically safer. The limit exists to keep the store bounded.
+
+## Last resort
+
+Preserve:
+
+- the config actually used;
+- recent logs;
+- `/api/snapshot` output;
+- relevant metrics;
+- WAL metadata/state;
+- exact RamShield version/commit.
+
+Then reproduce on a staging host before deleting state or changing multiple settings at once.

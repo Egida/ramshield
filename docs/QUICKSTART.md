@@ -1,14 +1,17 @@
 # Quickstart
 
-Shortest path from zero to verified RamShield operation.
+Build and run RamShield locally, then verify that the daemon and CLI can talk to each other.
 
 ## Requirements
 
-- Linux kernel ≥ 5.15
-- Rust nightly toolchain (pinned in `rust-toolchain.toml`)
-- For XDP: `CAP_NET_ADMIN`, `CAP_BPF`, `CAP_PERFMON` on the binary
+- Linux for the XDP path.
+- The repository-pinned Rust toolchain from `rust-toolchain.toml`.
+- `CAP_NET_ADMIN`, `CAP_BPF`, and `CAP_PERFMON` only when using XDP.
+- `curl` for the HTTP checks below.
 
-## Install
+The source tree currently builds the full binary with the `full` feature.
+
+## Build
 
 ```bash
 git clone https://github.com/grep999/ramshield.git
@@ -16,75 +19,103 @@ cd ramshield
 cargo build --release --locked --features full
 ```
 
-## Configure
+## Create a local configuration
+
+Use the repository baseline as the starting template:
 
 ```bash
 cp config.baseline.toml config.toml
 ```
 
-`config.baseline.toml` binds `127.0.0.1` for IPC and dashboard — safe for loopback local development without authentication.
-
-For external access: set `[dashboard].http_addr`, `[ipc].tcp_addr`, provide `admin_password_hash` and `auth_keys` (via env or overlay).
-
-## Validate configuration
-
-```bash
-./target/release/ramshield --config config.toml --doctor
-```
-
-Exit 0 = all gates pass.
-
-## Start
-
-```bash
-./target/release/ramshield --config config.toml
-```
-
-Without XDP (loopback/development):
+For a local development run, disable XDP explicitly:
 
 ```bash
 ./target/release/ramshield --config config.toml --no-xdp
 ```
 
-For XDP on a host NIC, set `[xdp].enabled = true`, pick interface and mode in config, and set capabilities:
+The baseline binds IPC and the dashboard to loopback. It also enables WAL and XDP in the file, so `--no-xdp` is useful for an unprivileged local run.
+
+The baseline file is a repository/test configuration, not a universal production tuning profile.
+
+## Start
+
+```bash
+./target/release/ramshield --config config.toml --no-xdp
+```
+
+The daemon accepts a config path either as `--config <path>` / `-c <path>` or as a single positional path.
+
+## Check health
+
+```bash
+curl http://127.0.0.1:9999/healthz
+```
+
+A healthy daemon returns HTTP 200 and JSON containing `status`, `reason`, and `uptime_secs`. A non-healthy state returns HTTP 503.
+
+Then check the operator CLI:
+
+```bash
+./target/release/ramshield-cli status
+```
+
+For JSON:
+
+```bash
+./target/release/ramshield-cli status --json
+```
+
+## Check a specific IP
+
+```bash
+./target/release/ramshield-cli check 203.0.113.7
+./target/release/ramshield-cli info 203.0.113.7
+```
+
+## Manual block / unblock
+
+```bash
+./target/release/ramshield-cli block 203.0.113.7 --reason manual --ttl 300
+./target/release/ramshield-cli check 203.0.113.7
+./target/release/ramshield-cli unblock 203.0.113.7
+```
+
+`--ttl` is in seconds.
+
+## Verify metrics
+
+```bash
+curl http://127.0.0.1:9999/metrics
+```
+
+The dashboard exposes Prometheus text format.
+
+## Stop
+
+Press `Ctrl+C`. The daemon handles SIGINT, SIGTERM, and SIGHUP through the same shutdown path.
+
+## Using XDP
+
+To use the kernel dataplane:
+
+1. Set `[xdp].enabled = true`.
+2. Set the target interface and XDP mode.
+3. Build with `--features full`.
+4. Apply the required capabilities to the actual binary:
 
 ```bash
 sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' target/release/ramshield
 ```
 
-Rebuild drops file capabilities — re-apply after every `cargo build`.
+5. Start without `--no-xdp`.
+6. Confirm the reported `xdp_active` state.
 
-## Check status
-
-```bash
-curl http://127.0.0.1:9999/healthz
-# → {"status":"ok","xdp_active":false,...}
-
-curl http://127.0.0.1:9999/api/snapshot
-
-# CLI:
-./target/release/ramshield-cli status
-./target/release/ramshield-cli check <ip>
-```
-
-## Run the test
-
-```bash
-CFG=config.toml IPC_PORT=7890 DASH_ADDR=127.0.0.1:9999 \
-  WAL_DIR=/tmp/ramshield-wal bash scripts/prod_smoke.sh
-```
-
-## Verify protection
-
-```bash
-ramshield-cli status        # shows xdp_active, blocks, health
-curl http://127.0.0.1:9999/metrics | grep ramshield_blocks
-```
+Reapply file capabilities after every rebuild.
 
 ## Next steps
 
-- [Operations](OPERATIONS.md) — day-to-day operation, health, incidents
-- [Configuration](CONFIGURATION.md) — full option reference
-- [Architecture](ARCHITECTURE.md) — data flow and component design
-- [Troubleshooting](TROUBLESHOOTING.md) — symptoms and fixes
-- [Development](DEVELOPMENT.md) — building, testing, contributing
+- [Operations](OPERATIONS.md)
+- [Configuration](CONFIGURATION.md)
+- [Architecture](ARCHITECTURE.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
+- [Development](DEVELOPMENT.md)

@@ -1,113 +1,160 @@
+# Operations
 
+Daily operator commands and the small set of checks that matter when RamShield is running.
 
+## Check the process and protection state
+
+Health endpoint:
+
+```bash
+curl http://127.0.0.1:9999/healthz
+```
+
+CLI status:
+
+```bash
+ramshield-cli status
+```
+
+JSON status:
+
+```bash
+ramshield-cli status --json
+```
+
+The important distinction is:
+
+```text
+process running != kernel enforcement active
+```
+
+When XDP is enabled, check the reported XDP state before treating the host as kernel-enforced.
+
+## Inspect traffic and blocks
+
+```bash
+ramshield-cli stats
+ramshield-cli check <ip>
+ramshield-cli info <ip>
+```
+
+List active blocks through the dashboard API:
+
+```bash
+curl http://127.0.0.1:9999/api/blocks/active
+```
+
+Block and unblock manually:
+
+```bash
+ramshield-cli block <ip> --reason manual --ttl 300
+ramshield-cli unblock <ip>
+ramshield-cli unblock-cidr <cidr>
+```
+
+Use manual blocks deliberately. They enter the same enforcement path as other block commands.
+
+## Inspect the dashboard API
+
+The dashboard currently exposes:
+
+```text
+/healthz
+/metrics
+/api/snapshot
+/api/stream
+/api/history/batches
+/api/history/blocks
+/api/blocks/active
+/api/traffic/subnets
+/api/status/modules
+/api/config
+```
+
+Authenticated dashboard routes should be treated as administrative interfaces.
+
+## Logs
+
+Run the daemon with a normal info level:
+
+```bash
+RUST_LOG=ramshield=info ./target/release/ramshield --config config.toml
+```
+
+For debugging:
+
+```bash
+RUST_LOG=ramshield=debug ./target/release/ramshield --config config.toml
+```
+
+Look for:
+
+- XDP load/attach failures;
+- WAL open/replay failures;
+- enforcement queue pressure;
+- detection errors;
+- shutdown messages;
+- authentication or authorization failures.
+
+## WAL
+
+Check the configured WAL directory:
+
+```bash
+ls -la /var/lib/ramshield/wal
+df -h /var/lib/ramshield/wal
+```
+
+When WAL is enabled, block state is replayed on startup. A running process does not by itself prove WAL durability.
+
+## Restart
+
+After a restart, verify:
+
+```bash
+curl http://127.0.0.1:9999/healthz
+ramshield-cli status
+```
+
+If persistent blocks matter, also verify the expected block with:
+
+```bash
+ramshield-cli check <ip>
+```
+
+and inspect the WAL/logs if recovery did not behave as expected.
 
 ## Upgrade
 
-```bash
-# 1. Check current version
-ramshield --version
+For a release upgrade:
 
-# 2. Stop service
-systemctl stop ramshield
+1. Read the release entry in `CHANGELOG.md`.
+2. Keep the existing config and WAL.
+3. Stop the current service/process.
+4. Install or build the new version.
+5. Validate startup using the normal config.
+6. Check health and status.
+7. Verify an expected existing block if persistence is required.
+8. Only then reopen normal traffic.
 
-# 3. Backup existing WAL
-cp -a /var/lib/ramshield/wal /var/lib/ramshield/wal.backup
-
-# 4. Install new version
-dpkg -i ramshield_0.4.0_amd64.deb
-
-# 5. Validate config
-ramshield config validate --config /etc/ramshield/config.toml
-
-# 6. Run doctor
-ramshield --doctor --config /etc/ramshield/config.toml
-
-# 7. Start service
-systemctl start ramshield
-
-# 8. Verify protection
-ramshield status
-curl http://127.0.0.1:9999/healthz
-```
-
-### Upgrade verification checklist
-
-- [ ] `ramshield --version` reports new version
-- [ ] `ramshield config validate` passes
-- [ ] `ramshield --doctor` passes all checks
-- [ ] `/healthz` returns 200
-- [ ] Dashboard loads at `http://127.0.0.1:9999`
-- [ ] `/metrics` returns Prometheus data
-- [ ] Existing blocks are enforced
-- [ ] New blocks can be created
-
-### Major version upgrades
-
-- Read release notes for breaking WAL format changes
-- If WAL format changed: export block list before upgrade, truncate WAL after upgrade
-- Roll out to staging first
-
-### Back up block state
-
-```bash
-curl -s http://127.0.0.1:9999/api/blocks/active | jq -c '.[] | {ip, reason}'
-```
+Do not assume WAL/config compatibility across releases unless the release notes say so.
 
 ## Rollback
 
-### When to roll back
+Rollback to the previously verified version/config pair.
 
-- New version fails to start or maintain protection
-- Regression in detection or enforcement
-- Incompatible config format
-- Unacceptable performance degradation
+Keep the previous WAL and logs until the new version is verified or the rollback decision is complete.
 
-### Rollback path
+After rollback, check health, status, authentication, and representative block/unblock behavior.
 
-```bash
-# 1. Install previous version
-dpkg -i ramshield_0.2.0_amd64.deb
+## Important operator rule
 
-# 2. Restore config if format changed
-cp /etc/ramshield/config.toml.backup /etc/ramshield/config.toml
+Do not report "protected" from process liveness alone.
 
-# 3. Restart service
-systemctl restart ramshield
+At minimum, verify:
 
-# 4. Verify
-ramshield --doctor --config /etc/ramshield/config.toml
-ramshield status
-curl http://127.0.0.1:9999/healthz
+```text
+daemon is healthy
+XDP is active when kernel enforcement is required
+persistence is healthy when restart durability is required
 ```
-
-### Rollback verification
-
-- [ ] Previous version starts cleanly
-- [ ] Config loads and validates
-- [ ] `/healthz` returns 200
-- [ ] Dashboard accessible
-- [ ] If WAL restored: existing blocks enforced
-- [ ] New blocks can be created
-
-### Staging rollback procedure
-
-**Purpose:** Stop a RamShield pilot slice safely, preserve evidence, restore prior edge policy, verify protected service remains reachable.
-
-**Preconditions:**
-- Record commit/image digest, config hash, interface, traffic slice, active policy, WAL path, operator
-- Confirm customer's existing edge policy and rollback owner
-- Test this procedure in staging before production exposure
-- Keep the prior edge configuration available and validated
-
-**Host/systemd rollback:**
-1. Stop new test traffic
-2. Restore previously saved edge/proxy policy
-3. `sudo systemctl stop ramshield`
-4. Verify stopped: `systemctl is-active ramshield`
-5. Verify interface and edge policy no longer use the pilot path
-6. Check service logs and dashboard health
-7. Preserve WAL and logs (do not delete before evidence capture)
-8. Re-run health and reachability checks
-
-**Evidence capture:**
-Record UTC start/end, operator, reason, traffic slice, policy before/after, commands, service/pod status, health results, XDP status, WAL errors. Redact credentials, customer identifiers, IP traces, internal topology before sharing.
