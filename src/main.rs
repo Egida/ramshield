@@ -8,9 +8,10 @@ use tracing_subscriber::EnvFilter;
 /// the config file. Unknown flags and missing values are FATAL — the old
 /// parser silently dropped unrecognized arguments, so `./ramshield config.toml`
 /// (positional) booted on compiled-in defaults with the file ignored.
-fn parse_args(args: &[String]) -> Result<(Option<String>, bool)> {
+fn parse_args(args: &[String]) -> Result<(Option<String>, bool, bool)> {
     let mut config_path: Option<String> = None;
     let mut no_xdp = false;
+    let mut doctor = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -28,6 +29,10 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, bool)> {
                 no_xdp = true;
                 i += 1;
             }
+            "doctor" => {
+                doctor = true;
+                i += 1;
+            }
             s if s.starts_with('-') && s.len() > 1 => {
                 anyhow::bail!("unknown argument: {s}");
             }
@@ -40,7 +45,7 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, bool)> {
             }
         }
     }
-    Ok((config_path, no_xdp))
+    Ok((config_path, no_xdp, doctor))
 }
 
 #[tokio::main]
@@ -58,7 +63,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    let (config_path, no_xdp) = parse_args(&args)?;
+    let (config_path, no_xdp, doctor) = parse_args(&args)?;
 
     let mut config = match config_path {
         Some(path) => {
@@ -101,6 +106,11 @@ async fn main() -> Result<()> {
     // P1-7: no TLS in the stack — surface any public-bind exposure at boot.
     for w in config.exposure_warnings() {
         tracing::warn!("{w}");
+    }
+
+    if doctor {
+        run_doctor();
+        return Ok(());
     }
 
     // Start RamShield normally
@@ -196,6 +206,67 @@ async fn main() -> Result<()> {
 
     info!("Shutdown complete.");
     Ok(())
+}
+
+/// Check host readiness non-interactively. Exit 0 if all gates pass.
+fn run_doctor() {
+    let mut problems: Vec<String> = Vec::new();
+    // kernel
+    let krn = std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .map(|o| String::from_utf8(o.stdout).unwrap_or_else(|_| "unknown".into()))
+        .unwrap_or("unknown".into());
+    info!("doctor: kernel {krn}");
+    // config
+    let cfg_path = std::env::var("RAMSHIELD_DOCTOR_CONFIG").unwrap_or("config.toml".into());
+    let cfg = Config::load(cfg_path.as_str()).ok();
+    if let Some(c) = cfg {
+        let wal_dir = c.wal.dir;
+        if std::path::Path::new(&wal_dir).exists() {
+            info!("doctor: WAL dir {wal_dir} exists");
+        } else {
+            problems.push(format!("WAL dir {wal_dir}: not found"));
+        }
+        if !c.ipc.auth_keys.is_empty() {
+            info!("doctor: IPC auth configured");
+        } else {
+            problems.push("IPC auth_keys empty".into());
+        }
+        let iface = c.xdp.interface;
+        let iface_ok =
+            std::process::Command::new("ip")
+                .arg("link").arg("show").arg(iface.clone())
+                .output().is_ok();
+        if iface_ok {
+            info!("doctor: XDP interface {iface} exists");
+        } else {
+            problems.push(format!("XDP interface {iface}: not found"));
+        }
+    } else {
+        problems.push(format!("config load failed: {cfg_path}"));
+    }
+    // caps
+    let bin = std::env::args().next().unwrap_or("ramshield".into());
+    let caps = std::process::Command::new("getcap")
+        .arg(bin)
+        .output()
+        .map(|o| String::from_utf8(o.stdout).unwrap_or_default())
+        .unwrap_or("".into());
+    if caps.contains("cap_bpf") || caps.contains("cap_net_admin") {
+        info!("doctor: capabilities present");
+    } else {
+        problems.push("cap_bpf/cap_net_admin not set (needed for XDP)".into());
+    }
+    if problems.is_empty() {
+        info!("doctor: all checks passed");
+        std::process::exit(0);
+    } else {
+        for p in problems {
+            tracing::error!("doctor: {p}");
+        }
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

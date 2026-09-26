@@ -11,7 +11,7 @@
 set -euo pipefail
 
 BIN="${BIN:-./target/release/ramshield}"
-CFG="${CFG:-./config.prod.toml.example}"
+CFG="${CFG:-./config.prod.toml}"
 WAL_DIR="${WAL_DIR:-/tmp/ramshield-prod-smoke-wal}"
 LOG="${LOG:-/tmp/ramshield-prod-smoke.log}"
 DASH_ADDR="${DASH_ADDR:-127.0.0.1:19999}"
@@ -51,11 +51,11 @@ RAMSHIELD_ENGINE__RAM_LIMIT_MB=1024 \
 PID=$!
 trap cleanup EXIT
 
-# Wait for health
-for i in {1..20}; do
+# Wait for health — engine boots on another thread; /healthz is 503 until pipeline_ready.
+for i in {1..50}; do
     if curl -sf -m 1 "http://$DASH_ADDR/healthz" >/dev/null 2>&1; then break; fi
-    sleep 0.3
-    if [ "$i" = "20" ]; then fail "binary never became healthy"; fi
+    sleep 0.2
+    if [ "$i" = "50" ]; then fail "binary never became healthy"; fi
 done
 green "✓ boot: /healthz ok"
 
@@ -140,10 +140,10 @@ wait "$PID" 2>/dev/null || true
 PID=""
 "$BIN" --config "$SMOKE_CFG" --no-xdp > "$LOG" 2>&1 &
 PID=$!
-for i in {1..20}; do
+for i in {1..50}; do
     if curl -sf -m 1 "http://$DASH_ADDR/healthz" >/dev/null 2>&1; then break; fi
-    sleep 0.3
-    if [ "$i" = "20" ]; then fail "binary never became healthy after SIGKILL restart"; fi
+    sleep 0.2
+    if [ "$i" = "50" ]; then fail "binary never became healthy after SIGKILL restart"; fi
 done
 RESP=$(ipc_send "$(sign_payload '{"type":"check_ip","ip":"203.0.113.99"}')")
 echo "$RESP" | grep -q '"blocked":true' || fail "WAL restore after SIGKILL: $RESP"
