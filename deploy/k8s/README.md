@@ -39,8 +39,8 @@ the kind of scaffolding `ponytail:` notes are for.
 
 ```bash
 # 1) Build & push the image (one-time per release)
-docker build -t ghcr.io/grep999/ramshield:0.2.0 .
-docker push ghcr.io/grep999/ramshield:0.2.0
+docker build -t ghcr.io/grep999/ramshield:0.3.0 .
+docker push ghcr.io/grep999/ramshield:0.3.0
 
 # 2) Apply manifests
 kubectl apply -f deploy/k8s/
@@ -53,7 +53,7 @@ kubectl -n ramshield port-forward svc/ramshield-dashboard 9999:9999
 **The container image is not pre-built.** The `Containerfile` at the repo
 root produces a `distroless/cc-debian12:nonroot` image (glibc runtime;
 static-debian12 is too minimal for the glibc-linked binary); the
-`ghcr.io/grep999/ramshield:0.2.0` reference in `deployment.yaml` will
+`ghcr.io/grep999/ramshield:0.3.0` reference in `deployment.yaml` will
 fail with `ImagePullBackOff` until you build and push it. CI builds are
 tracked under issue #128 (to be filed at PR merge).
 
