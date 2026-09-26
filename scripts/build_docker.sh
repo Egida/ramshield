@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build a slim runtime Docker image from the host-built release binary.
 # Usage: scripts/build_docker.sh [tag] [--no-xdp]
-#   [tag]           — Docker image tag (default 0.2.0)
+#   [tag]           — Docker image tag (default 0.3.0)
 #   --no-xdp        — build with XDP disabled (config.toml patched at build time)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-TAG="${1:-0.2.0}"
+TAG="${1:-0.3.0}"
 shift 1 || true
 
 XDP_ENABLED="true"
