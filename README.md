@@ -1,97 +1,162 @@
 # RamShield
 
-Kernel-assisted DDoS defense for Linux. RamShield uses proxy telemetry to detect abusive IPs/subnets and, when XDP is active, enforce blocks in the kernel before traffic reaches the application.
+**Linux-native traffic protection with eBPF/XDP.**
 
-## Current status
-
-**Controlled single-node pilot. Not a turnkey internet-facing product.**
-
-Current source version: `0.2.0`. Unreleased work is tracked in `CHANGELOG.md`.
-
-## What it does
-
-- Receives proxy telemetry over JSON/TCP IPC.
-- Detects abusive traffic with bounded-memory rate/anomaly logic.
-- Persists block decisions with the optional WAL.
-- Applies IP/CIDR blocks through eBPF/XDP when the XDP path is active.
-- Exposes a local dashboard, health endpoint, and Prometheus metrics.
-- Provides a small `ramshield-cli` for status, inspection, block and unblock operations.
-
-When XDP is disabled or unavailable, RamShield can continue with in-band enforcement, but packets are not dropped at the kernel dataplane.
-
-## What it does not do
-
-- It does not protect traffic that never reaches the telemetry source.
-- It does not provide upstream or carrier-level DDoS scrubbing.
-- It is single-node; there is no verified replicated protection state.
-- The dashboard and IPC do not provide built-in transport encryption. Use loopback or put them behind the appropriate trusted/TLS boundary.
-- CGNAT handling is experimental and can produce false positives.
-
-## Protection path
+RamShield watches traffic from your proxy, spots abusive patterns, and can block offending IPs or networks directly at the kernel level.
 
 ```text
-client / proxy
-      |
-      | telemetry
-      v
- JSON/TCP IPC
-      |
-      v
- bounded ingest + detection
-      |
-      v
- block decision
-      |
-      +------> WAL (when enabled)
-      |
-      v
- enforcement
-      |
-      v
- eBPF/XDP
-      |
-      v
- Nginx / HAProxy / application
+                    traffic
+                       │
+                       ▼
+                reverse proxy
+                       │
+                   telemetry
+                       │
+                       ▼
+                  RamShield
+                ┌──────┴──────┐
+                │             │
+            detection       state
+                │             │
+                └──────┬──────┘
+                       │
+                    decision
+                       │
+                       ▼
+                    XDP/eBPF
+                       │
+                       ▼
+                  application
 ```
 
-## Quick start
+The basic loop is simple:
+
+**observe → detect → decide → block → expire**
+
+## Run it
 
 Build from source:
 
 ```bash
 git clone https://github.com/grep999/ramshield.git
 cd ramshield
+
 cargo build --release --locked --features full
 ```
 
-For a local run without XDP:
+Start locally:
 
 ```bash
 cp config.baseline.toml config.toml
-./target/release/ramshield --config config.toml --no-xdp
+
+./target/release/ramshield \
+  --config config.toml \
+  --no-xdp
 ```
 
-Check the daemon:
+Check that it is running:
 
 ```bash
 curl http://127.0.0.1:9999/healthz
 ./target/release/ramshield-cli status
 ```
 
-See [Quickstart](docs/QUICKSTART.md) for the complete local path.
+See the [Quickstart](docs/QUICKSTART.md) for the full setup.
+
+## What happens when traffic turns bad
+
+RamShield collects telemetry, keeps a bounded view of recent activity, and looks for traffic that crosses the configured detection rules.
+
+A block can then move through:
+
+```text
+detection
+   ↓
+decision
+   ↓
+WAL
+   ↓
+enforcement
+   ↓
+XDP
+```
+
+Blocks have TTLs, can be inspected from the CLI, and are removed when they expire.
+
+```bash
+ramshield-cli status
+ramshield-cli stats
+ramshield-cli check <ip>
+ramshield-cli info <ip>
+```
+
+Manual blocks are available too:
+
+```bash
+ramshield-cli block <ip> --reason manual --ttl 300
+ramshield-cli unblock <ip>
+ramshield-cli unblock-cidr <cidr>
+```
+
+## XDP
+
+When XDP is enabled, enforcement happens close to the network interface:
+
+```text
+packet
+  ↓
+NIC
+  ↓
+XDP
+  ├── drop
+  └── pass
+```
+
+RamShield exposes the XDP state so you can see whether the kernel dataplane is actually active.
+
+## Configuration
+
+RamShield uses TOML.
+
+A starting point is included in the repository:
+
+```text
+config.baseline.toml
+```
+
+The configuration covers detection, batching, IPC, dashboard, WAL, XDP, forecasting and memory limits.
+
+See [Configuration](docs/CONFIGURATION.md).
+
+## Observe it
+
+Health:
+
+```bash
+curl http://127.0.0.1:9999/healthz
+```
+
+Metrics:
+
+```bash
+curl http://127.0.0.1:9999/metrics
+```
+
+Dashboard and API are available from the same local service.
 
 ## Documentation
 
-- [Quickstart](docs/QUICKSTART.md)
-- [Operations](docs/OPERATIONS.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Development](docs/DEVELOPMENT.md)
+[Quickstart](docs/QUICKSTART.md) · [Operations](docs/OPERATIONS.md) · [Configuration](docs/CONFIGURATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Development](docs/DEVELOPMENT.md)
 
-## Before using XDP
+## Development
 
-XDP is Linux/kernel/NIC dependent and requires the capabilities documented in [Quickstart](docs/QUICKSTART.md). Treat XDP as the enforcement boundary: `xdp_active=true` means the kernel dataplane is attached; a running daemon alone does not prove kernel enforcement.
+```bash
+cargo test --workspace --locked --features full
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --features full -- -D warnings
+```
+
+See [Development](docs/DEVELOPMENT.md).
 
 ## License
 
