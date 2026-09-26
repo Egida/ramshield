@@ -1702,7 +1702,10 @@ mod tests {
     }
     impl MapApplier {
         fn new() -> Self {
-            Self { blocked: Default::default(), cidrs: Default::default() }
+            Self {
+                blocked: Default::default(),
+                cidrs: Default::default(),
+            }
         }
     }
     #[async_trait::async_trait]
@@ -1715,7 +1718,12 @@ mod tests {
             self.blocked.remove(&ip);
             Ok(())
         }
-        fn apply_cidr_block(&mut self, n: IpNetwork, _: Uuid, _: u64) -> Result<(), EnforcementError> {
+        fn apply_cidr_block(
+            &mut self,
+            n: IpNetwork,
+            _: Uuid,
+            _: u64,
+        ) -> Result<(), EnforcementError> {
             self.cidrs.insert(n);
             Ok(())
         }
@@ -1723,18 +1731,34 @@ mod tests {
             self.cidrs.remove(&n);
             Ok(())
         }
-        fn reconcile(&mut self, expected: &[IpAddr], expected_cidrs: &[IpNetwork]) -> Result<ReconciliationState, EnforcementError> {
+        fn reconcile(
+            &mut self,
+            expected: &[IpAddr],
+            expected_cidrs: &[IpNetwork],
+        ) -> Result<ReconciliationState, EnforcementError> {
             let want: std::collections::HashSet<_> = expected.iter().copied().collect();
             let stale: Vec<_> = self.blocked.difference(&want).copied().collect();
             let missing: Vec<_> = want.difference(&self.blocked).copied().collect();
-            for ip in &stale { self.blocked.remove(ip); }
-            for ip in &missing { self.blocked.insert(*ip); }
+            for ip in &stale {
+                self.blocked.remove(ip);
+            }
+            for ip in &missing {
+                self.blocked.insert(*ip);
+            }
             let want_c: std::collections::HashSet<_> = expected_cidrs.iter().copied().collect();
             let stale_c: Vec<_> = self.cidrs.difference(&want_c).copied().collect();
             let missing_c: Vec<_> = want_c.difference(&self.cidrs).copied().collect();
-            for c in &stale_c { self.cidrs.remove(c); }
-            for c in &missing_c { self.cidrs.insert(*c); }
-            Ok(ReconciliationState { last_wal_lsn: 0, pending_blocks: missing, pending_unblocks: stale })
+            for c in &stale_c {
+                self.cidrs.remove(c);
+            }
+            for c in &missing_c {
+                self.cidrs.insert(*c);
+            }
+            Ok(ReconciliationState {
+                last_wal_lsn: 0,
+                pending_blocks: missing,
+                pending_unblocks: stale,
+            })
         }
     }
 
