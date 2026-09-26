@@ -1,59 +1,97 @@
 # RamShield
 
-Kernel-assisted DDoS defense that detects flooding IPs and subnets in bounded memory and drops traffic at the eBPF/XDP dataplane.
+Kernel-assisted DDoS defense for Linux. RamShield uses proxy telemetry to detect abusive IPs/subnets and, when XDP is active, enforce blocks in the kernel before traffic reaches the application.
+
+## Current status
+
+**Controlled single-node pilot. Not a turnkey internet-facing product.**
+
+Current source version: `0.2.0`. Unreleased work is tracked in `CHANGELOG.md`.
 
 ## What it does
 
-Detects malicious traffic from proxy telemetry and drops attacker packets at the kernel level before they reach your application.
+- Receives proxy telemetry over JSON/TCP IPC.
+- Detects abusive traffic with bounded-memory rate/anomaly logic.
+- Persists block decisions with the optional WAL.
+- Applies IP/CIDR blocks through eBPF/XDP when the XDP path is active.
+- Exposes a local dashboard, health endpoint, and Prometheus metrics.
+- Provides a small `ramshield-cli` for status, inspection, block and unblock operations.
 
-## How it works
+When XDP is disabled or unavailable, RamShield can continue with in-band enforcement, but packets are not dropped at the kernel dataplane.
 
-Ingests telemetry via authenticated JSON/TCP IPC, detects abuse with bounded-memory detection (EWMA, Holt-Winters, pulse-wave), enforces via eBPF/XDP kernel maps.
+## What it does not do
 
-## Current capabilities
+- It does not protect traffic that never reaches the telemetry source.
+- It does not provide upstream or carrier-level DDoS scrubbing.
+- It is single-node; there is no verified replicated protection state.
+- The dashboard and IPC do not provide built-in transport encryption. Use loopback or put them behind the appropriate trusted/TLS boundary.
+- CGNAT handling is experimental and can produce false positives.
 
-- Bounded-memory detection (8 GiB budget, sharded pre-aggregation)
-- eBPF/XDP dataplane for kernel-level packet drops
-- WAL-backed enforcement with crash-safe recovery
-- HMAC-SHA256 authenticated IPC with role-based authorization
-- Argon2-protected dashboard with session cookies and CSRF protection
-- Forecast-driven detection (EWMA α=0.3, Holt-Winters β=γ=0.1, SPOT-lite extreme-quantile alarms, CUSUM with debounce)
+## Protection path
 
-## Current limitations
-
-- No encryption on IPC or dashboard transport (HMAC authenticates but does not encrypt)
-- Single-node only (no multi-node consensus or state replication)
-- No Kubernetes/container-native integration (requires `--privileged` or `--cap-add` for BPF/XDP)
-- Detection is telemetry-driven (cannot detect attacks that never reach proxy telemetry feed)
-- CGNAT detection is experimental (shared egress IPs may cause false positives)
+```text
+client / proxy
+      |
+      | telemetry
+      v
+ JSON/TCP IPC
+      |
+      v
+ bounded ingest + detection
+      |
+      v
+ block decision
+      |
+      +------> WAL (when enabled)
+      |
+      v
+ enforcement
+      |
+      v
+ eBPF/XDP
+      |
+      v
+ Nginx / HAProxy / application
+```
 
 ## Quick start
 
+Build from source:
+
 ```bash
-curl -sL https://github.com/grep999/ramshield/releases/latest/download/ramshield_0.3.0_amd64.deb -o ramshield.deb
-sudo dpkg -i ramshield.deb
+git clone https://github.com/grep999/ramshield.git
+cd ramshield
+cargo build --release --locked --features full
+```
+
+For a local run without XDP:
+
+```bash
 cp config.baseline.toml config.toml
 ./target/release/ramshield --config config.toml --no-xdp
 ```
 
-For XDP on a host NIC, set `[xdp].enabled = true`, pick the interface and mode, and run with the required capabilities:
+Check the daemon:
 
 ```bash
-sudo setcap 'cap_net_admin,cap_perfmon,cap_bpf+eip' target/release/ramshield
+curl http://127.0.0.1:9999/healthz
+./target/release/ramshield-cli status
 ```
+
+See [Quickstart](docs/QUICKSTART.md) for the complete local path.
 
 ## Documentation
 
-- Quickstart
-- Operations
-- Configuration
-- Architecture
-- Troubleshooting
-- Development
+- [Quickstart](docs/QUICKSTART.md)
+- [Operations](docs/OPERATIONS.md)
+- [Configuration](docs/CONFIGURATION.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Development](docs/DEVELOPMENT.md)
 
-## Status
+## Before using XDP
 
-Controlled single-node pilot, not turnkey internet-facing product.
+XDP is Linux/kernel/NIC dependent and requires the capabilities documented in [Quickstart](docs/QUICKSTART.md). Treat XDP as the enforcement boundary: `xdp_active=true` means the kernel dataplane is attached; a running daemon alone does not prove kernel enforcement.
 
 ## License
 

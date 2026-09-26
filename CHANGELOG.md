@@ -1,54 +1,51 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+Notable user-facing changes are recorded here.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
 ## [Unreleased]
 
 ### Added
-- **P1: Authenticated key identity** — `verify_frame_auth` returns the verified `key_id`; enforcement commands attribute `actor` to the real caller, not a hard-coded `"admin"`.
-- **P2: Centralized authorization** — `KeyRole` enum (`Telemetry` < `ReadOnly` < `Operator` < `Admin`) in `ramshield-config`; `key_roles` config assigns roles per `key_id`. IPC enforces before dispatch: 403 on insufficient role, 401 on unauthenticated frame.
-- **P3: Mandatory replay protection** — `verify_authenticated` in `ramshield-protocol::auth` requires a `&ReplayStore`; production IPC never passes `None`. `AuthenticatedPrincipal` returned with `key_id`.
-- **P4: Transport bind safety** — `ipc.behind_tls_proxy` config flag. A non-loopback `ipc.tcp_addr` without it fails `validate()` at startup. HMAC authenticates; it does not encrypt.
-- **P5: WAL replay idempotency** — qualification test proves replay twice into a fresh store produces the same state (no double-apply).
-- **P6: XDP reconcile qualification** — in-memory `MapApplier` tests prove missing/stale IP and CIDR converge via existing `reconcile` trait method. No second reconciler.
-- **P8: Backpressure** — enforcement queue full returns explicit `503 "enforcement queue full"`, not silent drop. Bounded `mpsc::channel(8192)` with `try_send`.
-- **`--no-xdp` CLI flag** — run the detect/block pipeline without attaching XDP (CI, smoke tests without root).
-- **`prod_smoke.sh`** — signs IPC frames with HMAC, asserts WAL wrote segments, validates dashboard endpoints end-to-end.
-- **IPC frame authentication** — HMAC-SHA256 per-frame auth for TCP clients.
-- **Dashboard admin auth** — Argon2-hashed admin password + session-cookie middleware (`admin_password_hash` config or env).
-- **Prometheus `/metrics` export** endpoint on the dashboard.
-- **Operator console** — standalone web dashboard (fleet, jobs, engine health, git, promo, bench panels) plus a terminal REPL; documented in `docs/FACTS.json`.
-- **Bench harness: `subnet_ddos_5min` profile** — 30 unique /24s rotated every 15 s per worker; loopback-only wrapper `scripts/subnet_ddos_bench.sh`.
-- **SPOT-lite extreme-quantile alarm** (forecasting P2) — empirical tail estimation complements Holt-Winters z-score.
-- **Inst-rate EWMA sample + capped CUSUM with debounce** (detection P1) — sharper burst response without cold-start false positives.
-- Configurable block-log size (`[dashboard] block_log_size`, default 1000).
+
+- Authenticated IPC with HMAC-SHA256.
+- Key identity and role-based IPC authorization.
+- Replay protection for authenticated IPC frames.
+- Safer public IPC binding through `behind_tls_proxy`.
+- WAL replay idempotency qualification.
+- XDP reconciliation qualification.
+- Explicit enforcement-queue backpressure errors.
+- `--no-xdp` daemon flag for local and CI runs.
+- Production-like smoke test script.
+- Argon2-protected dashboard sessions and Prometheus `/metrics`.
+- Configurable dashboard block history size.
+- Forecasting and detection improvements including SPOT-lite, EWMA/CUSUM work, and pulse detection.
 
 ### Changed
-- Subnet batch blocking now keys on **distinct source IPs** — a single host bursting 10 events no longer blocks its whole /24. *(behavior change)*
-- Subnet-burst blocks get their own short TTL (120 s instead of inheriting the 1 h per-IP TTL).
-- CUSUM warm-up allowance — benign cold-start ramps no longer accumulate evidence.
-- Protocol requests use `deny_unknown_fields` — TTL typos fail loudly instead of silently blocking forever. *(breaking)*
-- Deleted dead binary codec and legacy single-file modules; workspace unified into nine domain crates.
+
+- Subnet blocking now uses distinct source IPs as one gate, reducing whole-subnet reactions to a single burst.
+- Subnet-burst blocks use a shorter TTL than ordinary IP blocks.
+- Protocol requests reject unknown fields instead of silently accepting them.
+- Dead legacy modules/codecs were removed.
 
 ### Fixed
-- Oversize IPC connections now receive a typed 413 error frame before close.
-- Lock-poisoning handling hardened across storage paths.
+
+- Oversize IPC connections now receive a typed error before close.
+- Lock-poisoning handling was hardened across storage paths.
 
 ## [0.2.0] - 2026-07-31
 
 ### Added
-- Created `AGENTS.md` to establish and enforce coding standards and project structure.
-- Implemented a "Self-Healing Protocol" requiring `build`, `clippy`, and `test` to pass before completing tasks.
-- Added `CHANGELOG.md` to track notable changes between versions.
+
+- Initial project release notes and contributor guidance.
 
 ### Changed
-- Updated project guidelines based on analysis of mature Rust projects like `jcode`.
-- Refined the build process and verification steps for better CI/CD practices.
+
+- Build and verification guidance was tightened.
 
 ### Fixed
-- Resolved build failure by removing a dead import (`ConnectionEventRecord`) from `src/engine/mod.rs`.
-- Fixed clippy error by removing an unused constant (`CONNECTION_EVENT_HISTORY`) from `src/metrics/mod.rs`.
-- Corrected working directory issue in agent's verification script execution.
+
+- Removed dead imports and unused constants that blocked verification.
+
+[Unreleased]: https://github.com/grep999/ramshield/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/grep999/ramshield/releases/tag/v0.2.0
