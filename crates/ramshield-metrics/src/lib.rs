@@ -139,6 +139,10 @@ pub struct DashboardSnapshot {
     pub wal_lsn: u64,
     /// Pending TTL expirations in the enforcement ring.
     pub pending_expirations: u64,
+    /// XDP enforcement failures (map full, attach errors). Surface at the
+    /// dashboard level so operators can see kernel-side enforcement trouble
+    /// without scraping Prometheus.
+    pub xdp_apply_failures: u64,
 }
 
 impl Default for DashboardSnapshot {
@@ -177,6 +181,7 @@ impl Default for DashboardSnapshot {
             xdp_active: false,
             wal_lsn: 0,
             pending_expirations: 0,
+            xdp_apply_failures: 0,
         }
     }
 }

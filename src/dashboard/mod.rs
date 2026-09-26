@@ -410,6 +410,7 @@ async fn api_stream(
                 "v6_drops_total": state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),
                 "wire_pass_total": state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed),
                 "parse_fails_total": state.engine.metrics.xdp_parse_fails.load(std::sync::atomic::Ordering::Relaxed),
+                "apply_failures_total": state.engine.metrics.xdp_apply_failures.load(std::sync::atomic::Ordering::Relaxed),
                 "active": snapshot.xdp_active,
                 "map_capacity": 102400
             },

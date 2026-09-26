@@ -190,6 +190,7 @@ impl Engine {
             },
             wal_lsn: self.metrics.wal_lsn.load(Ordering::Relaxed),
             pending_expirations: self.metrics.pending_expirations.load(Ordering::Relaxed),
+            xdp_apply_failures: self.metrics.xdp_apply_failures.load(Ordering::Relaxed),
             is_healthy: !self.is_shutting_down()
                 && ram_pct < 95.0
                 && self.pipeline_ready.load(Ordering::Acquire)
