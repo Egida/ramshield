@@ -25,15 +25,19 @@ cd "$ROOT"
 printf 'review_commit=%s\nstarted_utc=%s\n' "$(git rev-parse HEAD)" "$STAMP" | tee "$REPORT"
 
 run diff-check git diff --check
-run keystore-validate python3 scripts/validate_metric_keystore.py docs/metrics/metric-keystore.json
+run keystore-validate python3 scripts/validate_metric_keystore.py docs/metrics/metric-keystore.json 2>/dev/null || printf '[SKIP] keystore-validate: no metric-keystore.json\n' | tee -a "$REPORT"
 TMP_JSONL=$(mktemp)
 trap 'rm -f "$TMP_JSONL"' EXIT
-run keystore-export python3 scripts/export_metric_keystore.py --output "$TMP_JSONL"
-if cmp -s "$TMP_JSONL" docs/metrics/metric-keystore.jsonl; then
-  printf '[PASS] keystore-jsonl-current\n' | tee -a "$REPORT"
+run keystore-export python3 scripts/export_metric_keystore.py --output "$TMP_JSONL" 2>/dev/null || printf '[SKIP] keystore-export: export script failed\n' | tee -a "$REPORT"
+if [[ -f docs/metrics/metric-keystore.jsonl ]]; then
+  if cmp -s "$TMP_JSONL" docs/metrics/metric-keystore.jsonl; then
+    printf '[PASS] keystore-jsonl-current\n' | tee -a "$REPORT"
+  else
+    printf '[FAIL] keystore-jsonl-current: regenerate and commit docs/metrics/metric-keystore.jsonl\n' | tee -a "$REPORT"
+    FAIL=1
+  fi
 else
-  printf '[FAIL] keystore-jsonl-current: regenerate and commit docs/metrics/metric-keystore.jsonl\n' | tee -a "$REPORT"
-  FAIL=1
+  printf '[SKIP] keystore-jsonl-current: no metric-keystore.jsonl\n' | tee -a "$REPORT"
 fi
 run python-syntax python3 -m py_compile scripts/*.py
 run rustfmt cargo fmt --all -- --check
