@@ -15,7 +15,10 @@ fn main() {
     println!("cargo:rerun-if-changed=ramshield-xdp-bpf/Cargo.toml");
     println!("cargo:rerun-if-changed=bpf/main.rs");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR unset"));
+    let out_dir = match env::var("OUT_DIR") {
+        Ok(v) => PathBuf::from(v),
+        Err(_) => panic!("OUT_DIR unset"),
+    };
     let dest = out_dir.join("ramshield-xdp");
 
     if !try_aya_build(&dest) {
