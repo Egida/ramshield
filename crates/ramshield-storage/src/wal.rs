@@ -684,7 +684,7 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
 
     // First pass: purge fully-corrupt/empty segments (max_lsn=None) regardless
     // of cap pressure — they carry no replayable data.
-    for &(idx, sz, mlsn) in &segs[..segs.len().saturating_sub(1)] {
+    for &(idx, _sz, mlsn) in &segs[..segs.len().saturating_sub(1)] {
         if mlsn.is_some() {
             continue;
         }
@@ -696,7 +696,7 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
         }
     }
 
-    let total: u64 = segs.iter().map(|&(_, sz, _)| sz as u64).sum();
+    let total: u64 = segs.iter().map(|&(_, sz, _)| sz).sum();
     if total <= max_bytes {
         return;
     }
@@ -966,8 +966,9 @@ mod tests {
     /// its records always survive.
     #[test]
     fn wal_retention_deletes_oldest_segments() {
-        let dir = tmp("rs_wal_ret2");
+        let dir = tmp("rs_wal_ret3");
         // Tiny segments (~1 record each), 600-byte total cap.
+        #[allow(unused_mut)]
         let mut wal = Wal::open(&dir, false, Durability::None, 128, 600).unwrap();
         for i in 0..40 {
             wal.append(&WalEntry::BlockIp {
