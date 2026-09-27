@@ -107,6 +107,16 @@ pub struct ModuleStats {
     pub detail: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectionState {
+    Starting,
+    Protected,
+    Degraded,
+    Failed,
+    Stopping,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardSnapshot {
     pub ts_ms: u64,
@@ -143,6 +153,8 @@ pub struct DashboardSnapshot {
     /// dashboard level so operators can see kernel-side enforcement trouble
     /// without scraping Prometheus.
     pub xdp_apply_failures: u64,
+    pub xdp_configured: bool,
+    pub protection_state: ProtectionState,
 }
 
 impl Default for DashboardSnapshot {
@@ -182,6 +194,8 @@ impl Default for DashboardSnapshot {
             wal_lsn: 0,
             pending_expirations: 0,
             xdp_apply_failures: 0,
+            xdp_configured: false,
+            protection_state: ProtectionState::Starting,
         }
     }
 }

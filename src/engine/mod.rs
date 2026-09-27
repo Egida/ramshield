@@ -159,6 +159,33 @@ impl Engine {
             .map_or(0, |d| d.event_queue_depth());
         metrics.set_channel_depth(channel_depth);
 
+        let xdp_configured = self.config.load().xdp.enabled;
+        let xdp_active = self.xdp_active.load(Ordering::Acquire);
+        let allow_fb = self.config.load().xdp.allow_inband_fallback;
+        let pipeline_ok = self.pipeline_ready.load(Ordering::Acquire)
+            && !self.pipeline_failed.load(Ordering::Acquire);
+        let protection_state = if self.is_shutting_down() {
+            crate::metrics::ProtectionState::Stopping
+        } else if self.pipeline_failed.load(Ordering::Acquire) {
+            crate::metrics::ProtectionState::Failed
+        } else if !self.pipeline_ready.load(Ordering::Acquire) {
+            crate::metrics::ProtectionState::Starting
+        } else if xdp_configured && !xdp_active && !allow_fb {
+            crate::metrics::ProtectionState::Failed
+        } else if xdp_configured && !xdp_active && allow_fb {
+            crate::metrics::ProtectionState::Degraded
+        } else if xdp_configured && xdp_active && pipeline_ok && ram_pct < 95.0 {
+            crate::metrics::ProtectionState::Protected
+        } else if ram_pct >= 95.0 {
+            crate::metrics::ProtectionState::Degraded
+        } else {
+            crate::metrics::ProtectionState::Protected
+        };
+        let is_healthy = !self.is_shutting_down()
+            && ram_pct < 95.0
+            && pipeline_ok
+            && !(xdp_configured && !xdp_active && !allow_fb);
+
         DashboardSnapshot {
             ts_ms: crate::metrics::now_ms(),
             uptime_secs: stats.uptime_secs,
@@ -191,22 +218,25 @@ impl Engine {
             wal_lsn: self.metrics.wal_lsn.load(Ordering::Relaxed),
             pending_expirations: self.metrics.pending_expirations.load(Ordering::Relaxed),
             xdp_apply_failures: self.metrics.xdp_apply_failures.load(Ordering::Relaxed),
-            is_healthy: !self.is_shutting_down()
-                && ram_pct < 95.0
-                && self.pipeline_ready.load(Ordering::Acquire)
-                && !self.pipeline_failed.load(Ordering::Acquire),
+            is_healthy,
             health_reason: if self.is_shutting_down() {
                 "shutting down".into()
             } else if self.pipeline_failed.load(Ordering::Acquire) {
                 "pipeline failed".into()
             } else if !self.pipeline_ready.load(Ordering::Acquire) {
                 "starting".into()
+            } else if xdp_configured && !xdp_active && !allow_fb {
+                "xdp inactive".into()
+            } else if xdp_configured && !xdp_active && allow_fb {
+                "xdp degraded".into()
             } else if ram_pct >= 95.0 {
                 "ram pressure".into()
             } else {
                 "running".into()
             },
-            xdp_active: self.xdp_active.load(Ordering::Acquire),
+            xdp_active,
+            xdp_configured,
+            protection_state,
         }
     }
 
@@ -385,8 +415,9 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // The service follows the engine shutdown flag through a dedicated watcher.
     let enforcement_shutdown = Arc::new(AtomicBool::new(false));
     // Dataplane: real aya XDP when [xdp].enabled, else in-band-only stub.
-    // Load failure is not fatal — daemon runs degraded (in-band enforcement
-    // still works) and logs loudly. See plans/2026-08-22_enforcement-production.md.
+    // When attach fails and allow_inband_fallback is false the pipeline fails
+    // hard (operators must fix XDP or set allow_inband_fallback=true).
+    let hard_xdp = cfg_snapshot.xdp.enabled && !cfg_snapshot.xdp.allow_inband_fallback;
     let xdp_box: Box<dyn XdpApplier> = if cfg_snapshot.xdp.enabled {
         #[cfg(feature = "xdp")]
         {
@@ -411,15 +442,23 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         remediation = %xdp_capability_hint(),
                         "XDP load/attach failed — falling back to in-band enforcement"
                     );
+                    if hard_xdp {
+                        return Err(std::io::Error::other(
+                            "XDP configured and allow_inband_fallback=false — attach failed",
+                        ));
+                    }
                     Box::new(StubXdpApplier)
                 }
             }
         }
         #[cfg(not(feature = "xdp"))]
         {
-            tracing::warn!(
-                "[xdp].enabled=true but binary built without 'xdp' feature — in-band enforcement only"
-            );
+            tracing::error!("[xdp].enabled=true but binary built without 'xdp' feature");
+            if hard_xdp {
+                return Err(std::io::Error::other(
+                    "XDP configured and allow_inband_fallback=false — binary has no xdp feature",
+                ));
+            }
             Box::new(StubXdpApplier)
         }
     } else {

@@ -58,6 +58,8 @@ Then confirm:
 - the binary has the required capabilities;
 - the binary was built with the `full` feature.
 
+If `/healthz` returns 503 with `protection_state: failed` and `xdp_configured: true, xdp_active: false`, XDP attach failed at boot. Fix capabilities/interface, or set `[xdp].allow_inband_fallback = true` to start degraded and debug XDP separately.
+
 Re-apply capabilities after every rebuild:
 
 ```bash

@@ -74,13 +74,19 @@ runtime result
 
 The exact `xdp_applied` result is observable separately from the committed block result. A block record in userspace should not be interpreted as proof that a kernel map update succeeded.
 
+**Architectural invariant (0.3.1):** WAL/userspace state is authoritative. XDP is a projection.
+A failure of the projection must never destroy the authoritative security decision.
+A configured security boundary must never report itself healthy when that boundary is inactive.
+
 ## XDP
 
 When `[xdp].enabled = true`, the engine attempts to load and attach the XDP program.
 
-If attachment fails, the current code falls back to an in-band stub applier and logs the failure. The daemon can therefore stay running without kernel drops.
+If attachment fails:
+- `allow_inband_fallback = false` (default) → pipeline startup fails, `/healthz` returns 503.
+- `allow_inband_fallback = true` → daemon runs degraded (in-band enforcement), `/healthz` returns 200 with `protection_state: degraded`.
 
-That makes `xdp_active` an important operational field.
+See `protection_state` on `/healthz` and `/api/snapshot` for the current enforcement level.
 
 ## WAL and recovery
 

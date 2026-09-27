@@ -165,6 +165,10 @@ pub struct XdpConfig {
     /// "skb" (generic, works everywhere) or "drv" (native, production NICs).
     #[serde(default = "default_xdp_mode")]
     pub mode: String,
+    /// When XDP attach fails, continue with in-band enforcement (DEGRADED).
+    /// Default false: configured XDP that is not attached is FAILED /healthz 503.
+    #[serde(default)]
+    pub allow_inband_fallback: bool,
 }
 impl Default for XdpConfig {
     fn default() -> Self {
@@ -172,6 +176,7 @@ impl Default for XdpConfig {
             enabled: false,
             interface: default_xdp_iface(),
             mode: default_xdp_mode(),
+            allow_inband_fallback: false,
         }
     }
 }

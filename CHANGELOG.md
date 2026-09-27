@@ -4,6 +4,15 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
+## [0.3.1] - unreleased
+
+### Fixed
+- XDP failures no longer report healthy kernel protection. `allow_inband_fallback` (default `false`) controls whether XDP attach failure blocks startup vs degrades gracefully.
+- `/healthz` and `/api/snapshot` expose `protection_state` (starting/protected/degraded/failed/stopping) and `xdp_configured`.
+
+### Security
+- Explicitly fail-closed XDP startup when `[xdp].enabled = true` and kernel dataplane cannot be attached.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

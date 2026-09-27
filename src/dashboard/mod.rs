@@ -109,6 +109,8 @@ async fn api_healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_j
             "reason": snapshot.health_reason,
             "uptime_secs": snapshot.uptime_secs,
             "xdp_active": snapshot.xdp_active,
+            "xdp_configured": snapshot.xdp_configured,
+            "protection_state": snapshot.protection_state,
         })),
     )
 }
@@ -452,7 +454,9 @@ async fn api_stream(
             "health": {
                 "is_healthy": snapshot.is_healthy,
                 "health_reason": snapshot.health_reason,
-                "xdp_active": snapshot.xdp_active
+                "xdp_active": snapshot.xdp_active,
+                "xdp_configured": snapshot.xdp_configured,
+                "protection_state": snapshot.protection_state
             },
             "pipeline": pipeline_stages
         });
@@ -517,6 +521,88 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["protection_state"], "protected");
+        assert_eq!(json["xdp_configured"], false);
+        assert_eq!(json["xdp_active"], false);
+    }
+
+    #[tokio::test]
+    async fn healthz_503_when_xdp_configured_without_fallback() {
+        let mut cfg = Config::default();
+        cfg.xdp.enabled = true;
+        cfg.xdp.allow_inband_fallback = false;
+        use crate::metrics::Metrics;
+        use crate::storage::Store;
+        let engine = Arc::new(Engine::new(
+            cfg,
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        ));
+        engine.mark_pipeline_ready_for_test();
+        let auth = Arc::new(auth::AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(Metrics::new()),
+        ));
+        let state = AppState { engine, auth };
+        let app = Router::new()
+            .route("/healthz", get(api_healthz))
+            .with_state(state);
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 10_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["protection_state"], "failed");
+        assert_eq!(json["xdp_configured"], true);
+        assert_eq!(json["xdp_active"], false);
+    }
+
+    #[tokio::test]
+    async fn healthz_degraded_when_xdp_fallback_allowed() {
+        let mut cfg = Config::default();
+        cfg.xdp.enabled = true;
+        cfg.xdp.allow_inband_fallback = true;
+        use crate::metrics::Metrics;
+        use crate::storage::Store;
+        let engine = Arc::new(Engine::new(
+            cfg,
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        ));
+        engine.mark_pipeline_ready_for_test();
+        let auth = Arc::new(auth::AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(Metrics::new()),
+        ));
+        let state = AppState { engine, auth };
+        let app = Router::new()
+            .route("/healthz", get(api_healthz))
+            .with_state(state);
+        let response = app
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 10_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["protection_state"], "degraded");
         assert_eq!(json["status"], "ok");
     }
 

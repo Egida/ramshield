@@ -97,6 +97,9 @@ WAL is what provides block-state persistence across restarts. Keep its directory
 | `enabled` | `true` | `false` |
 | `interface` | `eth0` | `eth0` |
 | `mode` | `skb` | `skb` |
+| `allow_inband_fallback` | `false` | `false` |
+
+When `enabled=true` and `allow_inband_fallback=false` (default), XDP attach failure prevents daemon startup (`/healthz` 503, `protection_state: failed`). Set `allow_inband_fallback=true` to run degraded instead (in-band enforcement only, `protection_state: degraded`).
 
 Valid modes are the values currently accepted by the XDP implementation, including `skb` and `drv`.
 
