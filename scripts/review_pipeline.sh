@@ -25,7 +25,11 @@ cd "$ROOT"
 printf 'review_commit=%s\nstarted_utc=%s\n' "$(git rev-parse HEAD)" "$STAMP" | tee "$REPORT"
 
 run diff-check git diff --check
-run keystore-validate python3 scripts/validate_metric_keystore.py docs/metrics/metric-keystore.json 2>/dev/null || printf '[SKIP] keystore-validate: no metric-keystore.json\n' | tee -a "$REPORT"
+if [[ -f docs/metrics/metric-keystore.json ]]; then
+  run keystore-validate python3 scripts/validate_metric_keystore.py docs/metrics/metric-keystore.json
+else
+  printf '[SKIP] keystore-validate: no metric-keystore.json\n' | tee -a "$REPORT"
+fi
 TMP_JSONL=$(mktemp)
 trap 'rm -f "$TMP_JSONL"' EXIT
 if [[ -f docs/metrics/metric-keystore.json ]] && python3 scripts/export_metric_keystore.py --output "$TMP_JSONL" >>"$REPORT" 2>&1; then
