@@ -13,7 +13,7 @@ data:
     [engine]
     shard_count = 256
     worker_threads = 0
-    ram_limit_mb = 2048
+    ram_limit_mb = 1536  # 2Gi container — leave ~512 MiB headroom for runtime/allocator/WAL
 
     [ipc]
     tcp_addr = "0.0.0.0:7890"

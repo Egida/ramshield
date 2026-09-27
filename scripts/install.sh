@@ -60,7 +60,7 @@ install_source() {
     rustup default nightly-2026-08-29
     cd /tmp
     git clone --depth 1 --branch master https://github.com/grep999/ramshield.git
-    cd ramshield/beta/rs
+    cd ramshield  # beta/rs → consolidated root
     cargo build --release --locked -F full
     strip target/release/ramshield
     install -o root -g root -m 0755 target/release/ramshield "$INSTALL_PREFIX/bin/ramshield"

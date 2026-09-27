@@ -57,27 +57,19 @@ static-debian12 is too minimal for the glibc-linked binary); the
 fail with `ImagePullBackOff` until you build and push it. CI builds are
 tracked under issue #128 (to be filed at PR merge).
 
-## Admin password (optional)
+## Admin password (mandatory when binding public interfaces)
 
-The dashboard's Argon2 admin login is gated on a Secret that may not
-exist in your cluster. Without it, `/login` returns "server not
-configured" and the dashboard is read-only.
-
-To create the secret (after first run prints the generated hash):
+The dashboard binds `0.0.0.0:9999` (all interfaces) in the default configmap.
+`daemonset.yaml` sets `optional: false` on the `argon2-hash` Secret — the pod
+**refuses to start** without it. Create the secret before deploying:
 
 ```bash
-# 1. Get the auto-generated hash from the pod's first-run logs
-kubectl -n ramshield logs deploy/ramshield | grep ADMIN_PASSWORD_HASH
-
-# 2. Create the secret
-kubectl -n ramshield create secret generic ramshield-admin \
-  --from-literal=argon2-hash='$argon2id$v=19$m=19456,t=2,p=1$...'
+echo -n 'your-admin-password' | \
+  argon2 "$(head -c16 /dev/urandom | xxd -p)" -id -e | \
+  kubectl -n ramshield create secret generic ramshield-admin \
+    --from-literal=argon2-hash="$(cat)" \
+    --from-literal=ipc-auth-key="k1:$(openssl rand -hex 32)"
 ```
-
-The `secretKeyRef` in `deployment.yaml` is `optional: true`, so the pod
-starts without the Secret. If the Secret exists, the env var
-`RAMSHIELD_DASHBOARD__ADMIN_PASSWORD_HASH` is set and `/login` accepts
-the matching password.
 
 ## XDP
 

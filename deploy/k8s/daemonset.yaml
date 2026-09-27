@@ -48,7 +48,7 @@ spec:
                 secretKeyRef:
                   name: ramshield-admin
                   key: argon2-hash
-                  optional: true
+                  optional: false  # dashboard binds 0.0.0.0:9999 — auth is mandatory
             - name: RAMSHIELD_IPC__AUTH_KEYS
               valueFrom:
                 secretKeyRef:

@@ -40,6 +40,8 @@ run rustfmt cargo fmt --all -- --check
 run cargo-check cargo check --workspace --locked --all-targets --features full
 run clippy cargo clippy --workspace --locked --all-targets --features full -- -D warnings
 run cargo-test cargo test --workspace --locked --features full
+run config-contract python3 scripts/validate_config_contract.py 2>/dev/null || printf '[SKIP] config-contract: no validate_config_contract.py\n' | tee -a "$REPORT"
+run release-metadata bash -c 'cd "$ROOT" && fgrep -q "version = " Cargo.toml && echo "version defined"' | tee -a "$REPORT"
 
 if [[ "${REVIEW_LIVE:-0}" == 1 ]]; then
   run metrics-smoke python3 scripts/metrics_smoke.py

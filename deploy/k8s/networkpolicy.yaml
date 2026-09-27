@@ -43,11 +43,25 @@ spec:
         - port: 9999
           protocol: TCP
       from:
-        # Allow from the API gateway / ingress controller. Tighten to specific
-        # namespaces or CIDRs in production. The cluster's own internal
-        # monitoring and operator CLI are also permitted.
-        - namespaceSelector: {}
-        - podSelector: {}
+        # Allow from the ingress gateway / monitoring namespace. Tighten
+        # to your production ingress namespace in deployment.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ramshield
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ramshield
+        # Internal operator namespace for admin CLI jobs.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: operations
+        # Cluster internal monitoring (Prometheus, Grafana)
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -70,10 +84,15 @@ spec:
         - port: 7890
           protocol: TCP
       from:
-        - podSelector: {}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ramshield
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ramshield
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: operations
 ---
 # Optional: egress allow-list. Block all egress except DNS + the
 # OpenTelemetry collector (if otel feature is enabled).

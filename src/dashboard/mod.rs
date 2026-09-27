@@ -39,6 +39,7 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
             .cookie_secure
             .unwrap_or(cfg.dashboard.tls_enabled),
         Arc::new(ramshield_metrics::Metrics::new()),
+        cfg.dashboard.argon2_parallelism,
     );
     let app_state = AppState {
         engine: engine.clone(),
@@ -499,6 +500,7 @@ mod tests {
             vec![],
             true,
             Arc::new(Metrics::new()),
+            4,
         ));
         AppState { engine, auth }
     }
@@ -548,6 +550,7 @@ mod tests {
             vec![],
             true,
             Arc::new(Metrics::new()),
+            4,
         ));
         let state = AppState { engine, auth };
         let app = Router::new()
@@ -588,6 +591,7 @@ mod tests {
             vec![],
             true,
             Arc::new(Metrics::new()),
+            4,
         ));
         let state = AppState { engine, auth };
         let app = Router::new()

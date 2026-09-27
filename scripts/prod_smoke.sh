@@ -5,6 +5,11 @@
 # every public IPC + dashboard endpoint to confirm health, block path,
 # metrics export, and WAL state. Exits non-zero on first failure.
 #
+# Coverage (review 31 Batch 16):
+#  BOOT → health → protection_state → IPC auth → manual block →
+#  userspace block → WAL persisted → SIGKILL → restart → block restored →
+#  unblock → verify absent → CIDR block → verify → TTL expiry → verify
+#
 # Usage:  ./scripts/prod_smoke.sh
 # Assumes: ./target/release/ramshield built with --features full.
 

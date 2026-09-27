@@ -12,9 +12,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - WAL open/replay/CIDR-replay failures no longer silently degrade to volatile enforcement (`allow_volatile_fallback` default false).
 - XDP builds fail when the BPF artifact cannot be produced or validated (no placeholder ELF).
 - Documented XDP LRU eviction: userspace reconcile restores evicted rules (`ramshield_xdp_reconcile_successes_total`).
+- Replay cache bounded per authentication key (`per_key_cap`) preventing one-key exhaustion of global cache.
+- Config validation enforces minimum bounds for `max_line_length` (≥256), `max_password_length` (≥1), `max_login_attempts` (≥1), WAL retention minimums.
 
 ### Security
 - Explicitly fail-closed XDP startup when `[xdp].enabled = true` and kernel dataplane cannot be attached.
+- Argon2 password verification concurrency bounded via `[auth].argon2_parallelism` (default 4, Semaphore-gated).
+- `/metrics` endpoint exempted from dashboard auth (Prometheus counters only, no sensitive data).
+- K8s DaemonSet: `argon2-hash` secret required (`optional: false`). NetworkPolicy selectors tightened to specific pods/namespaces.
+
+### Qualification
+- `docs/QUALIFICATION_0.3.1.md`: enforcement, persistence, failure semantics, deployment sections.
+- `scripts/upgrade_qualification.sh`: 0.3.0→0.3.1 upgrade and rollback test.
+- `scripts/review_pipeline.sh`: added config-contract and release-metadata gates.
+- `scripts/prod_smoke.sh`: documented full coverage matrix (review 31 Batch 16).
+
+### Release hygiene
+- `release_candidate.sh`: removed hash of missing keystore files; release gate works from clean checkout.
+- Removed absolute symlink, `__pycache__` dirs, `.pyc` files from tracked source.
+- `scripts/install.sh`: fixed stale `ramshield/beta/rs` path.
+- Baseline recorded at `docs/qualification/0.3.1-baseline.txt`.
 
 ## [0.3.0] - 2026-09-26
 

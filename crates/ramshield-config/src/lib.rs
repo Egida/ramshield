@@ -375,9 +375,14 @@ pub struct DashboardConfig {
     /// Force or disable the Secure flag on session cookies. Default (None):
     /// derive from the bind address — loopback => Secure, non-loopback
     /// plain-HTTP => omit (browsers drop Secure cookies on non-trustworthy
-    /// origins). Set true explicitly when running behind an HTTPS terminator.
+    /// origins). Set true explicitly when behind an HTTPS terminator.
     #[serde(default)]
     pub cookie_secure: Option<bool>,
+    /// Max concurrent Argon2 hash operations (default 4). Prevents a flood of
+    /// bad logins from saturating the blocking pool with 100ms CPU-bound hashes.
+    /// 0 = unlimited (original behavior).
+    #[serde(default = "default_argon2_parallelism")]
+    pub argon2_parallelism: u32,
 }
 
 /// True when `peer` is in `trusted` (exact IP or CIDR member).
@@ -435,6 +440,9 @@ fn default_max_login_attempts() -> u32 {
 fn default_max_password_length() -> usize {
     1024
 }
+fn default_argon2_parallelism() -> u32 {
+    4
+}
 fn default_dashboard_http_addr() -> String {
     "127.0.0.1:9999".into()
 }
@@ -451,6 +459,7 @@ impl Default for DashboardConfig {
             session_ttl_secs: default_session_ttl_secs(),
             max_login_attempts: default_max_login_attempts(),
             max_password_length: default_max_password_length(),
+            argon2_parallelism: default_argon2_parallelism(),
             trusted_proxies: Vec::new(),
             tls_enabled: false,
             cookie_secure: None,
@@ -647,6 +656,11 @@ impl Config {
         if self.ipc.max_connections > 1_000_000 {
             anyhow::bail!("ipc.max_connections should not exceed 1,000,000");
         }
+        if let Some(mll) = self.ipc.max_line_length {
+            if mll < 256 {
+                anyhow::bail!("ipc.max_line_length must be >= 256 bytes or None (default 32MB)");
+            }
+        }
 
         // Forecasting config validation
         if self.forecasting.enabled {
@@ -664,6 +678,12 @@ impl Config {
         // Dashboard config validation
         if self.dashboard.http_addr.is_empty() {
             anyhow::bail!("dashboard.http_addr must not be empty");
+        }
+        if self.dashboard.max_password_length < 1024 {
+            anyhow::bail!("dashboard.max_password_length should be >= 1024 bytes");
+        }
+        if self.dashboard.max_login_attempts == 0 {
+            anyhow::bail!("dashboard.max_login_attempts must be > 0");
         }
 
         // Fail-closed: a public bind without credentials is an open admin surface.

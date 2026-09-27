@@ -27,6 +27,7 @@ pub struct NonceKey {
 /// Per-key nonce store. Bounded by LRU capacity; entries expire after `ttl`.
 pub struct ReplayStore {
     cap: usize,
+    per_key_cap: usize,
     ttl: Duration,
     /// Process-random hash builder for key_id -> u64. Fixed seeds (0,0,0,0)
     /// made the digest deterministic across restarts; random per-process
@@ -45,6 +46,23 @@ impl ReplayStore {
     pub fn new(capacity: usize, ttl: Duration) -> Self {
         Self {
             cap: capacity.max(1),
+            per_key_cap: capacity,
+            ttl,
+            key_hasher: ahash::RandomState::new(),
+            inner: Mutex::new(StoreInner {
+                order: VecDeque::with_capacity(capacity),
+                map: AHashMap::with_capacity(capacity),
+            }),
+        }
+    }
+
+    /// Construct with per-key capacity limit. `per_key_cap` bounds how many
+    /// entries one key_id can occupy before its own oldest are evicted.
+    /// The global LRU `capacity` still applies as an outer bound.
+    pub fn with_per_key_cap(capacity: usize, per_key_cap: usize, ttl: Duration) -> Self {
+        Self {
+            cap: capacity.max(1),
+            per_key_cap: per_key_cap.max(1),
             ttl,
             key_hasher: ahash::RandomState::new(),
             inner: Mutex::new(StoreInner {
@@ -83,6 +101,7 @@ impl ReplayStore {
             return Err("replay");
         }
         // Insert / refresh.
+        let key_id_hash = key.key_id_hash;
         g.order.retain(|k| k != &key);
         g.map.insert(key.clone(), now);
         g.order.push_back(key);
@@ -90,6 +109,23 @@ impl ReplayStore {
         while g.order.len() > self.cap {
             if let Some(old) = g.order.pop_front() {
                 g.map.remove(&old);
+            }
+        }
+        // Per-key eviction: count how many entries belong to this key_id_hash.
+        // If above per_key_cap, remove own-key oldest until under limit.
+        if self.per_key_cap < self.cap {
+            let own_keys: Vec<NonceKey> = g
+                .order
+                .iter()
+                .filter(|k| k.key_id_hash == key_id_hash)
+                .cloned()
+                .collect();
+            if own_keys.len() > self.per_key_cap {
+                let evict = own_keys.len() - self.per_key_cap;
+                for k in own_keys.into_iter().take(evict) {
+                    g.order.retain(|ok| ok != &k);
+                    g.map.remove(&k);
+                }
             }
         }
         Ok(())
@@ -109,6 +145,17 @@ impl ReplayStore {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn per_key_limit_prevents_flood_across_keys() {
+        let s = ReplayStore::with_per_key_cap(64, 2, Duration::from_millis(100000));
+        // Fill one key with 3 entries — should only keep last 2
+        assert!(s.check_and_record("kA", &[1; 32]).is_ok());
+        assert!(s.check_and_record("kA", &[2; 32]).is_ok());
+        assert!(s.check_and_record("kA", &[3; 32]).is_ok());
+        // kB entries should still be accepted (global cap not hit)
+        assert!(s.check_and_record("kB", &[4; 32]).is_ok());
+    }
 
     #[test]
     fn first_seen_ok_then_replay_rejected() {

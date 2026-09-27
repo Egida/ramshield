@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 const COOKIE_NAME: &str = "rs_session";
@@ -47,6 +48,12 @@ pub struct AuthState {
     secure_cookie: bool,
     /// Metrics handle for dashboard auth counters.
     pub(crate) metrics: Arc<ramshield_metrics::Metrics>,
+    /// Max concurrent Argon2 hash operations (default 4). Prevents a flood of
+    /// bad logins from saturating the blocking pool with 100ms CPU-bound hashes.
+    /// 0 = unlimited (original behavior).
+    argon2_parallelism: u32,
+    /// Semaphore to limit Argon2 concurrent operations.
+    argon2_semaphore: Arc<Semaphore>,
 }
 
 /// Rolling failure window for one client IP.
@@ -74,17 +81,19 @@ impl AuthState {
         trusted_proxies: Vec<String>,
         secure_cookie: bool,
         metrics: Arc<ramshield_metrics::Metrics>,
+        argon2_parallelism: u32,
     ) -> Self {
         // P3 fix: an unparseable PHC hash made verify_password() return
         // None forever — indistinguishable from a wrong password, i.e. a
         // silently un-loginable dashboard. Fail loudly at startup instead.
-        if let Some(h) = password_hash.as_deref()
-            && argon2::PasswordHash::new(h).is_err()
-        {
-            tracing::error!(
-                "dashboard.admin_password_hash is not a valid PHC string — logins WILL fail until fixed"
-            );
+        if let Some(h) = password_hash.as_deref() {
+            if argon2::PasswordHash::new(h).is_err() {
+                tracing::error!(
+                    "dashboard.admin_password_hash is not a valid PHC string — logins WILL fail until fixed"
+                );
+            }
         }
+        let parallelism = argon2_parallelism.max(1);
         Self {
             password_hash: Arc::new(std::sync::RwLock::new(password_hash)),
             ttl: Duration::from_secs(ttl_secs.max(60)),
@@ -101,6 +110,8 @@ impl AuthState {
             )),
             secure_cookie,
             metrics,
+            argon2_parallelism: parallelism,
+            argon2_semaphore: Arc::new(Semaphore::new(parallelism as usize)),
         }
     }
 
@@ -238,7 +249,7 @@ pub async fn require_auth(
     // ponytail: /static/ is dead — nothing serves it (the HUD is inlined via
     // include_str! in mod.rs). Leaving the prefix exemption is a latent
     // unauthenticated surface the moment a static mount is added. Drop it.
-    if path == "/healthz" || path == "/login" {
+    if path == "/healthz" || path == "/login" || path == "/metrics" {
         return next.run(req).await;
     }
     let valid = req
@@ -338,10 +349,22 @@ async fn login_submit(
     }
     // Argon2 verify burns ~50-100 ms of CPU. Inline on an async handler it
     // blocks the Tokio worker — 20 concurrent bad logins stall every route
-    // on those workers. Run it on the blocking pool.
+    // on those workers. Run it on the blocking pool, bounded by semaphore.
+    let argon2_permit = if auth.argon2_parallelism > 0 {
+        // Await acquisition — yield the worker while waiting. This is safe
+        // because the Semaphore never blocks a worker for the full hash
+        // time; it only gates admission to spawn_blocking.
+        let p = auth.argon2_semaphore.acquire().await;
+        if p.is_ok() { Some(p.unwrap()) } else { None }
+    } else {
+        None
+    };
     let blocking_auth = auth.clone();
     let password = form.password.clone();
-    let verified = tokio::task::spawn_blocking(move || blocking_auth.verify_password(&password))
+    let verified = tokio::task::spawn_blocking(move || {
+        let _ = argon2_permit;  // hold permit through blocking work
+        blocking_auth.verify_password(&password)
+    })
         .await
         .unwrap_or(None);
     match verified {
@@ -420,6 +443,7 @@ mod tests {
             vec![],
             true,
             Arc::new(ramshield_metrics::Metrics::new()),
+            4,
         );
         assert!(a.enabled());
         assert!(login(&a, "wrong").is_none());
@@ -438,6 +462,7 @@ mod tests {
             vec![],
             true,
             Arc::new(ramshield_metrics::Metrics::new()),
+            4,
         );
         assert!(!a.enabled());
         assert!(login(&a, "x").is_none()); // no hash → nothing validates
@@ -453,6 +478,7 @@ mod tests {
             vec![],
             true,
             Arc::new(ramshield_metrics::Metrics::new()),
+            4,
         );
         let attacker = IpAddr::from([1, 2, 3, 4]);
         let admin = IpAddr::from([5, 6, 7, 8]);

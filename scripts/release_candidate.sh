@@ -27,5 +27,5 @@ DASH_ADDR=127.0.0.1:19999 \
 WAL_DIR="${WAL_DIR:-/tmp/ramshield-release-candidate-wal}" \
 bash scripts/prod_smoke.sh
 
-sha256sum target/release/ramshield Cargo.lock docs/metrics/metric-keystore.json docs/metrics/metric-keystore.jsonl
+sha256sum target/release/ramshield Cargo.lock
 printf 'RELEASE CANDIDATE GREEN: %s %s\n' "$branch" "$(git rev-parse HEAD)"

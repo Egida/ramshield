@@ -1,1 +1,0 @@
-/home/m/.hermes/scripts/cron_status_collector.py
