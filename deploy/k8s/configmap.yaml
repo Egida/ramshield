@@ -7,7 +7,8 @@ metadata:
     app.kubernetes.io/name: ramshield
 data:
   config.toml: |
-    # RamShield config — K8s overlay
+    # RamShield config — K8s overlay (XDP-off pod mode; hosts use
+    # a separate config with xdp.enabled=true).
     # IPC + dashboard bind to 0.0.0.0 inside the pod; rely on Service selectors
     # (not the pod IP) for traffic steering.
     [engine]
@@ -40,12 +41,7 @@ data:
     seg_max_bytes = 67108864
     retention_max_bytes = 536870912
 
-    # XDP stays off in-cluster. See deploy/k8s/README.md.
+    # XDP stays off in-cluster (pod mode). Hosts: use a config with
+    # xdp.enabled=true.
     [xdp]
     enabled = false
-
-    [xdp]
-    # Two modes — XDP enabled (on hosts), or disabled (in-cluster K8s pods).
-    # Pod mode does not require XDP, but the daemonset must still start,
-    # so enforce the same config.
-    enable = false
