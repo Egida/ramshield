@@ -73,6 +73,12 @@ const LOCKOUT_WINDOW: Duration = Duration::from_secs(15 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 impl AuthState {
+    // ponytail: too_many_arguments suppressed intentionally — builder pattern
+    // adds ceremony without clarity for a constructor called once at startup.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::collapsible_if,
+    )]
     pub fn new(
         password_hash: Option<String>,
         ttl_secs: u64,
@@ -355,7 +361,7 @@ async fn login_submit(
         // because the Semaphore never blocks a worker for the full hash
         // time; it only gates admission to spawn_blocking.
         let p = auth.argon2_semaphore.acquire().await;
-        if p.is_ok() { Some(p.unwrap()) } else { None }
+        p.ok()
     } else {
         None
     };

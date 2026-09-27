@@ -656,10 +656,10 @@ impl Config {
         if self.ipc.max_connections > 1_000_000 {
             anyhow::bail!("ipc.max_connections should not exceed 1,000,000");
         }
-        if let Some(mll) = self.ipc.max_line_length {
-            if mll < 256 {
-                anyhow::bail!("ipc.max_line_length must be >= 256 bytes or None (default 32MB)");
-            }
+        if let Some(mll) = self.ipc.max_line_length
+            && mll < 256
+        {
+            anyhow::bail!("ipc.max_line_length must be >= 256 bytes or None (default 32MB)");
         }
 
         // Forecasting config validation
