@@ -17,6 +17,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       - run: cargo clippy --workspace --locked --features full --all-targets -- -D warnings
 
   check:
@@ -29,6 +36,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       - run: cargo check --all-targets --all-features --locked
 
   build:
@@ -41,6 +55,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       - run: cargo build --all-targets --all-features --locked
 
   test:
@@ -53,6 +74,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: |
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       # --all-targets also executes [[bench]] harness=false binaries.
       # benches/hot_paths.rs is a 100k-iter workload, not a test; it hung
       # CI run 35391325896 for >10 min on bench_batch_aggregate.
