@@ -599,7 +599,8 @@ impl Metrics {
     }
     /// Record a WAL segment pruned by retention.
     pub fn inc_wal_segments_pruned(&self) {
-        self.wal_segments_pruned_total.fetch_add(1, Ordering::Relaxed);
+        self.wal_segments_pruned_total
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// Record an XDP eviction (LRU map pressure).
     pub fn inc_xdp_evictions(&self) {
