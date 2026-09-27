@@ -473,6 +473,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // Crash-durable block state: open WAL, replay live blocks into the store
     // BEFORE run() reconciles store → XDP.
     if cfg_snapshot.wal.enabled {
+        let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback;
         match Wal::open(
             &cfg_snapshot.wal.dir,
             cfg_snapshot.wal.compress,
@@ -495,21 +496,33 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         enforcement.restore_expirations(pairs);
                         match ramshield_enforcement::replay_wal_cidrs(&wal) {
                             Ok(cidrs) => enforcement.restore_cidr_blocks(cidrs),
-                            Err(e) => tracing::error!("WAL CIDR replay failed: {}", e),
+                            Err(e) => {
+                                tracing::error!("WAL CIDR replay failed: {}", e);
+                                if hard_wal {
+                                    return Err(std::io::Error::other(format!(
+                                        "WAL CIDR replay failed: {e}"
+                                    )));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
-                        tracing::error!("WAL replay failed: {} — starting with empty block set", e)
+                        tracing::error!("WAL replay failed: {}", e);
+                        if hard_wal {
+                            return Err(std::io::Error::other(format!("WAL replay failed: {e}")));
+                        }
                     }
                 }
                 enforcement = enforcement.with_wal(wal);
             }
             Err(e) => {
-                tracing::error!(
-                    "WAL open failed ({}): {} — running without durability",
-                    cfg_snapshot.wal.dir,
-                    e
-                );
+                tracing::error!("WAL open failed ({}): {}", cfg_snapshot.wal.dir, e);
+                if hard_wal {
+                    return Err(std::io::Error::other(format!(
+                        "WAL open failed ({}): {e}",
+                        cfg_snapshot.wal.dir
+                    )));
+                }
             }
         }
     }

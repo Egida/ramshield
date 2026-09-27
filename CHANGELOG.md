@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 ### Fixed
 - XDP failures no longer report healthy kernel protection. `allow_inband_fallback` (default `false`) controls whether XDP attach failure blocks startup vs degrades gracefully.
 - `/healthz` and `/api/snapshot` expose `protection_state` (starting/protected/degraded/failed/stopping) and `xdp_configured`.
+- WAL open/replay/CIDR-replay failures no longer silently degrade to volatile enforcement (`allow_volatile_fallback` default false).
 
 ### Security
 - Explicitly fail-closed XDP startup when `[xdp].enabled = true` and kernel dataplane cannot be attached.

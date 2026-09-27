@@ -98,7 +98,7 @@ When WAL is enabled:
 4. live block expirations are re-armed;
 5. the running enforcement service can reconcile recovered state.
 
-A WAL failure is logged and the daemon can continue without durability. Operators should therefore treat persistence health separately from process health.
+When WAL is enabled and `allow_volatile_fallback=false` (default), open or replay failure is a startup failure — the daemon never becomes ready with an empty reconstructed block set. Volatile continuation requires an explicit `allow_volatile_fallback=true`.
 
 ## Shutdown
 

@@ -87,8 +87,11 @@ RamShield has no built-in TLS listener. `tls_enabled` controls cookie behavior f
 | `compress` | `true` | `true` |
 | `seg_max_bytes` | `67108864` | `67108864` |
 | `retention_max_bytes` | `1073741824` | `536870912` |
+| `allow_volatile_fallback` | `false` | `false` |
 
 WAL is what provides block-state persistence across restarts. Keep its directory writable and protected.
+
+When `enabled=true` and `allow_volatile_fallback=false` (default), WAL open or replay failure prevents daemon startup. Do not silently reconstruct an empty security state. Set `allow_volatile_fallback=true` only for explicit volatile/dev operation.
 
 ## `[xdp]`
 

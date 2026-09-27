@@ -311,6 +311,10 @@ pub struct WalConfig {
     pub seg_max_bytes: u64,
     /// Max total WAL size on disk. Oldest segments deleted first. 0 = unlimited.
     pub retention_max_bytes: u64,
+    /// When WAL open/replay fails, continue without durability (volatile).
+    /// Default false: WAL enabled + open/replay failure = startup failure.
+    #[serde(default)]
+    pub allow_volatile_fallback: bool,
 }
 impl Default for WalConfig {
     fn default() -> Self {
@@ -321,6 +325,7 @@ impl Default for WalConfig {
             compress: true,
             seg_max_bytes: 64 * 1024 * 1024,
             retention_max_bytes: 512 * 1024 * 1024,
+            allow_volatile_fallback: false,
         }
     }
 }
@@ -829,6 +834,23 @@ pub fn is_loopback_bind(addr: &str) -> bool {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn wal_volatile_fallback_defaults_false() {
+        assert!(!WalConfig::default().allow_volatile_fallback);
+        let parsed: WalConfig = toml::from_str(
+            r#"
+enabled = true
+dir = "/tmp/w"
+durability = "Flush"
+compress = true
+seg_max_bytes = 1
+retention_max_bytes = 1
+"#,
+        )
+        .expect("partial wal without allow_volatile_fallback");
+        assert!(!parsed.allow_volatile_fallback);
+    }
 
     /// IPv6 plan Task 6: bracketed v6 binds are the documented form
     /// ("[::]:7890"); the public-exposure guard must see through the
