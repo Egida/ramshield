@@ -88,6 +88,8 @@ If attachment fails:
 
 See `protection_state` on `/healthz` and `/api/snapshot` for the current enforcement level.
 
+BLOCKLIST and BLOCKLIST6 are LRU hash maps. Kernel eviction of a live block is expected under map pressure. Userspace remains authoritative: the enforcement tick (~10s) re-inserts every expected IP and CIDR via `reconcile()`. Observe `ramshield_xdp_reconcile_successes_total` and `ramshield_xdp_reconcile_failures_total`. There is no separate critical/bulk map split.
+
 ## WAL and recovery
 
 When WAL is enabled:

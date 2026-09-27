@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - `/healthz` and `/api/snapshot` expose `protection_state` (starting/protected/degraded/failed/stopping) and `xdp_configured`.
 - WAL open/replay/CIDR-replay failures no longer silently degrade to volatile enforcement (`allow_volatile_fallback` default false).
 - XDP builds fail when the BPF artifact cannot be produced or validated (no placeholder ELF).
+- Documented XDP LRU eviction: userspace reconcile restores evicted rules (`ramshield_xdp_reconcile_successes_total`).
 
 ### Security
 - Explicitly fail-closed XDP startup when `[xdp].enabled = true` and kernel dataplane cannot be attached.
