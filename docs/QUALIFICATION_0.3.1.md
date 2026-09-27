@@ -31,8 +31,8 @@ Production hardening release. All 0.3.0 detection tests carry forward unchanged.
 | manual unblock | ramshield-cli unblock <ip> | Block absent immediately | 200 | /api/blocks/active |
 | reconciliation | evict from map; verify userspace re-adds | Rule reappears in map | 200 | ramshield_xdp_reconcile_successes_total |
 | XDP attach | boot with xdp.enabled=true | xdp_active=true, protection_state=Protected | 200 | /healthz protection_state |
-| XDP detach | set xdp.enabled=false; SIGHUP | xdp_active=false, protection_state=Degraded | 200 | /healthz protection_state |
-| XDP reattach | set xdp.enabled=true; SIGHUP | xdp_active=true, protection_state=Protected | 200 | /healthz protection_state |
+| XDP detach | set xdp.enabled=false; restart | xdp_active=false, protection_state=Degraded | 200 | /healthz protection_state | config change requires restart |
+| XDP reattach | set xdp.enabled=true; restart | xdp_active=true, protection_state=Protected | 200 | /healthz protection_state | config change requires restart |
 
 ---
 
@@ -54,7 +54,7 @@ Production hardening release. All 0.3.0 detection tests carry forward unchanged.
 
 | Scenario | Trigger | Expected state | Health | Signal | Recovery |
 |---|---|---|---|---|---|
-| XDP failure | bad interface/capabilities | protection_state=Failed/Degraded | 503/200 | /healthz xdp_active=false | fix interface/caps; SIGHUP |
+| XDP failure | bad interface/capabilities | protection_state=Failed/Degraded | 503/200 | /healthz xdp_active=false | fix interface/caps; restart |
 | WAL open failure | permission denied | protection_state=Failed | 503 | reason="wal open failed" | fix perms; restart |
 | WAL replay failure | corrupted segment | protection_state=Failed | 503 | reason="wal replay failed" | remove corrupt; restart |
 | WAL disk full | fill disk | protection_state=Degraded/Failed | 503 | wal_write_errors_total | free space; restart |

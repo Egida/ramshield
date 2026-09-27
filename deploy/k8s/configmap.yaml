@@ -43,3 +43,9 @@ data:
     # XDP stays off in-cluster. See deploy/k8s/README.md.
     [xdp]
     enabled = false
+
+    [xdp]
+    # Two modes — XDP enabled (on hosts), or disabled (in-cluster K8s pods).
+    # Pod mode does not require XDP, but the daemonset must still start,
+    # so enforce the same config.
+    enable = false
