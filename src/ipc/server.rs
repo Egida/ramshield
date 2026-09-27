@@ -235,8 +235,8 @@ impl IpcServer {
             // replay gap at max drift. TTL now 2*MAX_CLOCK_SKEW + 5s slack;
             // cap raised to 1024 (32B digests => ~33KB, trivial).
             replay_store: Arc::new(ramshield_protocol::auth::ReplayStore::with_per_key_cap(
-                1024,  // global cap
-                256,   // per-key cap
+                1024, // global cap
+                256,  // per-key cap
                 Duration::from_secs(65),
             )),
         })

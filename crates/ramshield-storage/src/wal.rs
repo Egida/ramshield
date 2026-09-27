@@ -138,7 +138,10 @@ impl Wal {
         let ckpt_lsn = if manifest_path.exists() {
             std::fs::read_to_string(&manifest_path)?
                 .lines()
-                .find_map(|l| l.strip_prefix("lsn=").and_then(|v| v.trim().parse::<u64>().ok()))
+                .find_map(|l| {
+                    l.strip_prefix("lsn=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                })
                 .unwrap_or(0)
         } else {
             0
@@ -505,7 +508,8 @@ impl Wal {
                         seg
                     );
                     return Err(RsError::Io(std::io::Error::other(format!(
-                        "WAL corruption in older segment {:?} — startup FAILED", seg
+                        "WAL corruption in older segment {:?} — startup FAILED",
+                        seg
                     ))));
                 }
                 if last_valid_offset > 0 {
@@ -676,7 +680,11 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
                 .ok()?;
             let seg_path = e.path();
             let sz = e.metadata().ok()?.len();
-            let max_lsn = if safe_lsn > 0 { max_lsn_in_seg(&seg_path) } else { None };
+            let max_lsn = if safe_lsn > 0 {
+                max_lsn_in_seg(&seg_path)
+            } else {
+                None
+            };
             Some((idx, sz, max_lsn))
         })
         .collect();
@@ -691,7 +699,7 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
         let path = seg_path(dir, idx);
         match std::fs::remove_file(&path) {
             Ok(()) => info!("WAL retention: purged corrupt/empty seg {:?}", path),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, // raced; fine
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // raced; fine
             Err(e) => warn!("WAL retention purge {:?} failed: {}", path, e),
         }
     }
