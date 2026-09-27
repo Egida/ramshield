@@ -311,6 +311,16 @@ pub struct Metrics {
     pub auth_login_failures_total: Arc<AtomicU64>,
     /// Dashboard login attempts that succeeded.
     pub auth_login_successes_total: Arc<AtomicU64>,
+    /// Total IP blocks that expired via TTL or manual unblock (qual metric).
+    pub blocks_expired_total: Arc<AtomicU64>,
+    /// Total WAL segments pruned by retention policy (qual metric).
+    pub wal_segments_pruned_total: Arc<AtomicU64>,
+    /// Total XDP evictions (LRU map pressure — qual metric).
+    pub xdp_evictions_total: Arc<AtomicU64>,
+    /// Total dashboard login lockout events (qual metric).
+    pub auth_lockout_total: Arc<AtomicU64>,
+    /// Latest Argon2 verification wait duration in ms (qual metric; gauge).
+    pub auth_verification_wait_ms: Arc<AtomicU64>,
     /// Dashboard API requests blocked by the cross-origin CSRF guard.
     pub csrf_blocked_total: Arc<AtomicU64>,
     /// Dashboard API requests allowed through the CSRF guard.
@@ -416,6 +426,11 @@ impl Metrics {
             last_batch_blocks: Arc::new(AtomicU64::new(0)),
             auth_login_failures_total: Arc::new(AtomicU64::new(0)),
             auth_login_successes_total: Arc::new(AtomicU64::new(0)),
+            blocks_expired_total: Arc::new(AtomicU64::new(0)),
+            wal_segments_pruned_total: Arc::new(AtomicU64::new(0)),
+            xdp_evictions_total: Arc::new(AtomicU64::new(0)),
+            auth_lockout_total: Arc::new(AtomicU64::new(0)),
+            auth_verification_wait_ms: Arc::new(AtomicU64::new(0)),
             csrf_blocked_total: Arc::new(AtomicU64::new(0)),
             csrf_allowed_total: Arc::new(AtomicU64::new(0)),
             bloom_bits: Arc::new(AtomicU64::new(0)),
@@ -577,6 +592,26 @@ impl Metrics {
     /// Record a dashboard API request allowed through the CSRF guard.
     pub fn inc_csrf_allowed(&self) {
         self.csrf_allowed_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a TTL-expired block transition to Unblock (qual metric).
+    pub fn inc_blocks_expired(&self) {
+        self.blocks_expired_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a WAL segment pruned by retention.
+    pub fn inc_wal_segments_pruned(&self) {
+        self.wal_segments_pruned_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record an XDP eviction (LRU map pressure).
+    pub fn inc_xdp_evictions(&self) {
+        self.xdp_evictions_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record a dashboard login lockout event.
+    pub fn inc_auth_lockout(&self) {
+        self.auth_lockout_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Update the latest Argon2 verification wait (gauge in ms).
+    pub fn set_auth_verification_wait_ms(&self, val: u64) {
+        self.auth_verification_wait_ms.store(val, Ordering::Relaxed);
     }
     pub fn tick_reconcile_age(&self, now_unix: u64) {
         let last = self.reconcile_last_success_unix.load(Ordering::Relaxed);
@@ -995,6 +1030,36 @@ impl Metrics {
             self.blocks_forecast.load(Ordering::Relaxed),
             "Blocks from forecasting.",
             "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_blocks_expired_total",
+            self.blocks_expired_total.load(Ordering::Relaxed),
+            "Total IP blocks that expired via TTL or manual unblock.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_wal_segments_pruned_total",
+            self.wal_segments_pruned_total.load(Ordering::Relaxed),
+            "Total WAL segments pruned by retention policy.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_xdp_evictions_total",
+            self.xdp_evictions_total.load(Ordering::Relaxed),
+            "Total XDP evictions from LRU maps.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "auth_lockout_total",
+            self.auth_lockout_total.load(Ordering::Relaxed),
+            "Total dashboard login lockout events.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "auth_verification_wait_ms",
+            self.auth_verification_wait_ms.load(Ordering::Relaxed),
+            "Latest Argon2 verification wait duration in ms.",
+            "gauge"
         ));
         // Patch A: bloom is an advisory revisit cache over PROMOTED ips (not
         // a block list). n = distinct promotes this 8s epoch, m = capacity in

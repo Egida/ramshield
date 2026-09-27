@@ -393,7 +393,9 @@ impl EnforcementService {
                 action: EnforceAction::Unblock,
             };
             match self.enforce(cmd).await {
-                Ok(_) => {}
+                Ok(_) => {
+                    self.metrics.inc_blocks_expired();
+                }
                 Err(EnforcementError::InvalidCommand(_)) => {
                     warn!(%ip, "TTL unblock rejected as invalid; dropping lease");
                 }
