@@ -359,7 +359,13 @@ impl Wal {
     }
 
     /// Streaming replay with bounded reads. Returns entries in LSN order.
-    /// Corrupt tail records are quarantined instead of failing the entire replay.
+    /// Corruption policy:
+    ///   FINAL SEGMENT — valid prefix + partial tail → truncated, continued.
+    ///   ANY OLDER SEGMENT — corruption → startup FAILED.
+    ///   WHOLE SEGMENT UNREADABLE → startup FAILED.
+    ///   MANIFEST INVALID → startup FAILED (checked by the engine).
+    /// This makes recovery deterministic: only an interrupted final write
+    /// is survivable. Historical corruption always halts startup.
     pub fn replay(dir: &str) -> Result<Vec<WalEntry>> {
         let mut segs: Vec<PathBuf> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
@@ -489,6 +495,19 @@ impl Wal {
 
             if corrupted {
                 drop(file); // close read-only handle before reopening for write
+                // Corruption policy: only the newest segment may recover by
+                // truncation. Older corruption is fatal — a historical corrupt
+                // record means the durable security state is incomplete.
+                let is_newest = seg == &segs[segs.len().saturating_sub(1)];
+                if !is_newest {
+                    tracing::error!(
+                        "WAL corruption in older segment {:?} — startup FAILED: only the final segment may have a crash tail",
+                        seg
+                    );
+                    return Err(RsError::Io(std::io::Error::other(format!(
+                        "WAL corruption in older segment {:?} — startup FAILED", seg
+                    ))));
+                }
                 if last_valid_offset > 0 {
                     // P2 fix: truncate at last valid byte offset instead of
                     // quarantining the entire segment. This preserves all
@@ -498,7 +517,7 @@ impl Wal {
                     let f = OpenOptions::new().write(true).open(seg)?;
                     f.set_len(last_valid_offset)?;
                     info!(
-                        "WAL truncated {:?} at {} bytes (corrupt tail removed)",
+                        "WAL truncated {:?} at {} bytes (crash tail removed)",
                         seg, last_valid_offset
                     );
                 } else {
