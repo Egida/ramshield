@@ -68,10 +68,7 @@ fn try_aya_build(dest: &Path) -> bool {
     if let Some(home) = env::var_os("HOME") {
         let extra = PathBuf::from(home).join(".local/bin");
         let path = env::var("PATH").unwrap_or_default();
-        cmd.env(
-            "PATH",
-            format!("{}:{path}", extra.display()),
-        );
+        cmd.env("PATH", format!("{}:{path}", extra.display()));
     }
     let status = cmd
         .current_dir("ramshield-xdp-bpf")

@@ -75,10 +75,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 impl AuthState {
     // ponytail: too_many_arguments suppressed intentionally — builder pattern
     // adds ceremony without clarity for a constructor called once at startup.
-    #[allow(
-        clippy::too_many_arguments,
-        clippy::collapsible_if,
-    )]
+    #[allow(clippy::too_many_arguments, clippy::collapsible_if)]
     pub fn new(
         password_hash: Option<String>,
         ttl_secs: u64,
@@ -368,11 +365,11 @@ async fn login_submit(
     let blocking_auth = auth.clone();
     let password = form.password.clone();
     let verified = tokio::task::spawn_blocking(move || {
-        let _ = argon2_permit;  // hold permit through blocking work
+        let _ = argon2_permit; // hold permit through blocking work
         blocking_auth.verify_password(&password)
     })
-        .await
-        .unwrap_or(None);
+    .await
+    .unwrap_or(None);
     match verified {
         Some(token) => {
             auth.register_session(&token);

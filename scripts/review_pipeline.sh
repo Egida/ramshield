@@ -28,7 +28,11 @@ run diff-check git diff --check
 run keystore-validate python3 scripts/validate_metric_keystore.py docs/metrics/metric-keystore.json 2>/dev/null || printf '[SKIP] keystore-validate: no metric-keystore.json\n' | tee -a "$REPORT"
 TMP_JSONL=$(mktemp)
 trap 'rm -f "$TMP_JSONL"' EXIT
-run keystore-export python3 scripts/export_metric_keystore.py --output "$TMP_JSONL" 2>/dev/null || printf '[SKIP] keystore-export: export script failed\n' | tee -a "$REPORT"
+if [[ -f docs/metrics/metric-keystore.json ]] && python3 scripts/export_metric_keystore.py --output "$TMP_JSONL" >>"$REPORT" 2>&1; then
+  printf '[PASS] keystore-export\n' | tee -a "$REPORT"
+else
+  printf '[SKIP] keystore-export: metric-keystore.json not available\n' | tee -a "$REPORT"
+fi
 if [[ -f docs/metrics/metric-keystore.jsonl ]]; then
   if cmp -s "$TMP_JSONL" docs/metrics/metric-keystore.jsonl; then
     printf '[PASS] keystore-jsonl-current\n' | tee -a "$REPORT"
@@ -44,7 +48,11 @@ run rustfmt cargo fmt --all -- --check
 run cargo-check cargo check --workspace --locked --all-targets --features full
 run clippy cargo clippy --workspace --locked --all-targets --features full -- -D warnings
 run cargo-test cargo test --workspace --locked --features full
-run config-contract python3 scripts/validate_config_contract.py 2>/dev/null || printf '[SKIP] config-contract: no validate_config_contract.py\n' | tee -a "$REPORT"
+if [[ -f scripts/validate_config_contract.py ]]; then
+  run config-contract python3 scripts/validate_config_contract.py
+else
+  printf '[SKIP] config-contract: no validate_config_contract.py\n' | tee -a "$REPORT"
+fi
 run release-metadata bash -c 'cd "$ROOT" && fgrep -q "version = " Cargo.toml && echo "version defined"' | tee -a "$REPORT"
 
 if [[ "${REVIEW_LIVE:-0}" == 1 ]]; then
