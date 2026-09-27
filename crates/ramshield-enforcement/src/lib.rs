@@ -537,19 +537,21 @@ impl EnforcementService {
 
     pub fn restore_cidr_blocks(&mut self, pairs: impl IntoIterator<Item = (IpNetwork, u64)>) {
         for (network, remaining_secs) in pairs {
-            if let Err(e) = self
-                .xdp
-                .apply_cidr_block(network, Uuid::new_v4(), remaining_secs)
-            {
-                warn!(cidr=?network, "WAL CIDR restore failed: {}", e);
-                continue;
-            }
+            // Authoritative state lives in userspace (active_cidrs) regardless
+            // of the XDP projection result. XDP failure must not destroy the
+            // durable security decision — reconciliation retries later.
             self.store.active_cidrs.insert(network, ());
             if remaining_secs > 0 {
                 self.cidr_expirations.insert(
                     network,
                     Instant::now() + Duration::from_secs(remaining_secs),
                 );
+            }
+            if let Err(e) = self
+                .xdp
+                .apply_cidr_block(network, Uuid::new_v4(), remaining_secs)
+            {
+                warn!(cidr=?network, "WAL CIDR restore: userspace active, XDP apply failed: {}", e);
             }
         }
     }
@@ -1285,6 +1287,24 @@ mod tests {
         s.enforce(cmd).await.unwrap();
         // One dataplane op: verify via store state + single blocked entry.
         assert_eq!(s.blocked_ips.len(), 1);
+    }
+
+    #[test]
+    fn restore_cidr_keeps_userspace_state_when_xdp_fails() {
+        let mut s = svc(Box::new(FailingApplier));
+        let v4 = IpNetwork::new("198.51.100.0".parse().unwrap(), 24).unwrap();
+        let v6 = IpNetwork::new("2001:db8::".parse().unwrap(), 64).unwrap();
+        s.restore_cidr_blocks([(v4, 60), (v6, 0)]);
+        assert!(
+            s.store.active_cidrs.contains_key(&v4),
+            "v4 CIDR must remain authoritative"
+        );
+        assert!(
+            s.store.active_cidrs.contains_key(&v6),
+            "v6 CIDR must remain authoritative"
+        );
+        assert!(s.cidr_expirations.contains_key(&v4));
+        assert!(!s.cidr_expirations.contains_key(&v6));
     }
 
     /// A dataplane-failing applier: storage and WAL still commit, kernel does
