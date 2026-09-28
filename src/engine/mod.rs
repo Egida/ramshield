@@ -42,12 +42,17 @@ pub struct Engine {
     /// F9: set by boot_pipeline so main can JOIN the batch/subnet threads
     /// (each final-flushes pre_aggs on exit) instead of sleeping blind 5s.
     detection: std::sync::Mutex<Option<Arc<crate::detection::DetectionEngine>>>,
+    /// Startup signal: boot_pipeline sends Ok(()) on success, Err(err) on failure.
+    /// main blocks on this to learn whether the process should start serving or exit.
+    startup_tx: mpsc::Sender<std::io::Result<()>>,
+    startup_rx: std::sync::Mutex<Option<mpsc::Receiver<std::io::Result<()>>>>,
 }
 
 impl Engine {
     pub fn new(cfg: Config, store: Arc<Store>, metrics: Arc<Metrics>) -> Self {
         let (enforcement_tx, enforcement_rx) = mpsc::channel(8192);
         let (shutdown_tx, _) = watch::channel(false);
+        let (startup_tx, startup_rx) = mpsc::channel::<std::io::Result<()>>(1);
         Self {
             config: Arc::new(ArcSwap::from_pointee(cfg)),
             store,
@@ -60,6 +65,8 @@ impl Engine {
             pipeline_ready: Arc::new(AtomicBool::new(false)),
             pipeline_failed: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
+            startup_tx,
+            startup_rx: std::sync::Mutex::new(Some(startup_rx)),
         }
     }
 
@@ -92,15 +99,19 @@ impl Engine {
                     }
                 };
                 rt.block_on(async move {
-                    match boot_pipeline(self.clone()).await {
+                    let result = boot_pipeline(self.clone()).await;
+                    match result {
                         Ok(()) => {
                             self.pipeline_ready.store(true, Ordering::Release);
                         }
-                        Err(e) => {
+                        Err(ref e) => {
                             tracing::error!("pipeline: {}", e);
                             self.pipeline_failed.store(true, Ordering::Release);
                         }
                     }
+                    // Send startup result so main can await readiness/failure.
+                    // Channel capacity is 1 — send always succeeds (first call).
+                    let _ = self.startup_tx.send(result);
                 });
             })
     }
@@ -116,6 +127,19 @@ impl Engine {
 
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Block caller until boot_pipeline signals Ok or Err.
+    /// Call once, after start_async. Returns the pipeline result.
+    pub async fn wait_startup(self: &Self) -> std::io::Result<()> {
+        let mut rx = self
+            .startup_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| std::io::Error::other("wait_startup called multiple times or never started"))?;
+        rx.recv().await
+            .ok_or_else(|| std::io::Error::other("startup channel closed before pipeline finished"))?
     }
 
     /// Tests construct Engine without boot_pipeline. Production never calls this.

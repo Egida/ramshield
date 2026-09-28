@@ -133,6 +133,15 @@ async fn main() -> Result<()> {
         .start_async()
         .context("failed to start engine pipeline")?;
 
+    // Await pipeline readiness or failure.
+    // If boot_pipeline returned Err (WAL corruption, XDP hard fail, etc),
+    // this propagates and the process exits with non-zero status.
+    engine
+        .clone()
+        .wait_startup()
+        .await
+        .context("engine pipeline failed to start")?;
+
     // Periodic uptime updater (every second)
     {
         let started = std::time::Instant::now();
