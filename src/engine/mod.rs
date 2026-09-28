@@ -574,6 +574,17 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         "WAL history pruned past checkpoint boundary (snapshot_lsn={snap_lsn}, oldest_lsn={oldest}) — cannot reconstruct state (allow_volatile_fallback=false)"
                     )));
                 }
+                // Seed cleanup (PATCH 9): remove snapshot-blocked IPs from
+                // the Store before tail replay. Without this, an IP that was
+                // blocked in the snapshot and unblocked in the tail WAL stays
+                // blocked because the tail fold never touches it — the store
+                // record from restore_from_snapshot survives as a phantom block.
+                if let Some(seed) = snapshot_seed.as_ref() {
+                    for ip in seed.snapshot_blocked_ips.iter() {
+                        let _ = store.remove(&ip);
+                    }
+                }
+
                 let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
                 let restored_ttls = match replay_wal_into_store(&store, &wal, min_lsn) {

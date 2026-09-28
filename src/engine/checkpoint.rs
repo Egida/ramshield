@@ -176,9 +176,11 @@ fn classify(expires_at_ns: Option<u64>, now_ns: u64) -> ExpiryVerdict {
 pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> SnapshotRestore {
     let now_ns = now_unix_ns();
     let ram_lim = store.get_stats().ram_limit_mb.max(1) * 1024 * 1024;
+    let mut snapshot_blocked_ips = Vec::new();
     let mut ip_expirations = Vec::new();
     let mut cidr_expirations = Vec::new();
     for snap_ip in snap.blocked_ips.iter() {
+        snapshot_blocked_ips.push(snap_ip.ip);
         match classify(snap_ip.expires_at_ns, now_ns) {
             ExpiryVerdict::Expired => continue, // dead before recovery — drop
             verdict => {
@@ -230,6 +232,7 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
         }
     }
     SnapshotRestore {
+        snapshot_blocked_ips,
         ip_expirations,
         cidr_expirations,
         lsn: snap.lsn,
@@ -238,6 +241,11 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
 
 /// Expiration schedules + LSN handed back by `restore_from_snapshot`.
 pub struct SnapshotRestore {
+    /// All IPs that were blocked in the snapshot (permanent + temporary).
+    /// Used to clean store state before tail replay — without it, a snapshot
+    /// IP unblocked in the tail stays blocked because the tail fold doesn't
+    /// touch it.
+    pub snapshot_blocked_ips: Vec<IpAddr>,
     /// (ip, remaining_ns) — enforcement re-arms via restore_expirations_ns.
     pub ip_expirations: Vec<(IpAddr, u64)>,
     /// (network, remaining_ns) — enforcement re-arms via restore_cidr_blocks_ns.
