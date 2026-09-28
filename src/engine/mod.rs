@@ -17,7 +17,7 @@ use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };
 use crate::storage::Store;
-use ramshield_enforcement::replay_wal_into_store;
+use ramshield_enforcement::{replay_wal_into_store, replay_wal_cidrs_from};
 use ramshield_storage::wal::Wal;
 use ramshield_types::EnforceCommand;
 
@@ -526,15 +526,14 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
 
                 let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
-                match replay_wal_into_store(&store, &wal, min_lsn) {
-                    Ok(restored) => {
+                let restored_ttls = match replay_wal_into_store(&store, &wal, min_lsn) {
+                    Ok(r) => {
                         info!(
-                            "Replayed {} blocks from WAL (min_lsn={})",
-                            restored.len(),
+                            "WAL replay: restored {} IP blocks (min_lsn={})",
+                            r.len(),
                             min_lsn
                         );
-                        // Stash restored TTLs for CIDR/TTL re-arm after enforcement constructed.
-                        // These are consumed after enforcement.with_wal() below.
+                        r
                     }
                     Err(e) => {
                         tracing::error!("WAL replay: {}", e);
@@ -543,9 +542,24 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                                 "WAL replay failed (allow_volatile_fallback=false): {e}"
                             )));
                         }
+                        vec![]
                     }
+                };
+                let restored_cidrs = replay_wal_cidrs_from(&wal, min_lsn).unwrap_or_else(|e| {
+                    tracing::error!("WAL CIDR replay: {}", e);
+                    vec![]
+                });
+                if restored_cidrs.len() > 0 {
+                    info!("WAL replay: restored {} CIDR blocks", restored_cidrs.len());
                 }
                 enforcement = enforcement.with_wal(Arc::clone(&wal));
+                // Re-arm TTL ring and CIDR index with restored state.
+                // Must happen AFTER enforcement.with_wal() so the enforcement
+                // service is fully wired before scheduling expirations.
+                if restored_ttls.len() > 0 || restored_cidrs.len() > 0 {
+                    enforcement.restore_expirations(restored_ttls);
+                    enforcement.restore_cidr_blocks(restored_cidrs);
+                }
                 pipeline_wal = Some(wal);
             }
             Err(e) => {
