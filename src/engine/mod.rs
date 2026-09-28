@@ -111,7 +111,7 @@ impl Engine {
                     }
                     // Send startup result so main can await readiness/failure.
                     // Channel capacity is 1 — send always succeeds (first call).
-                    let _ = self.startup_tx.send(result);
+                    drop(self.startup_tx.send(result));
                 });
             })
     }
@@ -131,7 +131,7 @@ impl Engine {
 
     /// Block caller until boot_pipeline signals Ok or Err.
     /// Call once, after start_async. Returns the pipeline result.
-    pub async fn wait_startup(self: &Self) -> std::io::Result<()> {
+    pub async fn wait_startup(&self) -> std::io::Result<()> {
         let mut rx = self
             .startup_rx
             .lock()
