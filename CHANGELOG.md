@@ -4,19 +4,41 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
-## [0.3.2] - 2026-09-28
+## [0.3.2] - 2026-09-29
 
 ### Fixed
-- Storage concurrency: blocked_set/blocked_count updates moved inside DashMap shard lock (no race window between unlock and index update).
-- Startup lifecycle: main awaits engine boot pipeline readiness via oneshot channel; startup result is delivered at pipeline-ready (IPC/detection/enforcement up), not at daemon shutdown. Half-alive daemon eliminated.
-- Config hardening: worker_threads validated (0 = auto/available_parallelism(), rejected above 4096). XDP mode validated against exhaustive set (skb/drv/native).
+- Checkpoint correctness: IP/CIDR absolute-deadline snapshots, barrier-guarded
+  WAL→Store mutation, CIDR state in snapshot + tail replay, seed-fold
+  algorithm (snapshot IPs untouched by tail stay blocked; tail UnblockIp
+  removes them).
+- WAL flush: checkpoint tests now drop/reopen WAL before replay to ensure
+  disk-consistent reads under Durability::None.
+- CIDR-only restoration: checkpoint snapshot + tail replay now restores CIDR
+  state even when no IP blocks exist.
+- Hard-WAL fail-closed: snapshot exists but WAL history pruned → startup
+  failure (not silent partial state).
+- Storage concurrency: blocked_set/blocked_count updates moved inside DashMap
+  shard lock (no race window between unlock and index update).
+- Startup lifecycle: main awaits engine boot pipeline readiness via oneshot
+  channel; startup result is delivered at pipeline-ready (IPC/detection/enforcement
+  up), not at daemon shutdown. Half-alive daemon eliminated.
+- Config hardening: worker_threads validated (0 = auto/available_parallelism(),
+  rejected above 4096). XDP mode validated against exhaustive set (skb/drv/native).
 - Removed dead code: `apply_growth` (superseded by lock-safe `apply_growth_size_only`).
 
 ### Tests
-- `tests/recovery_restart.rs`: 5 restart replay scenarios (permanent IP, active TTL, expired, CIDR, tail replay).
-- `assert_store_invariants`: cfg(test) invariant checker verifying blocked_set/blocked_count/ttl_entries vs authoritative state.
+- `tests/recovery_restart.rs`: 15 checkpoint-path tests (permanent/temp/expired
+  IP + CIDR, mixed snapshot+tail, corrupt/missing snapshot, hard-WAL fail-closed,
+  checkpoint barrier concurrency x8 iterations).
+- `assert_store_invariants`: cfg(test) invariant checker verifying
+  blocked_set/blocked_count/ttl_entries vs authoritative state.
 - `stress_block_unblock_concurrent`: 8 threads × 500 random block/unblock/remove cycles.
 - Invariant checker called from 5 existing tests.
+
+### Release
+- Release identity normalized: all k8s manifests, container examples, and
+  documentation reference 0.3.2.
+- Tag v0.3.2 with checkpoint correctness closure.
 
 ## [0.3.1] - 2026-09-28
 
