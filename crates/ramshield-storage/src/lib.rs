@@ -4,6 +4,7 @@
 //! Types: `Value::IpRecord` is the canonical per-IP entry; subnet keys are
 //! `u128` (IPv4 packed low-32, IPv6 full address) with `IpNetwork` metadata.
 
+pub mod checkpoint_shared;
 pub mod subnet;
 pub mod wal;
 

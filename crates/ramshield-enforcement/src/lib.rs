@@ -13,6 +13,7 @@ use anyhow::Result;
 use ramshield_metrics::Metrics;
 use ramshield_storage::{
     BlockState, IpRecord, Store, Value,
+    checkpoint_shared::{CheckpointShared, CidrSnapshot, SharedState},
     wal::{Wal, WalEntry},
 };
 use ramshield_types::{
@@ -185,6 +186,9 @@ pub struct EnforcementService {
     /// Local blocks are authoritative; this CRDT absorbs peer deltas and
     /// merges them on the next enforcement tick. None = single-node.
     mesh_blocklist: Option<Arc<ramshield_mesh::aworset::AworsetBlocklist>>,
+    /// Checkpoint coordination: barrier + absolute-deadline mirror. None =
+    /// engine never attached one (standalone use, tests).
+    checkpoint_shared: Option<Arc<CheckpointShared>>,
 }
 
 impl EnforcementService {
@@ -209,9 +213,15 @@ impl EnforcementService {
             epoch: Instant::now(),
             shutdown,
             last_wal_lsn: None,
-            // P2: disabled mesh by default; enable with `with_mesh_blocklist`.
             mesh_blocklist: None,
+            checkpoint_shared: None,
         }
+    }
+
+    /// Attach checkpoint coordination (engine calls this during boot).
+    pub fn with_checkpoint_shared(mut self, shared: Arc<CheckpointShared>) -> Self {
+        self.checkpoint_shared = Some(shared);
+        self
     }
 
     /// Enable cluster CRDT companion (fleet gossip mesh).
@@ -346,6 +356,35 @@ impl EnforcementService {
                     }
                     self.metrics.set_pending_expirations(self.expirations.len() as u64);
                     self.metrics.set_active_cidr_blocks(self.store.active_cidrs.len());
+                    // Refresh the checkpoint mirror: absolute deadlines for
+                    // pending TTLs. Cheap (pending expirations are small); the
+                    // checkpoint builder reads this under the barrier instead
+                    // of reaching into enforcement internals.
+                    if let Some(shared) = &self.checkpoint_shared {
+                        let now_ns = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        let mut ip_exp = HashMap::new();
+                        for (&ip, &deadline) in &self.expirations {
+                            // deadline stored as whole-second bucket — it is an
+                            // Instant measured against self.epoch; convert via
+                            // epoch + bucket secs.
+                            let bucket = deadline.0;
+                            let at = self.epoch + Duration::from_secs(bucket);
+                            let ns = unix_ns_from_instant(at, now_ns);
+                            ip_exp.insert(ip, ns);
+                        }
+                        let mut cidr_exp = HashMap::new();
+                        for (&network, &deadline) in &self.cidr_expirations {
+                            let ns = unix_ns_from_instant(deadline, now_ns);
+                            cidr_exp.insert(network, ns);
+                        }
+                        shared.publish(SharedState {
+                            ip_expirations: ip_exp.into_iter().collect(),
+                            cidr_expirations: cidr_exp.into_iter().collect(),
+                        });
+                    }
                     // HLC activity: published from the CRDT that owns the clock.
                     // NOTE: mesh_blocklist_len is NOT written into
                     // mesh_record_ban_count — that atomic is a cumulative
@@ -553,6 +592,28 @@ impl EnforcementService {
         }
     }
 
+    /// Snapshot CIDR state for checkpoint: extracts absolute deadline from
+    /// the active expiration schedule. Permanent CIDRs (no expiration) are
+    /// emitted as `expires_at_ns: None`.
+    pub fn checkpoint_cidr_state(&self) -> Vec<CidrSnapshot> {
+        let now_unix_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        self.store
+            .active_cidrs
+            .iter()
+            .map(|e| *e.key())
+            .map(|network| CidrSnapshot {
+                network,
+                expires_at_ns: self
+                    .cidr_expirations
+                    .get(&network)
+                    .map(|&deadline| unix_ns_from_instant(deadline, now_unix_ns)),
+            })
+            .collect()
+    }
+
     pub fn restore_cidr_blocks(&mut self, pairs: impl IntoIterator<Item = (IpNetwork, u64)>) {
         for (network, remaining_secs) in pairs {
             // Authoritative state lives in userspace (active_cidrs) regardless
@@ -629,6 +690,18 @@ impl EnforcementService {
                 "unspecified IP is not blockable".into(),
             ));
         }
+
+        // Checkpoint barrier: serialize [WAL append + store mutation] against
+        // the checkpoint loop's [begin_checkpoint + store capture]. Without it
+        // an entry can be durable BELOW the checkpoint boundary while its store
+        // mutation is still in flight — the snapshot misses it AND tail replay
+        // starts after it: the block silently vanishes on recovery. Steps 1-2
+        // contain no await, so a std guard is safe here; XDP (step 3) stays
+        // outside the barrier.
+        let _ckpt_arc = self.checkpoint_shared.clone();
+        let _ckpt_guard = _ckpt_arc
+            .as_ref()
+            .map(|s| s.barrier.lock().unwrap_or_else(|e| e.into_inner()));
 
         // Step 1: commit intent to WAL (durable) — before any state change.
         let wal_lsn = if let Some(ref wal) = self.wal {
@@ -752,7 +825,8 @@ impl EnforcementService {
                     }
                 }
 
-                // Step 3: dataplane.
+                drop(_ckpt_guard);
+                // Step 3: dataplane (barrier released — XDP stays outside).
                 let is_cidr = cmd.cidr.is_some();
                 let xdp_applied = match cmd.cidr {
                     Some(network) => {
@@ -1032,6 +1106,25 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
 
 fn wal_dir(wal: &Wal) -> String {
     wal.base_dir().to_string()
+}
+
+/// Convert a monotonic `Instant` to an absolute Unix-ns timestamp.
+/// `now_unix_ns` = wall clock captured at the same moment `Instant::now()`
+/// would be taken. Derivation: wall_target = wall_now - (monotonic_now - at).
+/// Monotonic clocks can never go backwards, so `monotonic_now >= at` when
+/// `at` is in the past; for future deadlines the subtraction underflows and
+/// saturates — the sign is recovered below.
+fn unix_ns_from_instant(at: Instant, now_unix_ns: u64) -> u64 {
+    let now_mono = Instant::now();
+    if at >= now_mono {
+        // Future deadline: add the remaining monotonic duration to wall now.
+        let ahead_ns = at.duration_since(now_mono).as_nanos() as u64;
+        now_unix_ns.saturating_add(ahead_ns)
+    } else {
+        // Past deadline (rare here): subtract elapsed.
+        let behind_ns = now_mono.duration_since(at).as_nanos() as u64;
+        now_unix_ns.saturating_sub(behind_ns)
+    }
 }
 
 fn epoch_seconds() -> i64 {

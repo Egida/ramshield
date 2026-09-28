@@ -644,6 +644,66 @@ impl Wal {
         self.snapshot_lsn.load(Ordering::SeqCst)
     }
 
+    /// Oldest LSN still available on disk, or None if no segments exist.
+    /// Used by the hard-WAL policy: when snapshot LSN is B and oldest available
+    /// LSN is > B, history was pruned — recovery from the snapshot tail alone
+    /// is incomplete, and the caller MUST fail startup (allow_volatile_fallback=false).
+    pub fn oldest_lsn(&self) -> Option<u64> {
+        let segs: Vec<PathBuf> = std::fs::read_dir(&self.base_dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
+            .collect();
+        let mut oldest: Option<u64> = None;
+        for seg in &segs {
+            let mut file = match File::open(seg.as_path()) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut payload_buf = vec![0u8; MAX_RECORD_SIZE];
+            loop {
+                let mut peek = [0u8; 1];
+                match file.read(&mut peek) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let mut hdr_buf = [0u8; HEADER];
+                        hdr_buf[0] = peek[0];
+                        if file.read_exact(&mut hdr_buf[1..]).is_err() {
+                            break;
+                        }
+                        let rh = RecordHeader::from_bytes(&hdr_buf);
+                        if rh.magic != MAGIC || rh.version > FORMAT_VERSION {
+                            break;
+                        }
+                        let plen = rh.payload_len as usize;
+                        if plen > payload_buf.len() {
+                            payload_buf.resize(plen, 0);
+                        }
+                        if file.read_exact(&mut payload_buf[..plen]).is_err() {
+                            break;
+                        }
+                        let mut h2 = Crc32::new();
+                        h2.update(&payload_buf[..plen]);
+                        if h2.finalize() != rh.crc {
+                            break;
+                        }
+                        match serde_json::from_slice::<WalEntry>(&payload_buf[..plen]) {
+                            Ok(_) => {
+                                if oldest.is_none_or(|o| rh.lsn < o) {
+                                    oldest = Some(rh.lsn);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        oldest
+    }
+
     /// Replay entries with LSN > min_lsn. When min_lsn is 0, equivalent to replay().
     /// Used by checkpoint-accelerated recovery: load snapshot, then replay tail.
     pub fn replay_from(&self, min_lsn: u64) -> Result<Vec<WalEntry>> {

@@ -10,7 +10,8 @@ use crate::config::Config;
 use crate::detection::DetectionEngine;
 use crate::enforcement::{EnforcementService, StubXdpApplier, XdpApplier};
 use crate::engine::checkpoint::{
-    build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path, write_snapshot,
+    SnapshotRestore, build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path,
+    write_snapshot,
 };
 use crate::forecasting::Forecaster;
 use crate::metrics::{
@@ -18,7 +19,10 @@ use crate::metrics::{
 };
 use crate::storage::Store;
 use ramshield_enforcement::{replay_wal_cidrs_from, replay_wal_into_store};
-use ramshield_storage::wal::Wal;
+use ramshield_storage::{
+    checkpoint_shared::{CheckpointShared, CheckpointState, CidrSnapshot},
+    wal::Wal,
+};
 use ramshield_types::EnforceCommand;
 
 pub struct Engine {
@@ -508,8 +512,14 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         xdp_box,
         enforcement_shutdown.clone(),
     );
+    // Checkpoint coordination: barrier + deadline mirror shared with the
+    // periodic checkpoint loop (PATCH 7/8: build_snapshot consumes real state).
+    let checkpoint_shared = Arc::new(CheckpointShared::new());
+    enforcement = enforcement.with_checkpoint_shared(checkpoint_shared.clone());
     // Lift WAL handle into pipeline scope for checkpoint loop.
     let mut pipeline_wal: Option<Arc<Wal>> = None;
+    // Snapshot-derived CIDR/expiration seeds (None = no snapshot used).
+    let mut snapshot_seed: Option<SnapshotRestore> = None;
     // Crash-durable block state: open WAL, load snapshot if exists, replay tail.
     if cfg_snapshot.wal.enabled {
         let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback;
@@ -537,11 +547,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                                 "Checkpoint snapshot found (snap_lsn={}) — replaying tail only",
                                 snap_lsn
                             );
-                            restore_from_snapshot(
-                                &store,
-                                &mut std::collections::HashMap::new(),
-                                &snap,
-                            );
+                            snapshot_seed = Some(restore_from_snapshot(&store, &snap));
                             true
                         }
                         _ => {
@@ -556,6 +562,18 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     false
                 };
 
+                // Hard-WAL invariant (PATCH 9): snapshot present but the WAL
+                // history it relies on has been pruned → recovery would start
+                // from a hole. Fail closed under allow_volatile_fallback=false.
+                if snapshot_used
+                    && hard_wal
+                    && let Some(oldest) = wal.oldest_lsn()
+                    && oldest > snap_lsn + 1
+                {
+                    return Err(std::io::Error::other(format!(
+                        "WAL history pruned past checkpoint boundary (snapshot_lsn={snap_lsn}, oldest_lsn={oldest}) — cannot reconstruct state (allow_volatile_fallback=false)"
+                    )));
+                }
                 let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
                 let restored_ttls = match replay_wal_into_store(&store, &wal, min_lsn) {
@@ -577,19 +595,51 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         vec![]
                     }
                 };
-                let restored_cidrs = replay_wal_cidrs_from(&wal, min_lsn).unwrap_or_else(|e| {
-                    tracing::error!("WAL CIDR replay: {}", e);
-                    vec![]
-                });
+                // PATCH 6: CIDR replay obeys hard-WAL semantics — a replay
+                // failure under allow_volatile_fallback=false fails startup,
+                // same as IP replay. No silent empty-state degradation.
+                let restored_cidrs = match replay_wal_cidrs_from(&wal, min_lsn) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("WAL CIDR replay: {}", e);
+                        if hard_wal {
+                            return Err(std::io::Error::other(format!(
+                                "WAL CIDR replay failed (allow_volatile_fallback=false): {e}"
+                            )));
+                        }
+                        vec![]
+                    }
+                };
                 if !restored_cidrs.is_empty() {
                     info!("WAL replay: restored {} CIDR blocks", restored_cidrs.len());
                 }
                 enforcement = enforcement.with_wal(Arc::clone(&wal));
                 // Re-arm TTL ring and CIDR index with restored state.
-                // Must happen AFTER enforcement.with_wal() so the enforcement
-                // service is fully wired before scheduling expirations.
+                // PATCH 5: independent domains — a snapshot with 0 temporary
+                // IPs + 3 CIDRs must still restore CIDRs (no coupling via one
+                // !restored_ttls.is_empty() condition).
+                if let Some(seed) = snapshot_seed.take() {
+                    // Snapshot path: re-arm from absolute deadlines captured in
+                    // the snapshot. remaining_secs = ceil(deadline - now).
+                    if !seed.ip_expirations.is_empty() {
+                        let now_ns = crate::engine::checkpoint::now_unix_ns();
+                        let pairs = seed.ip_expirations.iter().map(|(ip, deadline)| {
+                            (*ip, deadline.saturating_sub(now_ns) / 1_000_000_000)
+                        });
+                        enforcement.restore_expirations(pairs);
+                    }
+                    if !seed.cidr_expirations.is_empty() {
+                        let now_ns = crate::engine::checkpoint::now_unix_ns();
+                        let pairs = seed.cidr_expirations.iter().map(|(net, deadline)| {
+                            (*net, deadline.saturating_sub(now_ns) / 1_000_000_000)
+                        });
+                        enforcement.restore_cidr_blocks(pairs);
+                    }
+                }
                 if !restored_ttls.is_empty() {
                     enforcement.restore_expirations(restored_ttls);
+                }
+                if !restored_cidrs.is_empty() {
                     enforcement.restore_cidr_blocks(restored_cidrs);
                 }
                 pipeline_wal = Some(wal);
@@ -696,8 +746,32 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     }
                 }
                 let boundary = wal.begin_checkpoint();
-                let snap =
-                    build_snapshot(&store_arc, &std::collections::HashMap::new(), boundary.lsn);
+                // Real runtime state, captured under the checkpoint barrier so
+                // no enforcement mutation can straddle boundary + capture.
+                let ckpt_state = {
+                    let _guard = checkpoint_shared
+                        .barrier
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let mirror = checkpoint_shared.state();
+                    // CIDR deadlines: mirror covers temporaries; permanent
+                    // CIDRs (in store.active_cidrs but absent from the mirror)
+                    // emit None.
+                    let cidrs: Vec<CidrSnapshot> = store_arc
+                        .active_cidrs
+                        .iter()
+                        .map(|e| *e.key())
+                        .map(|network| CidrSnapshot {
+                            network,
+                            expires_at_ns: mirror.cidr_expirations.get(&network).copied(),
+                        })
+                        .collect();
+                    CheckpointState {
+                        ip_expirations: mirror.ip_expirations.clone(),
+                        cidrs,
+                    }
+                };
+                let snap = build_snapshot(&store_arc, &ckpt_state, boundary.lsn);
                 let snap_path = match write_snapshot(&cfg_dir, &snap, boundary.lsn) {
                     Ok(p) => p,
                     Err(e) => {
