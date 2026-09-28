@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 memmap2 = "0.9"
-ramshield-forecasting = { path = "../ramshield-forecasting" }
+
+[dev-dependencies]
 ramshield-mesh = { path = "../ramshield-mesh" }

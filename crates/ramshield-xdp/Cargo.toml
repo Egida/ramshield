@@ -17,8 +17,5 @@ libc = "0.2"
 default = []
 elf = []
 
-[build-dependencies]
-aya-build = "0.2"
-
 [lints]
 workspace = true
