@@ -208,7 +208,12 @@ impl ramshield_enforcement::XdpApplier for NullApplier {
         _: &[IpAddr],
         _: &[ramshield_types::IpNetwork],
     ) -> Result<ramshield_enforcement::ReconciliationState, ramshield_types::EnforcementError> {
-        Ok(ramshield_enforcement::ReconciliationState::default())
+        Ok(ramshield_enforcement::ReconciliationState {
+            last_wal_lsn: 0,
+            pending_blocks: Vec::new(),
+            pending_unblocks: Vec::new(),
+            evicted_count: 0,
+        })
     }
 }
 

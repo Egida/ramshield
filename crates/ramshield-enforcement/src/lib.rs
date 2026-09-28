@@ -42,6 +42,9 @@ pub struct ReconciliationState {
     pub last_wal_lsn: u64,
     pub pending_blocks: Vec<IpAddr>,
     pub pending_unblocks: Vec<IpAddr>,
+    /// Stale entries removed from kernel maps during reconcile (proxy for LRU
+    /// eviction pressure — userspace cannot observe kernel-side LRU drops).
+    pub evicted_count: u64,
 }
 
 #[async_trait::async_trait]
@@ -122,7 +125,12 @@ impl XdpApplier for StubXdpApplier {
         _expected_blocks: &[IpAddr],
         _expected_cidrs: &[IpNetwork],
     ) -> Result<ReconciliationState, EnforcementError> {
-        Ok(ReconciliationState::default())
+        Ok(ReconciliationState {
+            last_wal_lsn: 0,
+            pending_blocks: Vec::new(),
+            pending_unblocks: Vec::new(),
+            evicted_count: 0,
+        })
     }
 }
 
@@ -271,7 +279,8 @@ impl EnforcementService {
                         let expected = self.store.get_all_blocked_ips();
                         let expected_cidrs: Vec<IpNetwork> = self.store.active_cidrs.iter().map(|e| *e.key()).collect();
                         match self.xdp.reconcile(&expected, &expected_cidrs) {
-                            Ok(_) => {
+                            Ok(state) => {
+                                self.metrics.inc_xdp_evictions_n(state.evicted_count);
                                 self.blocked_ips = expected.into_iter().collect();
                                 // Reconcile can shrink the blocked set out-of-band
                                 // (map wipe, external unblock): drop orphan
@@ -327,6 +336,13 @@ impl EnforcementService {
                     // dashboard reads live values instead of dead zeros.
                     if let Some(lsn) = self.last_wal_lsn {
                         self.metrics.set_wal_lsn(lsn);
+                    }
+                    // Qual metric: drain WAL prune counter.
+                    if let Some(ref w) = self.wal {
+                        let n = w.take_segments_pruned();
+                        if n > 0 {
+                            self.metrics.inc_wal_segments_pruned_n(n);
+                        }
                     }
                     self.metrics.set_pending_expirations(self.expirations.len() as u64);
                     self.metrics.set_active_cidr_blocks(self.store.active_cidrs.len());
@@ -1062,7 +1078,12 @@ mod tests {
             _expected: &[IpAddr],
             _expected_cidrs: &[IpNetwork],
         ) -> Result<ReconciliationState, EnforcementError> {
-            Ok(ReconciliationState::default())
+            Ok(ReconciliationState {
+                last_wal_lsn: 0,
+                pending_blocks: Vec::new(),
+                pending_unblocks: Vec::new(),
+                evicted_count: 0,
+            })
         }
     }
 
@@ -1241,7 +1262,12 @@ mod tests {
             _: &[IpAddr],
             _: &[IpNetwork],
         ) -> Result<ReconciliationState, EnforcementError> {
-            Ok(ReconciliationState::default())
+            Ok(ReconciliationState {
+                last_wal_lsn: 0,
+                pending_blocks: Vec::new(),
+                pending_unblocks: Vec::new(),
+                evicted_count: 0,
+            })
         }
         fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
             std::mem::take(&mut self.events)
@@ -1342,7 +1368,12 @@ mod tests {
             _: &[IpAddr],
             _: &[IpNetwork],
         ) -> Result<ReconciliationState, EnforcementError> {
-            Ok(ReconciliationState::default())
+            Ok(ReconciliationState {
+                last_wal_lsn: 0,
+                pending_blocks: Vec::new(),
+                pending_unblocks: Vec::new(),
+                evicted_count: 0,
+            })
         }
     }
 
@@ -1796,7 +1827,8 @@ mod tests {
             Ok(ReconciliationState {
                 last_wal_lsn: 0,
                 pending_blocks: missing,
-                pending_unblocks: stale,
+                pending_unblocks: stale.clone(),
+                evicted_count: stale.len() as u64,
             })
         }
     }

@@ -423,14 +423,11 @@ impl XdpApplier for AyaXdpApplier {
         // old single-map sweep would have deleted every live v6 key when the
         // expected set was v4-only, and vice versa.
         let (v4_keys, v6_keys) = split_by_family(expected_blocks);
+        let mut evicted_count: u64 = 0;
         for (name, expected) in [("BLOCKLIST", v4_keys), ("BLOCKLIST6", v6_keys)] {
             let expected: std::collections::HashSet<BlocklistKey> = expected.into_iter().collect();
             let mut stale_count = 0usize;
             self.with_map(name, |m| {
-                // O(1)-memory reconcile: extract raw fd (Copy i32), then
-                // iterate + delete via bpf(2). Kernel's linked-list
-                // iteration skips deleted entries, so reusing prev_key
-                // after a delete advances correctly.
                 let fd_raw = m.map().fd().as_fd().as_raw_fd();
                 let mut prev_key: Option<BlocklistKey> = None;
                 loop {
@@ -440,7 +437,6 @@ impl XdpApplier for AyaXdpApplier {
                             if !expected.contains(&k) {
                                 unsafe { raw_delete_elem(fd_raw, &k) }.map_err(MapError::from)?;
                                 stale_count += 1;
-                                // keep prev_key — kernel skips deleted entry
                             } else {
                                 prev_key = Some(k);
                             }
@@ -450,16 +446,12 @@ impl XdpApplier for AyaXdpApplier {
                     }
                 }
                 for k in &expected {
-                    // Reconcile can't see per-block TTLs from a bare IP list;
-                    // userspace owns expiry (removes on unblock). u64::MAX keeps
-                    // the key blocking until explicitly removed — LRU eviction
-                    // still bounds map growth. ponytail: pass (IpAddr, ttl) into
-                    // reconcile if BPF-side expiry backup is ever needed.
                     m.insert(*k, PERMANENT, 0)?;
                 }
                 Ok(())
             })?;
             if stale_count > 0 {
+                evicted_count += stale_count as u64;
                 tracing::info!(
                     map = name,
                     stale = stale_count,
@@ -467,18 +459,11 @@ impl XdpApplier for AyaXdpApplier {
                 );
             }
         }
-        // CIDR state has its own LPM-trie maps and therefore cannot be
-        // reconstructed from `expected_blocks`. A driver/map reload can wipe
-        // BLOCKCIDR/BLOCKCIDR6 while userspace still considers the prefixes
-        // active. Reconcile both families explicitly. Aya exposes LpmTrie::keys
-        // as a fallible iterator, so collect current keys before deleting to
-        // avoid mutating the iterator while it is walking the kernel map.
+        // CIDR state has its own LPM-trie maps — reconcile both families.
         let (v4_cidrs, v6_cidrs): (Vec<_>, Vec<_>) = expected_cidrs
             .iter()
             .partition(|n| matches!(n.addr, IpAddr::V4(_)));
         for (name, expected) in [("BLOCKCIDR", v4_cidrs), ("BLOCKCIDR6", v6_cidrs)] {
-            // aya::maps::lpm_trie::Key derives only Clone+Copy (no Eq/Hash), so
-            // set membership is a field-wise linear scan over the expected set.
             let expected: Vec<LpmKey<[u64; 2]>> = expected
                 .into_iter()
                 .map(|network: &IpNetwork| cidr_key(*network))
@@ -496,16 +481,18 @@ impl XdpApplier for AyaXdpApplier {
                     }
                 }
                 for key in &expected {
-                    // Reconciliation deliberately restores CIDRs as permanent
-                    // kernel entries. Userspace TTL scheduling remains the
-                    // authority and removes the entry when its TTL expires.
                     trie.insert(key, 1u8, 0)?;
                 }
                 Ok(())
             })?;
         }
 
-        Ok(ReconciliationState::default())
+        Ok(ReconciliationState {
+            last_wal_lsn: 0,
+            pending_blocks: Vec::new(),
+            pending_unblocks: Vec::new(),
+            evicted_count,
+        })
     }
 
     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {

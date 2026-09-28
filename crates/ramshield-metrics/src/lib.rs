@@ -602,9 +602,22 @@ impl Metrics {
         self.wal_segments_pruned_total
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Add multiple WAL segments pruned at once (retention batch).
+    pub fn inc_wal_segments_pruned_n(&self, n: u64) {
+        if n > 0 {
+            self.wal_segments_pruned_total
+                .fetch_add(n, Ordering::Relaxed);
+        }
+    }
     /// Record an XDP eviction (LRU map pressure).
     pub fn inc_xdp_evictions(&self) {
         self.xdp_evictions_total.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Record multiple XDP evictions at once (post-reconcile batch).
+    pub fn inc_xdp_evictions_n(&self, n: u64) {
+        if n > 0 {
+            self.xdp_evictions_total.fetch_add(n, Ordering::Relaxed);
+        }
     }
     /// Record a dashboard login lockout event.
     pub fn inc_auth_lockout(&self) {

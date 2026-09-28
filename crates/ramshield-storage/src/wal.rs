@@ -108,6 +108,9 @@ pub struct Wal {
     /// Last checkpoint LSN. Retention may delete a segment only when every
     /// record in it is below this boundary. 0 = no checkpoint yet.
     ckpt_lsn: AtomicU64,
+    /// Cumulative segments deleted by retention. Enforcement scrapes via
+    /// `take_segments_pruned` so storage stays free of a metrics dep.
+    segments_pruned: AtomicU64,
 }
 
 struct Inner {
@@ -148,6 +151,8 @@ impl Wal {
         };
 
         enforce_retention_with_ckpt(dir, retention_max, ckpt_lsn);
+    // Don't accumulate into segments_pruned here — Wal not yet constructed.
+    // Open is a one-time event; the full retention run happens at startup once.
 
         // Discover highest segment to resume from
         let max_seg = discover_max_seg(dir);
@@ -189,6 +194,7 @@ impl Wal {
             lsn_counter: AtomicU64::new(start_lsn),
             next_sync_due_ns: AtomicU64::new(0),
             ckpt_lsn: AtomicU64::new(ckpt_lsn),
+            segments_pruned: AtomicU64::new(0),
         })
     }
 
@@ -320,14 +326,23 @@ impl Wal {
         // rotation (appends add ≤seg_max to one file), so scanning only on
         // rotation is both cheaper and sufficient.
         if needs_dir_sync && self.retention_max > 0 {
-            enforce_retention_with_ckpt(
+            let n = enforce_retention_with_ckpt(
                 &self.base_dir,
                 self.retention_max,
                 self.ckpt_lsn.load(Ordering::SeqCst),
             );
+            if n > 0 {
+                self.segments_pruned.fetch_add(n, Ordering::Relaxed);
+            }
         }
 
         Ok(lsn)
+    }
+
+    /// Returns the count of segments pruned since last call (cumulative).
+    /// Storage crate avoids a metrics dep; the enforcement actor scrapes this.
+    pub fn take_segments_pruned(&self) -> u64 {
+        self.segments_pruned.swap(0, Ordering::Relaxed)
     }
 
     /// Write an atomic checkpoint: flush WAL, write manifest, fsync both + dir.
@@ -787,13 +802,13 @@ fn max_lsn_in_seg(path: &PathBuf) -> Option<u64> {
 /// Delete oldest segments until total .rshw bytes fit the cap, but only delete
 /// segments whose max LSN < safe_lsn. Never touches the newest segment.
 /// Also purges fully-corrupt/empty segments (max_lsn=None) regardless of cap.
-/// Best-effort: delete failures are logged, not fatal.
-fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
+/// Returns number of segments deleted. Best-effort: delete failures are logged, not fatal.
+fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) -> u64 {
     if max_bytes == 0 {
-        return;
+        return 0;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
+        return 0;
     };
     let mut segs: Vec<(u64, u64, Option<u64>)> = rd // (seg_idx, size, max_lsn)
         .filter_map(|e| e.ok())
@@ -819,13 +834,17 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
 
     // First pass: purge fully-corrupt/empty segments (max_lsn=None) regardless
     // of cap pressure — they carry no replayable data.
+    let mut deleted: u64 = 0;
     for &(idx, _sz, mlsn) in &segs[..segs.len().saturating_sub(1)] {
         if mlsn.is_some() {
             continue;
         }
         let path = seg_path(dir, idx);
         match std::fs::remove_file(&path) {
-            Ok(()) => info!("WAL retention: purged corrupt/empty seg {:?}", path),
+            Ok(()) => {
+                info!("WAL retention: purged corrupt/empty seg {:?}", path);
+                deleted += 1;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // raced; fine
             Err(e) => warn!("WAL retention purge {:?} failed: {}", path, e),
         }
@@ -833,7 +852,7 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
 
     let total: u64 = segs.iter().map(|&(_, sz, _)| sz).sum();
     if total <= max_bytes {
-        return;
+        return deleted;
     }
 
     if safe_lsn == 0 {
@@ -842,7 +861,7 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
              cannot safely prune segments",
             total
         );
-        return; // nothing is safe to delete without a checkpoint boundary
+        return deleted; // nothing is safe to delete without a checkpoint boundary
     }
 
     let mut over = total - max_bytes;
@@ -862,11 +881,13 @@ fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) {
                     "WAL retention: deleted {:?} ({} bytes, max_lsn={} < safe_lsn={})",
                     path, sz, max_lsn, safe_lsn
                 );
+                deleted += 1;
                 over = over.saturating_sub(sz);
             }
             Err(e) => warn!("WAL retention delete {:?} failed: {}", path, e),
         }
     }
+    deleted
 }
 
 #[cfg(test)]

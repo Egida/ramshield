@@ -348,6 +348,7 @@ async fn login_submit(
             "dashboard login locked out from {ip} ({}+ failures)",
             auth.max_login_attempts
         );
+        auth.metrics.inc_auth_lockout();
         return (StatusCode::TOO_MANY_REQUESTS, "locked").into_response();
     }
     // Argon2 verify burns ~50-100 ms of CPU. Inline on an async handler it
@@ -362,6 +363,8 @@ async fn login_submit(
     } else {
         None
     };
+    // Qual metric: time the Argon2 verify to surface overload (auth_verification_wait_ms).
+    let verify_start = Instant::now();
     let blocking_auth = auth.clone();
     let password = form.password.clone();
     let verified = tokio::task::spawn_blocking(move || {
@@ -370,6 +373,8 @@ async fn login_submit(
     })
     .await
     .unwrap_or(None);
+    let elapsed = verify_start.elapsed();
+    auth.metrics.set_auth_verification_wait_ms(elapsed.as_millis() as u64);
     match verified {
         Some(token) => {
             auth.register_session(&token);
