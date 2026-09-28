@@ -374,7 +374,8 @@ async fn login_submit(
     .await
     .unwrap_or(None);
     let elapsed = verify_start.elapsed();
-    auth.metrics.set_auth_verification_wait_ms(elapsed.as_millis() as u64);
+    auth.metrics
+        .set_auth_verification_wait_ms(elapsed.as_millis() as u64);
     match verified {
         Some(token) => {
             auth.register_session(&token);

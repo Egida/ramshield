@@ -151,8 +151,8 @@ impl Wal {
         };
 
         enforce_retention_with_ckpt(dir, retention_max, ckpt_lsn);
-    // Don't accumulate into segments_pruned here — Wal not yet constructed.
-    // Open is a one-time event; the full retention run happens at startup once.
+        // Don't accumulate into segments_pruned here — Wal not yet constructed.
+        // Open is a one-time event; the full retention run happens at startup once.
 
         // Discover highest segment to resume from
         let max_seg = discover_max_seg(dir);
