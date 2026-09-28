@@ -44,15 +44,16 @@ pub struct Engine {
     detection: std::sync::Mutex<Option<Arc<crate::detection::DetectionEngine>>>,
     /// Startup signal: boot_pipeline sends Ok(()) on success, Err(err) on failure.
     /// main blocks on this to learn whether the process should start serving or exit.
-    startup_tx: mpsc::Sender<std::io::Result<()>>,
-    startup_rx: std::sync::Mutex<Option<mpsc::Receiver<std::io::Result<()>>>>,
+    /// oneshot: sync send (usable from rt.block_on), async recv. Exactly-once.
+    startup_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
+    startup_rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>>,
 }
 
 impl Engine {
     pub fn new(cfg: Config, store: Arc<Store>, metrics: Arc<Metrics>) -> Self {
         let (enforcement_tx, enforcement_rx) = mpsc::channel(8192);
         let (shutdown_tx, _) = watch::channel(false);
-        let (startup_tx, startup_rx) = mpsc::channel::<std::io::Result<()>>(1);
+        let (startup_tx, startup_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
         Self {
             config: Arc::new(ArcSwap::from_pointee(cfg)),
             store,
@@ -65,7 +66,7 @@ impl Engine {
             pipeline_ready: Arc::new(AtomicBool::new(false)),
             pipeline_failed: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
-            startup_tx,
+            startup_tx: std::sync::Mutex::new(Some(startup_tx)),
             startup_rx: std::sync::Mutex::new(Some(startup_rx)),
         }
     }
@@ -110,8 +111,13 @@ impl Engine {
                         }
                     }
                     // Send startup result so main can await readiness/failure.
-                    // Channel capacity is 1 — send always succeeds (first call).
-                    drop(self.startup_tx.send(result));
+                    // oneshot::send is sync (no future to await); take() makes it exactly-once.
+                    let mut tx_guard = self.startup_tx.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(tx) = tx_guard.take() {
+                        // oneshot::send is sync — stores the value immediately.
+                        // Receiver::await picks it up in wait_startup.
+                        tx.send(result).ok();
+                    }
                 });
             })
     }
@@ -132,7 +138,7 @@ impl Engine {
     /// Block caller until boot_pipeline signals Ok or Err.
     /// Call once, after start_async. Returns the pipeline result.
     pub async fn wait_startup(&self) -> std::io::Result<()> {
-        let mut rx = self
+        let rx = self
             .startup_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -140,9 +146,8 @@ impl Engine {
             .ok_or_else(|| {
                 std::io::Error::other("wait_startup called multiple times or never started")
             })?;
-        rx.recv().await.ok_or_else(|| {
-            std::io::Error::other("startup channel closed before pipeline finished")
-        })?
+        rx.await
+            .map_err(|_| std::io::Error::other("startup channel closed before pipeline finished"))?
     }
 
     /// Tests construct Engine without boot_pipeline. Production never calls this.
@@ -666,6 +671,14 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // boot_pipeline blocks in select! below until shutdown, so this is the
     // one place readiness can be observed while the daemon is live.
     engine.pipeline_ready.store(true, Ordering::Release);
+    // Signal startup readiness to main BEFORE blocking on shutdown select!.
+    // boot_pipeline only returns when shutdown fires, so we send here.
+    {
+        let mut startup_tx_guard = engine.startup_tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = startup_tx_guard.take() {
+            tx.send(Ok(())).ok();
+        }
+    }
 
     // Periodic checkpoint loop: snapshot state every CHECKPOINT_INTERVAL.
     if let Some(wal) = pipeline_wal {
