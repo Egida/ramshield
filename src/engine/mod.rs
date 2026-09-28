@@ -549,14 +549,14 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     tracing::error!("WAL CIDR replay: {}", e);
                     vec![]
                 });
-                if restored_cidrs.len() > 0 {
+                if !restored_cidrs.is_empty() {
                     info!("WAL replay: restored {} CIDR blocks", restored_cidrs.len());
                 }
                 enforcement = enforcement.with_wal(Arc::clone(&wal));
                 // Re-arm TTL ring and CIDR index with restored state.
                 // Must happen AFTER enforcement.with_wal() so the enforcement
                 // service is fully wired before scheduling expirations.
-                if restored_ttls.len() > 0 || restored_cidrs.len() > 0 {
+                if !restored_ttls.is_empty() {
                     enforcement.restore_expirations(restored_ttls);
                     enforcement.restore_cidr_blocks(restored_cidrs);
                 }

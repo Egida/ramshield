@@ -391,10 +391,11 @@ impl Wal {
     /// Complete a checkpoint: append the Checkpoint record and atomically
     /// publish MANIFEST binding both LSNs.
     ///
-    /// - `checkpoint_lsn` = the LSN of the appended Checkpoint record (used
-    ///   by retention as the "everything below this is safe to prune" line).
-    /// - `snapshot_lsn` = the boundary the snapshot captures (recovery
-    ///   replays from snapshot_lsn + 1).
+    /// - `checkpoint_lsn` = the LSN of the appended Checkpoint record
+    ///   (retention: everything below this LSN is safe to prune).
+    /// - `snapshot_lsn` = the boundary the snapshot captures
+    ///   (recovery replays from snapshot_lsn + 1).
+    ///
     /// Call after `begin_checkpoint()` + snapshot write + fsync.
     pub fn finish_checkpoint(&self, boundary_lsn: u64, snapshot_path: &str) -> Result<u64> {
         let now_ns = std::time::SystemTime::now()
