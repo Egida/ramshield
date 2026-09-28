@@ -4,7 +4,21 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
-## [0.3.1] - unreleased
+## [0.3.2] - unreleased
+
+### Fixed
+- Storage concurrency: blocked_set/blocked_count updates moved inside DashMap shard lock (no race window between unlock and index update).
+- Startup lifecycle: main awaits engine boot pipeline result via mpsc channel — half-alive daemon eliminated.
+- Config hardening: worker_threads validated (≥1, ≤4096, default = available_parallelism()). XDP mode validated against exhaustive set (skb/drv/native).
+- Removed dead code: `apply_growth` (superseded by lock-safe `apply_growth_size_only`).
+
+### Tests
+- `tests/recovery_restart.rs`: 5 restart replay scenarios (permanent IP, active TTL, expired, CIDR, tail replay).
+- `assert_store_invariants`: cfg(test) invariant checker verifying blocked_set/blocked_count/ttl_entries vs authoritative state.
+- `stress_block_unblock_concurrent`: 8 threads × 500 random block/unblock/remove cycles.
+- Invariant checker called from 5 existing tests.
+
+## [0.3.1] - 2026-09-28
 
 ### Fixed
 - XDP failures no longer report healthy kernel protection. `allow_inband_fallback` (default `false`) controls whether XDP attach failure blocks startup vs degrades gracefully.
