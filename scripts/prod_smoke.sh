@@ -47,7 +47,7 @@ SMOKE_CFG="${SMOKE_CFG:-/tmp/ramshield-prod-smoke.toml}"
 DASH_PORT="${DASH_ADDR##*:}"
 sed -e "s|^[[:space:]]*tcp_addr = .*|tcp_addr = \"127.0.0.1:$IPC_PORT\"|" \
     -e "s|^[[:space:]]*http_addr = .*|http_addr = \"127.0.0.1:$DASH_PORT\"|" \
-    -e "s|^[[:space:]]*dir = \"/tmp/ramshield_wal\"|dir = \"$WAL_DIR\"|" \
+    -e "s|^[[:space:]]*dir = \".*\"|dir = \"$WAL_DIR\"|" \
     "$CFG" > "$SMOKE_CFG"
 
 echo "→ booting binary with $SMOKE_CFG (WAL=$WAL_DIR)"
