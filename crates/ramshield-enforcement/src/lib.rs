@@ -868,8 +868,16 @@ fn reason_to_block_reason(reason: &str) -> BlockReason {
 /// expiry card never expire; expirations/buckets are empty at boot).
 /// Call before `run()` so the XDP reconciliation inside it picks the
 /// recovered state up.
-pub fn replay_wal_into_store(store: &Arc<Store>, wal: &Wal) -> anyhow::Result<Vec<(IpAddr, u64)>> {
-    let entries = Wal::replay(&wal_dir(wal))?;
+pub fn replay_wal_into_store(
+    store: &Arc<Store>,
+    wal: &Wal,
+    min_lsn: u64,
+) -> anyhow::Result<Vec<(IpAddr, u64)>> {
+    let entries = if min_lsn > 0 {
+        wal.replay_from(min_lsn)?
+    } else {
+        Wal::replay(&wal_dir(wal))?
+    };
     let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -960,13 +968,22 @@ pub fn replay_wal_into_store(store: &Arc<Store>, wal: &Wal) -> anyhow::Result<Ve
 }
 
 pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
+    replay_wal_cidrs_from(wal, 0)
+}
+
+pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
     let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let mut blocked: std::collections::HashMap<IpNetwork, (u64, Option<u64>)> =
         std::collections::HashMap::new();
-    for entry in Wal::replay(&wal_dir(wal))? {
+    let entries = if min_lsn > 0 {
+        wal.replay_from(min_lsn)?
+    } else {
+        Wal::replay(&wal_dir(wal))?
+    };
+    for entry in entries {
         match entry {
             WalEntry::BlockCidr {
                 cidr,
@@ -1524,7 +1541,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let restored = replay_wal_into_store(&fresh, &wal).unwrap();
+        let restored = replay_wal_into_store(&fresh, &wal, 0).unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1, 3600, "restored block must carry full TTL");
         match fresh.get(&target) {
@@ -1560,7 +1577,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(replay_wal_into_store(&fresh, &wal).unwrap().len(), 0);
+        assert_eq!(replay_wal_into_store(&fresh, &wal, 0).unwrap().len(), 0);
         assert!(fresh.get(&target).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1601,7 +1618,7 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(replay_wal_into_store(&fresh, &wal2).unwrap().len(), 0);
+        assert_eq!(replay_wal_into_store(&fresh, &wal2, 0).unwrap().len(), 0);
         assert!(
             fresh.get(&"10.79.0.7".parse().unwrap()).is_none(),
             "expired block must not resurrect"
@@ -1633,7 +1650,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let pairs = replay_wal_into_store(&fresh, &wal).unwrap();
+        let pairs = replay_wal_into_store(&fresh, &wal, 0).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].1, 3600, "block written seconds ago keeps full TTL");
 
@@ -1710,8 +1727,8 @@ mod tests {
             .unwrap(),
         );
         let a = Arc::new(Store::new(16));
-        let first = replay_wal_into_store(&a, &wal).unwrap();
-        let second = replay_wal_into_store(&a, &wal).unwrap();
+        let first = replay_wal_into_store(&a, &wal, 0).unwrap();
+        let second = replay_wal_into_store(&a, &wal, 0).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1);
         assert_eq!(first[0].0, second[0].0);

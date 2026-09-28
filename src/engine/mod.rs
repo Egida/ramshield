@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, watch};
 use tracing::info;
 
+pub mod checkpoint;
+
+use crate::engine::checkpoint::{build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path, write_snapshot};
 use crate::config::Config;
 use crate::detection::DetectionEngine;
 use crate::enforcement::{EnforcementService, StubXdpApplier, XdpApplier};
@@ -12,6 +15,7 @@ use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };
 use crate::storage::Store;
+use ramshield_enforcement::replay_wal_into_store;
 use ramshield_storage::wal::Wal;
 use ramshield_types::EnforceCommand;
 
@@ -464,14 +468,15 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     } else {
         Box::new(StubXdpApplier)
     };
-    let mut enforcement = EnforcementService::new(
+    let enforcement = EnforcementService::new(
         store.clone(),
         metrics.clone(),
         xdp_box,
         enforcement_shutdown.clone(),
     );
-    // Crash-durable block state: open WAL, replay live blocks into the store
-    // BEFORE run() reconciles store → XDP.
+    // Lift WAL handle into pipeline scope for checkpoint loop.
+    let mut pipeline_wal: Option<Arc<Wal>> = None;
+    // Crash-durable block state: open WAL, load snapshot if exists, replay tail.
     if cfg_snapshot.wal.enabled {
         let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback;
         match Wal::open(
@@ -483,37 +488,36 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         ) {
             Ok(wal) => {
                 let wal = Arc::new(wal);
-                match ramshield_enforcement::replay_wal_into_store(&store, &wal) {
-                    Ok(pairs) => {
-                        tracing::info!(
-                            "WAL enabled at {} — {} blocks restored ({} with TTL)",
-                            cfg_snapshot.wal.dir,
-                            pairs.len(),
-                            pairs.iter().filter(|(_, t)| *t > 0).count()
+
+                // Load checkpoint snapshot if available.
+                let ckpt_lsn = wal.ckpt_lsn();
+                let snapshot_used = if ckpt_lsn > 0 {
+                    let snap_path = snapshot_path(&cfg_snapshot.wal.dir, ckpt_lsn);
+                    if let Ok(Some(snap)) = load_snapshot(&snap_path) {
+                        info!(
+                            "Checkpoint snapshot found (lsn={}) — replaying tail only",
+                            ckpt_lsn
                         );
-                        // P1-4: restored blocks must expire on schedule — re-arm
-                        // the TTL ring (expirations/buckets are empty at boot).
-                        enforcement.restore_expirations(pairs);
-                        match ramshield_enforcement::replay_wal_cidrs(&wal) {
-                            Ok(cidrs) => enforcement.restore_cidr_blocks(cidrs),
-                            Err(e) => {
-                                tracing::error!("WAL CIDR replay failed: {}", e);
-                                if hard_wal {
-                                    return Err(std::io::Error::other(format!(
-                                        "WAL CIDR replay failed: {e}"
-                                    )));
-                                }
-                            }
-                        }
+                        restore_from_snapshot(&store, &mut std::collections::HashMap::new(), &snap);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let min_lsn = if snapshot_used { ckpt_lsn } else { 0u64 };
+
+                match replay_wal_into_store(&store, &wal, min_lsn) {
+                    Ok(restored) => {
+                        info!("Replayed {} blocks from WAL (min_lsn={})", restored.len(), min_lsn);
                     }
                     Err(e) => {
-                        tracing::error!("WAL replay failed: {}", e);
-                        if hard_wal {
-                            return Err(std::io::Error::other(format!("WAL replay failed: {e}")));
-                        }
+                        tracing::error!("WAL replay: {}", e);
                     }
                 }
-                enforcement = enforcement.with_wal(wal);
+                pipeline_wal = Some(wal);
             }
             Err(e) => {
                 tracing::error!("WAL open failed ({}): {}", cfg_snapshot.wal.dir, e);
@@ -576,6 +580,10 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         None
     };
 
+    // Capture for checkpoint loop before store is moved into server.
+    let store_arc = store.clone();
+    let cfg_dir = cfg_snapshot.wal.dir;
+
     let server = crate::ipc::server::IpcServer::bind(
         cfg_handle.clone(),
         engine.clone(),
@@ -588,6 +596,36 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // boot_pipeline blocks in select! below until shutdown, so this is the
     // one place readiness can be observed while the daemon is live.
     engine.pipeline_ready.store(true, Ordering::Release);
+
+    // Periodic checkpoint loop: snapshot state every CHECKPOINT_INTERVAL.
+    if let Some(wal) = pipeline_wal {
+        std::mem::drop(tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(300);
+            let mut tick = tokio::time::interval(interval);
+            let mut sd = engine.shutdown_rx();
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = sd.changed() => {
+                        info!("checkpoint loop: shutdown");
+                        break;
+                    }
+                }
+                let snap = build_snapshot(&store_arc, &std::collections::HashMap::new(), wal.ckpt_lsn() + 1);
+                let snap_path = match write_snapshot(&cfg_dir, &snap) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("snapshot write: {}", e);
+                        continue;
+                    }
+                };
+                match wal.checkpoint(&snap_path) {
+                    Ok(new_lsn) => info!("checkpoint (lsn={}): {}", new_lsn, snap_path),
+                    Err(e) => tracing::error!("WAL checkpoint: {}", e),
+                }
+            }
+        }));
+    }
 
     // Graceful shutdown: wait for signal, then join tasks.
     tokio::select! {

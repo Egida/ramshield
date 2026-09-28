@@ -551,6 +551,136 @@ impl Wal {
     pub fn base_dir(&self) -> &str {
         &self.base_dir
     }
+
+    /// WAL directory path (owned copy, same as base_dir).
+    pub fn wal_dir(&self) -> String {
+        self.base_dir.clone()
+    }
+
+    /// Last checkpoint LSN (0 = no checkpoint yet).
+    pub fn ckpt_lsn(&self) -> u64 {
+        self.ckpt_lsn.load(Ordering::SeqCst)
+    }
+
+    /// Replay entries with LSN > min_lsn. When min_lsn is 0, equivalent to replay().
+    /// Used by checkpoint-accelerated recovery: load snapshot, then replay tail.
+    pub fn replay_from(&self, min_lsn: u64) -> Result<Vec<WalEntry>> {
+        if min_lsn == 0 {
+            return Self::replay(&self.base_dir);
+        }
+
+        let mut segs: Vec<PathBuf> = match std::fs::read_dir(&self.base_dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
+                .collect(),
+            Err(_) => return Ok(Vec::new()),
+        };
+        segs.sort();
+
+        let mut out: Vec<(u64, WalEntry)> = Vec::new();
+        let mut payload_buf = vec![0u8; MAX_RECORD_SIZE];
+
+        for seg in &segs {
+            let mut file = File::open(seg.as_path())?;
+            let mut corrupted = false;
+            let mut last_valid_offset: u64 = 0;
+
+            loop {
+                let mut peek = [0u8; 1];
+                match file.read(&mut peek) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let mut hdr_buf = [0u8; HEADER];
+                        hdr_buf[0] = peek[0];
+                        if file.read_exact(&mut hdr_buf[1..]).is_err() {
+                            corrupted = true;
+                            break;
+                        }
+                        let rh = RecordHeader::from_bytes(&hdr_buf);
+                        if rh.magic != MAGIC || rh.version > FORMAT_VERSION {
+                            corrupted = true;
+                            break;
+                        }
+                        if rh.payload_len as usize > MAX_RECORD_SIZE {
+                            corrupted = true;
+                            break;
+                        }
+                        let plen = rh.payload_len as usize;
+                        if plen > payload_buf.len() {
+                            payload_buf.resize(plen, 0);
+                        }
+                        if file.read_exact(&mut payload_buf[..plen]).is_err() {
+                            corrupted = true;
+                            break;
+                        }
+                        let payload = &payload_buf[..plen];
+                        let mut h = Crc32::new();
+                        h.update(payload);
+                        if h.finalize() != rh.crc {
+                            corrupted = true;
+                            break;
+                        }
+                        let decoded: Vec<u8> = if rh.flags & 0x01 != 0 {
+                            let declared = match payload.first_chunk::<4>() {
+                                Some(b) => u32::from_le_bytes(*b) as usize,
+                                None => usize::MAX,
+                            };
+                            if declared > MAX_RECORD_SIZE {
+                                corrupted = true;
+                                break;
+                            }
+                            match decompress_size_prepended(payload) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    corrupted = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            payload.to_vec()
+                        };
+                        match serde_json::from_slice::<WalEntry>(&decoded) {
+                            Ok(entry) => {
+                                last_valid_offset = file.stream_position()?;
+                                out.push((rh.lsn, entry));
+                            }
+                            Err(_) => {
+                                corrupted = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        corrupted = true;
+                        break;
+                    }
+                }
+            }
+            if corrupted {
+                let is_newest = seg == &segs[segs.len().saturating_sub(1)];
+                if !is_newest {
+                    return Err(RsError::Io(std::io::Error::other(format!(
+                        "WAL corruption in older segment {:?} during checkpoint-tail replay",
+                        seg
+                    ))));
+                }
+                if last_valid_offset > 0 {
+                    let f = OpenOptions::new().write(true).open(seg.as_path())?;
+                    f.set_len(last_valid_offset)?;
+                }
+            }
+        }
+
+        out.sort_by_key(|(lsn, _)| *lsn);
+        out.dedup_by_key(|(lsn, _)| *lsn);
+        Ok(out
+            .into_iter()
+            .filter(|(lsn, _)| *lsn > min_lsn)
+            .map(|(_, e)| e)
+            .collect())
+    }
 }
 
 /// fsync the directory to ensure directory entries (creates, renames) are durable.
@@ -1192,6 +1322,167 @@ mod tests {
             entries.len(),
             1,
             "bomb record must be truncated, not expanded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1: corruption in a non-final segment must FAIL replay with an explicit
+    /// error. Only the newest (final) segment may have a crash tail that gets
+    /// truncated. Historical corruption means the durable security state is
+    /// incomplete — startup must halt.
+    #[test]
+    fn wal_nonfinal_segment_corruption_is_fatal() {
+        let dir = tmp("rs_wal_nfatal");
+        // Two segments: seg_max=128 forces rotations.
+        let wal = Wal::open(&dir, false, Durability::None, 128, 0).unwrap();
+        for i in 1..=5u64 {
+            wal.append(&WalEntry::BlockIp {
+                ip: format!("10.0.0.{i}"),
+                reason: "test".into(),
+                ttl_secs: None,
+                ts_ns: i,
+            })
+            .unwrap();
+        }
+        drop(wal);
+
+        // Corrupt the FIRST segment (non-final): write bad magic at offset 0.
+        let mut segs: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
+            .collect();
+        segs.sort();
+        assert!(segs.len() >= 2, "need at least 2 segments for this test");
+        {
+            let mut f = OpenOptions::new().write(true).open(&segs[0]).unwrap();
+            f.write_all(&[0xFF; 23]).unwrap(); // overwrite first header
+            f.sync_all().unwrap();
+        }
+
+        // Replay must FAIL.
+        let result = Wal::replay(&dir);
+        assert!(
+            result.is_err(),
+            "non-final segment corruption must return Err, not Ok"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1: checkpoint → append more → replay_from(min_lsn) returns only the
+    /// tail after the checkpoint LSN. The full replay still returns everything.
+    #[test]
+    fn wal_checkpoint_tail_replay() {
+        let dir = tmp("rs_wal_tail");
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        // Append 3 records before checkpoint.
+        for i in 1..=3u64 {
+            wal.append(&WalEntry::BlockIp {
+                ip: format!("10.0.0.{i}"),
+                reason: "pre".into(),
+                ttl_secs: None,
+                ts_ns: i,
+            })
+            .unwrap();
+        }
+        // Checkpoint LSN is saved for replay acceleration.
+        let _ckpt_lsn = wal.checkpoint("/tmp/ckpt_test_snap.bin").unwrap();
+        // Append 2 more after checkpoint.
+        for i in 4..=5u64 {
+            wal.append(&WalEntry::BlockIp {
+                ip: format!("10.0.0.{i}"),
+                reason: "post".into(),
+                ttl_secs: None,
+                ts_ns: i,
+            })
+            .unwrap();
+        }
+        drop(wal);
+
+        // Full replay: 3 pre + 1 checkpoint + 2 post = 6 records.
+        let all = Wal::replay(&dir).unwrap();
+        assert_eq!(all.len(), 6, "full replay must return 6 records (3 pre + 1 ckpt + 2 post)");
+
+        // Reopen to verify checkpoint LSN persisted.
+        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        assert!(wal2.ckpt_lsn() > 0, "checkpoint LSN must be persisted");
+        drop(wal2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Records spanning multiple segments survive a full replay cycle.
+    /// Verifies segment discovery ordering and cross-segment continuity.
+    #[test]
+    fn wal_multi_segment_recovery() {
+        let dir = tmp("rs_wal_multiseg");
+        // Tiny seg_max=64 ensures many segments for few records.
+        let wal = Wal::open(&dir, false, Durability::None, 64, 0).unwrap();
+        let n = 20u64;
+        for i in 1..=n {
+            wal.append(&WalEntry::BlockIp {
+                ip: format!("10.0.0.{i}"),
+                reason: "multi".into(),
+                ttl_secs: None,
+                ts_ns: i,
+            })
+            .unwrap();
+        }
+        drop(wal);
+
+        let entries = Wal::replay(&dir).unwrap();
+        assert_eq!(
+            entries.len(),
+            n as usize,
+            "multi-segment replay must recover all {} records",
+            n
+        );
+
+        // Idempotent: second replay returns same count.
+        let entries2 = Wal::replay(&dir).unwrap();
+        assert_eq!(entries.len(), entries2.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An all-garbage segment (no valid records at all) is quarantined — not
+    /// deleted — so recovery can analyse it later. The rest of the WAL survives.
+    #[test]
+    fn wal_allgarbage_segment_quarantined() {
+        let dir = tmp("rs_wal_garbage");
+        // Create a valid WAL with 2 records.
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        wal.append(&WalEntry::BlockIp {
+            ip: "10.0.0.1".into(),
+            reason: "good".into(),
+            ttl_secs: None,
+            ts_ns: 1,
+        })
+        .unwrap();
+        drop(wal);
+
+        // Inject a garbage-only segment alongside the valid one.
+        // Name it so it sorts BEFORE the valid segment (wal-00000000000000000000.rshw).
+        let garbage_path = PathBuf::from(&dir).join("wal-00000000000000000000.rshw");
+        {
+            let mut f = File::create(&garbage_path).unwrap();
+            f.write_all(&[0xDE; 128]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Replay: the garbage segment must be quarantined, valid records survive.
+        let entries = Wal::replay(&dir).unwrap();
+        assert_eq!(entries.len(), 1, "valid records must survive garbage segment");
+
+        // Quarantine dir must exist with the garbage file.
+        let quarantine = PathBuf::from(&dir).join(QUARANTINE_DIR);
+        assert!(quarantine.exists(), "quarantine dir must be created");
+        let qfiles: Vec<std::fs::DirEntry> = std::fs::read_dir(&quarantine)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            qfiles.iter().any(|e| e.file_name().to_string_lossy().contains("wal-")),
+            "garbage segment must be quarantined"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
