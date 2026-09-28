@@ -1402,7 +1402,11 @@ mod tests {
 
         // Full replay: 3 pre + 1 checkpoint + 2 post = 6 records.
         let all = Wal::replay(&dir).unwrap();
-        assert_eq!(all.len(), 6, "full replay must return 6 records (3 pre + 1 ckpt + 2 post)");
+        assert_eq!(
+            all.len(),
+            6,
+            "full replay must return 6 records (3 pre + 1 ckpt + 2 post)"
+        );
 
         // Reopen to verify checkpoint LSN persisted.
         let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
@@ -1471,7 +1475,11 @@ mod tests {
 
         // Replay: the garbage segment must be quarantined, valid records survive.
         let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 1, "valid records must survive garbage segment");
+        assert_eq!(
+            entries.len(),
+            1,
+            "valid records must survive garbage segment"
+        );
 
         // Quarantine dir must exist with the garbage file.
         let quarantine = PathBuf::from(&dir).join(QUARANTINE_DIR);
@@ -1481,7 +1489,9 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert!(
-            qfiles.iter().any(|e| e.file_name().to_string_lossy().contains("wal-")),
+            qfiles
+                .iter()
+                .any(|e| e.file_name().to_string_lossy().contains("wal-")),
             "garbage segment must be quarantined"
         );
         let _ = std::fs::remove_dir_all(&dir);

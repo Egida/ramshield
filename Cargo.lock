@@ -1224,6 +1224,7 @@ dependencies = [
  "crossbeam-queue",
  "dashmap",
  "lz4_flex",
+ "proptest",
  "ramshield-types",
  "serde",
  "serde_json",

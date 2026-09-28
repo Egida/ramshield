@@ -6,10 +6,12 @@ use tracing::info;
 
 pub mod checkpoint;
 
-use crate::engine::checkpoint::{build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path, write_snapshot};
 use crate::config::Config;
 use crate::detection::DetectionEngine;
 use crate::enforcement::{EnforcementService, StubXdpApplier, XdpApplier};
+use crate::engine::checkpoint::{
+    build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path, write_snapshot,
+};
 use crate::forecasting::Forecaster;
 use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
@@ -511,7 +513,11 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
 
                 match replay_wal_into_store(&store, &wal, min_lsn) {
                     Ok(restored) => {
-                        info!("Replayed {} blocks from WAL (min_lsn={})", restored.len(), min_lsn);
+                        info!(
+                            "Replayed {} blocks from WAL (min_lsn={})",
+                            restored.len(),
+                            min_lsn
+                        );
                     }
                     Err(e) => {
                         tracing::error!("WAL replay: {}", e);
@@ -611,7 +617,11 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         break;
                     }
                 }
-                let snap = build_snapshot(&store_arc, &std::collections::HashMap::new(), wal.ckpt_lsn() + 1);
+                let snap = build_snapshot(
+                    &store_arc,
+                    &std::collections::HashMap::new(),
+                    wal.ckpt_lsn() + 1,
+                );
                 let snap_path = match write_snapshot(&cfg_dir, &snap) {
                     Ok(p) => p,
                     Err(e) => {

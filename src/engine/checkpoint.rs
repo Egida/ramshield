@@ -2,7 +2,9 @@
 //! Written by the engine on a periodic loop; loaded at boot to skip
 //! replaying historical WAL entries before the checkpoint boundary.
 
-use ramshield_storage::{Store, IpRecord as StorageIpRecord, BlockState as StorageBlockState, Value};
+use ramshield_storage::{
+    BlockState as StorageBlockState, IpRecord as StorageIpRecord, Store, Value,
+};
 use ramshield_types::{BlockReason, IpNetwork, Result, RsError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,8 +45,7 @@ pub fn snapshot_path(wal_dir: &str, lsn: u64) -> String {
 pub fn write_snapshot(dir: &str, snap: &CheckpointSnapshot) -> Result<String> {
     let path = snapshot_path(dir, snap.lsn);
     let tmp = format!("{path}.tmp");
-    let json = serde_json::to_vec(snap)
-        .map_err(|e| RsError::Serde(e.to_string()))?;
+    let json = serde_json::to_vec(snap).map_err(|e| RsError::Serde(e.to_string()))?;
     {
         let mut f = File::create(&tmp)?;
         f.write_all(&json)?;
@@ -116,10 +117,8 @@ pub fn build_snapshot(
             })
         })
         .collect();
-    let active_cidrs: Vec<(IpNetwork, u64)> = cidrs
-        .iter()
-        .map(|(net, secs)| (*net, *secs))
-        .collect();
+    let active_cidrs: Vec<(IpNetwork, u64)> =
+        cidrs.iter().map(|(net, secs)| (*net, *secs)).collect();
     CheckpointSnapshot {
         lsn,
         ts_ns: now_ns,
@@ -154,16 +153,12 @@ pub fn restore_from_snapshot(
             proto_fingerprint: 0,
             threat_score: 0.0,
             block_state: StorageBlockState::Blocked {
-                reason: BlockReason::from_reason_str(&snap_ip.reason).unwrap_or(BlockReason::ManualBlock),
+                reason: BlockReason::from_reason_str(&snap_ip.reason)
+                    .unwrap_or(BlockReason::ManualBlock),
                 since_ns: snap_ip.since_ns,
             },
         };
-        let _ = store.insert(
-            snap_ip.ip,
-            Value::IpRecord(rec),
-            snap_ip.ttl_secs,
-            ram_lim,
-        );
+        let _ = store.insert(snap_ip.ip, Value::IpRecord(rec), snap_ip.ttl_secs, ram_lim);
     }
     for (cidr, ttl) in snap.active_cidrs.iter() {
         cidrs.insert(*cidr, *ttl);

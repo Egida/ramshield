@@ -26,6 +26,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - `scripts/upgrade_qualification.sh`: 0.3.0→0.3.1 upgrade and rollback test.
 - `scripts/review_pipeline.sh`: added config-contract and release-metadata gates.
 - `scripts/prod_smoke.sh`: documented full coverage matrix (review 31 Batch 16).
+- `scripts/xdp_qual_matrix.sh`: static ELF + contract matrix; `--live` attach/detach is host-gated.
+- `scripts/cap_lifecycle_check.sh`, `scripts/run_benchmarks.sh`, `scripts/pcap_replay.sh`, `scripts/verify_release.sh`.
+- WAL fuzz: `crates/ramshield-storage/tests/fuzz.rs` (arbitrary segment bytes must not panic).
 
 ### Release hygiene
 - `release_candidate.sh`: removed hash of missing keystore files; release gate works from clean checkout.
