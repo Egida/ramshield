@@ -703,39 +703,6 @@ impl Store {
         }
     }
 
-    /// Shared growth/shrink bookkeeping for replacements (mirrors the tail
-    /// logic of `insert`: signed byte delta + blocked-index transition).
-    fn apply_growth(
-        &self,
-        key: IpAddr,
-        old_size: usize,
-        new_size: usize,
-        was_blocked: bool,
-        new_blocked: bool,
-    ) {
-        if new_size >= old_size {
-            self.ram_bytes
-                .fetch_add(new_size - old_size, Ordering::Relaxed);
-            self.traffic
-                .used_bytes
-                .fetch_add((new_size - old_size) as u64, Ordering::Relaxed);
-        } else {
-            self.ram_bytes
-                .fetch_sub(old_size - new_size, Ordering::Relaxed);
-            self.traffic
-                .used_bytes
-                .fetch_sub((old_size - new_size) as u64, Ordering::Relaxed);
-        }
-        if !was_blocked && new_blocked {
-            self.blocked_count.fetch_add(1, Ordering::Relaxed);
-            self.blocked_set.insert(key, ());
-        } else if was_blocked && !new_blocked {
-            self.blocked_count.fetch_sub(1, Ordering::Relaxed);
-            self.blocked_set.remove(&key);
-        }
-        self.total_inserts.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Size-only variant for callers that manage blocked index updates
     /// inside the DashMap shard lock (before drop).
     fn apply_growth_size_only(
@@ -1438,6 +1405,7 @@ mod tests {
             got, want,
             "get_all_blocked_ips must return exactly the blocked set"
         );
+        assert_store_invariants(&store);
     }
 
     /// P0 regression: get_all_blocked_ips must reflect unblock transitions.
@@ -1460,6 +1428,7 @@ mod tests {
             .insert(ip, Value::Counter(1), None, 64 * 1024 * 1024)
             .unwrap();
         assert!(store.get_all_blocked_ips().is_empty());
+        assert_store_invariants(&store);
     }
 
     /// P0 regression: blocked_set must stay in sync across all 4 mutation paths.
@@ -1500,6 +1469,7 @@ mod tests {
         assert_eq!(store.get_all_blocked_ips(), vec![ip]);
         store.remove(&ip);
         assert!(store.get_all_blocked_ips().is_empty());
+        assert_store_invariants(&store);
     }
 
     /// P0 regression: blocked_set must stay correct under concurrent transitions.
@@ -1541,6 +1511,7 @@ mod tests {
             entry_blocked, set_contains,
             "blocked_set membership must match the entry's is_blocked() state"
         );
+        assert_store_invariants(&store);
     }
 
     /// P0 regression: merge_subnet_window read-modify-write must not lose
@@ -1590,6 +1561,7 @@ mod tests {
         assert_eq!(evicted, 1, "evict_expired must remove the expired entry");
         assert_eq!(store.len(), 0, "store empty after eviction");
         assert_eq!(store.ram_bytes(), 0, "ram_bytes zeroed after eviction");
+        assert_store_invariants(&store);
     }
 
     /// IPv6 plan Task 5: the v6 gate leg (Task 2) reads `subnet_index`
@@ -1672,6 +1644,103 @@ mod tests {
         assert!(!stored2, "must refuse net-new when budget exhausted");
         assert_eq!(store.ram_bytes(), ram_before, "refused insert leaked bytes");
         assert_eq!(store.len(), 1);
+    }
+
+    /// Check all secondary indexes are consistent with the authoritative store state.
+    /// Panics with a diagnostic on the first divergence.
+    fn assert_store_invariants(store: &Store) {
+        // 1. blocked_set must match actual blocked entries from store iter.
+        let mut actual_blocked: Vec<IpAddr> = vec![];
+        for e in store.inner.iter() {
+            if e.value().value.is_blocked() {
+                actual_blocked.push(*e.key());
+            }
+        }
+        // Every IP in blocked_set must actually be blocked.
+        for e in store.blocked_set.iter() {
+            let ip = *e.key();
+            assert!(
+                actual_blocked.contains(&ip),
+                "blocked_set has phantom IP {ip} (not actually blocked)"
+            );
+        }
+        // Every actually-blocked IP must be in blocked_set.
+        for e in store.inner.iter() {
+            if e.value().value.is_blocked() {
+                let ip = *e.key();
+                assert!(
+                    store.blocked_set.get(&ip).is_some(),
+                    "blocked_set missing actually-blocked IP {ip}"
+                );
+            }
+        }
+        // 2. blocked_count must match blocked_set size (synchronized under load).
+        let count = store.blocked_count.load(Ordering::Relaxed);
+        let set_size = store.blocked_set.len();
+        assert_eq!(
+            count, set_size as u64,
+            "blocked_count {count} != blocked_set.len {set_size}"
+        );
+        // 3. ttl_entries must match number of entries with expires_at.
+        let mut ttl_actual = 0u64;
+        for e in store.inner.iter() {
+            if e.value().expires_at.is_some() {
+                ttl_actual += 1;
+            }
+        }
+        let ttl_book = store.ttl_entries.load(Ordering::Relaxed);
+        assert_eq!(
+            ttl_actual, ttl_book,
+            "ttl_entries ({ttl_book}) != actual entries with expires_at ({ttl_actual})"
+        );
+    }
+
+    /// Overloaded concurrency stress: 8 IPs, 8 threads, each doing 500
+    /// random block/unblock/remove cycles. Verifies all invariants hold
+    /// after convergence.
+    #[test]
+    fn stress_block_unblock_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+        let store = Arc::new(Store::new(16));
+        let ips: Vec<IpAddr> = (0..8u8)
+            .map(|n| format!("10.9.{}.1", n).parse().unwrap())
+            .collect();
+        let mut handles = vec![];
+        for t in 0..8u32 {
+            let s = store.clone();
+            let ips = ips.clone();
+            handles.push(thread::spawn(move || {
+                let mut seed = t * 113;
+                for _ in 0..500u32 {
+                    let ip = ips[seed as usize % ips.len()];
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let op = (seed >> 16) % 3;
+                    match op {
+                        0 => {
+                            s.insert(ip, Value::IpRecord(blocked_record(ip)), None, 64 * 1024 * 1024).unwrap_or(());
+                        }
+                        1 => {
+                            s.insert(ip, Value::Counter(1), None, 64 * 1024 * 1024).unwrap_or(());
+                        }
+                        _ => {
+                            s.remove(&ip);
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_store_invariants(&store);
+        assert_eq!(
+            store.blocked_count.load(Ordering::Relaxed),
+            store.blocked_set.len() as u64,
+            "blocked_count must converge to blocked_set.len after concurrent stress"
+        );
     }
 
     fn blank_record(ip: IpAddr) -> IpRecord {
