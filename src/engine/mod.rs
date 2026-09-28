@@ -470,7 +470,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     } else {
         Box::new(StubXdpApplier)
     };
-    let enforcement = EnforcementService::new(
+    let mut enforcement = EnforcementService::new(
         store.clone(),
         metrics.clone(),
         xdp_box,
@@ -495,15 +495,26 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 let ckpt_lsn = wal.ckpt_lsn();
                 let snapshot_used = if ckpt_lsn > 0 {
                     let snap_path = snapshot_path(&cfg_snapshot.wal.dir, ckpt_lsn);
-                    if let Ok(Some(snap)) = load_snapshot(&snap_path) {
-                        info!(
-                            "Checkpoint snapshot found (lsn={}) — replaying tail only",
-                            ckpt_lsn
-                        );
-                        restore_from_snapshot(&store, &mut std::collections::HashMap::new(), &snap);
-                        true
-                    } else {
-                        false
+                    match load_snapshot(&snap_path) {
+                        Ok(Some(snap)) => {
+                            info!(
+                                "Checkpoint snapshot found (lsn={}) — replaying tail only",
+                                ckpt_lsn
+                            );
+                            restore_from_snapshot(
+                                &store,
+                                &mut std::collections::HashMap::new(),
+                                &snap,
+                            );
+                            true
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "MANIFEST lsn={} but snapshot missing — full WAL replay",
+                                ckpt_lsn
+                            );
+                            false
+                        }
                     }
                 } else {
                     false
@@ -523,6 +534,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         tracing::error!("WAL replay: {}", e);
                     }
                 }
+                enforcement = enforcement.with_wal(Arc::clone(&wal));
                 pipeline_wal = Some(wal);
             }
             Err(e) => {
@@ -608,6 +620,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         std::mem::drop(tokio::spawn(async move {
             let interval = std::time::Duration::from_secs(300);
             let mut tick = tokio::time::interval(interval);
+            tick.tick().await; // skip immediate first fire (empty snapshot)
             let mut sd = engine.shutdown_rx();
             loop {
                 tokio::select! {

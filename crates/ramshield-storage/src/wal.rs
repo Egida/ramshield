@@ -265,15 +265,12 @@ impl Wal {
             }
 
             let must_rotate = g.bytes >= self.seg_max;
-            if must_sync || matches!(self.durability, Durability::Flush) || must_rotate {
-                // P0 fix (rotation durability): the old code never flushed
-                // before replacing g.writer. BufWriter::drop does write out
-                // its buffer, but (a) it IGNORES errors — a full disk lost
-                // up to 64KiB of WAL silently — and (b) with no fsync of the
-                // old segment after rotation, that segment's tail could only
-                // ever reach disk by luck (no future append touches it).
-                // Explicit flush + sync_data on the old fd (via old_file_arc
-                // below) closes both holes.
+            // GroupCommit: always flush the BufWriter so SIGKILL cannot drop
+            // a 64KiB in-memory tail. fsync stays windowed (must_sync).
+            if must_sync
+                || matches!(self.durability, Durability::Flush | Durability::GroupCommit)
+                || must_rotate
+            {
                 g.writer.flush()?;
             }
             // Snapshot the file holding the just-flushed bytes BEFORE any
