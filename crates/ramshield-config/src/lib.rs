@@ -32,7 +32,9 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            worker_threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+            worker_threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
             ram_limit_mb: 512,
             shard_count: 256,
         }
@@ -623,16 +625,16 @@ impl Config {
         if self.engine.shard_count == 0 || !self.engine.shard_count.is_power_of_two() {
             anyhow::bail!("engine.shard_count must be a power of 2");
         }
-        if self.engine.worker_threads == 0 {
-            anyhow::bail!("engine.worker_threads must be >= 1 (set to 0 to use available_parallelism — not allowed after env-var overrides)");
-        }
         if self.engine.worker_threads > 4096 {
-            anyhow::bail!("engine.worker_threads must be <= 4096 (got {})", self.engine.worker_threads);
+            anyhow::bail!(
+                "engine.worker_threads must be <= 4096 (got {})",
+                self.engine.worker_threads
+            );
         }
 
         // XDP mode validation
         match self.xdp.mode.as_str() {
-            | "skb" | "drv" | "native" => {},
+            "skb" | "drv" | "native" => {}
             other => anyhow::bail!("xdp.mode must be 'skb', 'drv', or 'native' (got '{other}')"),
         }
 

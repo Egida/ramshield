@@ -705,11 +705,7 @@ impl Store {
 
     /// Size-only variant for callers that manage blocked index updates
     /// inside the DashMap shard lock (before drop).
-    fn apply_growth_size_only(
-        &self,
-        old_size: usize,
-        new_size: usize,
-    ) {
+    fn apply_growth_size_only(&self, old_size: usize, new_size: usize) {
         if new_size >= old_size {
             self.ram_bytes
                 .fetch_add(new_size - old_size, Ordering::Relaxed);
@@ -1720,10 +1716,17 @@ mod tests {
                     let op = (seed >> 16) % 3;
                     match op {
                         0 => {
-                            s.insert(ip, Value::IpRecord(blocked_record(ip)), None, 64 * 1024 * 1024).unwrap_or(());
+                            s.insert(
+                                ip,
+                                Value::IpRecord(blocked_record(ip)),
+                                None,
+                                64 * 1024 * 1024,
+                            )
+                            .unwrap_or(());
                         }
                         1 => {
-                            s.insert(ip, Value::Counter(1), None, 64 * 1024 * 1024).unwrap_or(());
+                            s.insert(ip, Value::Counter(1), None, 64 * 1024 * 1024)
+                                .unwrap_or(());
                         }
                         _ => {
                             s.remove(&ip);

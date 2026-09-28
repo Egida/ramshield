@@ -137,9 +137,12 @@ impl Engine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .ok_or_else(|| std::io::Error::other("wait_startup called multiple times or never started"))?;
-        rx.recv().await
-            .ok_or_else(|| std::io::Error::other("startup channel closed before pipeline finished"))?
+            .ok_or_else(|| {
+                std::io::Error::other("wait_startup called multiple times or never started")
+            })?;
+        rx.recv().await.ok_or_else(|| {
+            std::io::Error::other("startup channel closed before pipeline finished")
+        })?
     }
 
     /// Tests construct Engine without boot_pipeline. Production never calls this.

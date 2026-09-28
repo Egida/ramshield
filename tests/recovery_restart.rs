@@ -38,7 +38,10 @@ fn now_ns() -> u64 {
 /// Fresh store + reopen WAL from dir, replay all entries.
 fn restart_full_replay(dir: &str) -> (Arc<Store>, Vec<(IpAddr, u64)>) {
     let store = Arc::new(Store::new(16));
-    store.traffic.ram_limit_mb.store(256, std::sync::atomic::Ordering::Relaxed);
+    store
+        .traffic
+        .ram_limit_mb
+        .store(256, std::sync::atomic::Ordering::Relaxed);
     let wal = Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
     let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
     drop(wal);
@@ -58,7 +61,8 @@ fn recovery_permanent_ip() {
         reason: "test".into(),
         ttl_secs: None,
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     let (store, _) = restart_full_replay(&dir);
@@ -80,7 +84,8 @@ fn recovery_temporary_ip_ttl_active() {
         reason: "test".into(),
         ttl_secs: Some(10),
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     let (store, ttls) = restart_full_replay(&dir);
@@ -88,8 +93,15 @@ fn recovery_temporary_ip_ttl_active() {
     let rec = store.get(&ip).unwrap();
     assert!(rec.is_blocked(), "IP must be blocked after restart");
 
-    let remaining = ttls.iter().find(|(addr, _)| *addr == ip).map(|(_, s)| *s).unwrap_or(0);
-    assert!(remaining > 0 && remaining <= 10, "TTL plausible (1-10s), got {remaining}");
+    let remaining = ttls
+        .iter()
+        .find(|(addr, _)| *addr == ip)
+        .map(|(_, s)| *s)
+        .unwrap_or(0);
+    assert!(
+        remaining > 0 && remaining <= 10,
+        "TTL plausible (1-10s), got {remaining}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -108,7 +120,8 @@ fn recovery_expired_before_restart() {
         reason: "test".into(),
         ttl_secs: Some(1),
         ts_ns: past_ts,
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     let (store, ttls) = restart_full_replay(&dir);
@@ -135,7 +148,8 @@ fn recovery_cidr_block() {
         reason: "test".into(),
         ttl_secs: Some(20),
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
     drop(wal);
 
     let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
@@ -145,7 +159,10 @@ fn recovery_cidr_block() {
     assert_eq!(cidrs.len(), 1, "one CIDR must be restored");
     let (restored_net, remaining) = cidrs[0];
     assert_eq!(restored_net, net, "CIDR network must match");
-    assert!(remaining > 0 && remaining <= 20, "TTL plausible (1-20s), got {remaining}");
+    assert!(
+        remaining > 0 && remaining <= 20,
+        "TTL plausible (1-20s), got {remaining}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -164,7 +181,8 @@ fn recovery_tail_replay() {
         reason: "pre_ckpt".into(),
         ttl_secs: None,
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
 
     // Checkpoint (writes manifest).
     let boundary = wal.begin_checkpoint();
@@ -176,7 +194,8 @@ fn recovery_tail_replay() {
         reason: "post_ckpt".into(),
         ttl_secs: None,
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
 
     drop(wal);
 
@@ -185,7 +204,10 @@ fn recovery_tail_replay() {
     let rec_a = store.get(&ip_a).unwrap();
     assert!(rec_a.is_blocked(), "pre-checkpoint block must survive");
     let rec_b = store.get(&ip_b).unwrap();
-    assert!(rec_b.is_blocked(), "post-checkpoint (tail) block must survive");
+    assert!(
+        rec_b.is_blocked(),
+        "post-checkpoint (tail) block must survive"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
