@@ -4,12 +4,12 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
-## [0.3.2] - unreleased
+## [0.3.2] - 2026-09-28
 
 ### Fixed
 - Storage concurrency: blocked_set/blocked_count updates moved inside DashMap shard lock (no race window between unlock and index update).
-- Startup lifecycle: main awaits engine boot pipeline result via mpsc channel — half-alive daemon eliminated.
-- Config hardening: worker_threads validated (≥1, ≤4096, default = available_parallelism()). XDP mode validated against exhaustive set (skb/drv/native).
+- Startup lifecycle: main awaits engine boot pipeline readiness via oneshot channel; startup result is delivered at pipeline-ready (IPC/detection/enforcement up), not at daemon shutdown. Half-alive daemon eliminated.
+- Config hardening: worker_threads validated (0 = auto/available_parallelism(), rejected above 4096). XDP mode validated against exhaustive set (skb/drv/native).
 - Removed dead code: `apply_growth` (superseded by lock-safe `apply_growth_size_only`).
 
 ### Tests
