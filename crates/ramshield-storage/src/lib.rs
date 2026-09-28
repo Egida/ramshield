@@ -495,7 +495,6 @@ impl Store {
                         expires_at,
                     },
                 );
-                drop(o);
                 let old_size = std::mem::size_of::<Entry>()
                     + old.value.heap_bytes()
                     + std::mem::size_of::<IpAddr>();
@@ -509,9 +508,9 @@ impl Store {
                     self.ram_bytes
                         .fetch_sub(old_size - entry_size, Ordering::Relaxed);
                 }
-                // Delta applies whether this was a fresh insert or a
-                // replacement: `was_blocked` is false for a fresh insert, so
-                // the (false -> true) case bumps the count.
+                // Blocked index updates while still holding the shard lock.
+                // Must be before `drop(o)` to prevent races with concurrent
+                // unblock/evict that would observe inconsistent state.
                 if !was_blocked && new_blocked {
                     self.blocked_count.fetch_add(1, Ordering::Relaxed);
                     self.blocked_set.insert(key, ());
@@ -550,6 +549,7 @@ impl Store {
                 if tracing::enabled!(tracing::Level::TRACE) {
                     tracing::trace!(key = %key, total_inserts = self.total_inserts.load(Ordering::Relaxed), "store insert committed");
                 }
+                drop(o); // lock released after all bookkeeping
                 Ok(())
             }
             dashmap::Entry::Vacant(v) => {
@@ -659,9 +659,14 @@ impl Store {
                     // Replaced a ttl-bearing entry with a permanent one.
                     self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
                 }
-                drop(o); // release shard lock before touching blocked_set
+                // Blocked index update while still holding shard lock.
+                if was_blocked {
+                    self.blocked_count.fetch_sub(1, Ordering::Relaxed);
+                    self.blocked_set.remove(&key);
+                }
                 let new_size = std::mem::size_of::<Entry>() + std::mem::size_of::<IpAddr>();
-                self.apply_growth(key, old_size, new_size, was_blocked, false);
+                drop(o); // release shard lock after all bookkeeping
+                self.apply_growth_size_only(old_size, new_size);
                 (out, true)
             }
             dashmap::Entry::Vacant(v) => {
@@ -727,6 +732,29 @@ impl Store {
         } else if was_blocked && !new_blocked {
             self.blocked_count.fetch_sub(1, Ordering::Relaxed);
             self.blocked_set.remove(&key);
+        }
+        self.total_inserts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Size-only variant for callers that manage blocked index updates
+    /// inside the DashMap shard lock (before drop).
+    fn apply_growth_size_only(
+        &self,
+        old_size: usize,
+        new_size: usize,
+    ) {
+        if new_size >= old_size {
+            self.ram_bytes
+                .fetch_add(new_size - old_size, Ordering::Relaxed);
+            self.traffic
+                .used_bytes
+                .fetch_add((new_size - old_size) as u64, Ordering::Relaxed);
+        } else {
+            self.ram_bytes
+                .fetch_sub(old_size - new_size, Ordering::Relaxed);
+            self.traffic
+                .used_bytes
+                .fetch_sub((old_size - new_size) as u64, Ordering::Relaxed);
         }
         self.total_inserts.fetch_add(1, Ordering::Relaxed);
     }
