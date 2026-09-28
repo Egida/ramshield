@@ -58,6 +58,11 @@ pub enum WalEntry {
     },
 }
 
+pub struct CheckpointBoundary {
+    pub lsn: u64,
+    pub snapshot_path: String,
+}
+
 /// On-disk record header (written before payload).
 #[derive(Debug)]
 struct RecordHeader {
@@ -108,6 +113,9 @@ pub struct Wal {
     /// Last checkpoint LSN. Retention may delete a segment only when every
     /// record in it is below this boundary. 0 = no checkpoint yet.
     ckpt_lsn: AtomicU64,
+    /// Snapshot boundary LSN (the LSN the snapshot represents).
+    /// Replay starts at snapshot_lsn + 1. 0 = no checkpoint yet.
+    snapshot_lsn: AtomicU64,
     /// Cumulative segments deleted by retention. Enforcement scrapes via
     /// `take_segments_pruned` so storage stays free of a metrics dep.
     segments_pruned: AtomicU64,
@@ -137,18 +145,39 @@ impl Wal {
         // Restore the checkpoint boundary from MANIFEST (written by
         // checkpoint()). Retention may only delete segments entirely below
         // this LSN — otherwise a deleted segment's blocks are lost on replay.
+        // Two formats:
+        //   NEW: checkpoint_lsn=N\nsnapshot_lsn=M\nsnapshot=PATH\n
+        //   OLD: lsn=N\nsnapshot=PATH\n  → snapshot_lsn = checkpoint_lsn (legacy)
         let manifest_path = PathBuf::from(dir).join("MANIFEST");
-        let ckpt_lsn = if manifest_path.exists() {
+        // Read MANIFEST, split into lines, parse known key=value pairs.
+        let manifest_content = if manifest_path.exists() {
             std::fs::read_to_string(&manifest_path)?
-                .lines()
-                .find_map(|l| {
-                    l.strip_prefix("lsn=")
-                        .and_then(|v| v.trim().parse::<u64>().ok())
-                })
-                .unwrap_or(0)
         } else {
-            0
+            String::new()
         };
+        let mut ckpt_lsn: u64 = 0;
+        let mut snapshot_lsn_val: u64 = 0;
+        for line in manifest_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("checkpoint_lsn=") {
+                if let Some(v) = trimmed.strip_prefix("checkpoint_lsn=") {
+                    ckpt_lsn = v.trim().parse::<u64>().unwrap_or(0);
+                }
+            } else if trimmed.starts_with("snapshot_lsn=") {
+                if let Some(v) = trimmed.strip_prefix("snapshot_lsn=") {
+                    snapshot_lsn_val = v.trim().parse::<u64>().unwrap_or(0);
+                }
+            } else if trimmed.starts_with("lsn=") {
+                // Legacy format: lsn=N + snapshot=PATH
+                if let Some(v) = trimmed.strip_prefix("lsn=") {
+                    ckpt_lsn = v.trim().parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        if snapshot_lsn_val == 0 {
+            snapshot_lsn_val = ckpt_lsn; // legacy: lsn was both
+        }
+
 
         enforce_retention_with_ckpt(dir, retention_max, ckpt_lsn);
         // Don't accumulate into segments_pruned here — Wal not yet constructed.
@@ -194,6 +223,7 @@ impl Wal {
             lsn_counter: AtomicU64::new(start_lsn),
             next_sync_due_ns: AtomicU64::new(0),
             ckpt_lsn: AtomicU64::new(ckpt_lsn),
+            snapshot_lsn: AtomicU64::new(snapshot_lsn_val),
             segments_pruned: AtomicU64::new(0),
         })
     }
@@ -345,32 +375,59 @@ impl Wal {
         self.segments_pruned.swap(0, Ordering::Relaxed)
     }
 
-    /// Write an atomic checkpoint: flush WAL, write manifest, fsync both + dir.
-    pub fn checkpoint(&self, snapshot_path: &str) -> Result<u64> {
+    /// Begin a checkpoint: freeze the boundary LSN (all prior entries are
+    /// below this LSN) and return the canonical snapshot file path. The caller
+    /// builds a snapshot at this boundary, writes it, then calls
+    /// `finish_checkpoint()` to append the marker record and publish MANIFEST.
+    pub fn begin_checkpoint(&self) -> CheckpointBoundary {
+        let lsn = self.lsn_counter.load(Ordering::SeqCst);
+        let path = PathBuf::from(&self.base_dir)
+            .join(format!("snapshot.{lsn:020}.ckpt"))
+            .to_string_lossy()
+            .to_string();
+        CheckpointBoundary { lsn, snapshot_path: path }
+    }
+
+    /// Complete a checkpoint: append the Checkpoint record and atomically
+    /// publish MANIFEST binding both LSNs.
+    ///
+    /// - `checkpoint_lsn` = the LSN of the appended Checkpoint record (used
+    ///   by retention as the "everything below this is safe to prune" line).
+    /// - `snapshot_lsn` = the boundary the snapshot captures (recovery
+    ///   replays from snapshot_lsn + 1).
+    /// Call after `begin_checkpoint()` + snapshot write + fsync.
+    pub fn finish_checkpoint(&self, boundary_lsn: u64, snapshot_path: &str) -> Result<u64> {
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
 
-        let lsn = self.append(&WalEntry::Checkpoint {
+        let ckpt_lsn = self.append(&WalEntry::Checkpoint {
             snapshot_path: snapshot_path.to_string(),
             ts_ns: now_ns,
         })?;
 
-        // Write manifest atomically: tmp + rename
+        // Write manifest atomically: tmp + fsync + rename.
+        // Invariant: MANIFEST is only published after the snapshot file has
+        // been durably written — recovery never sees a manifest pointing at
+        // a snapshot that was never flushed.
         let manifest_path = PathBuf::from(&self.base_dir).join("MANIFEST");
         let tmp_path = manifest_path.with_extension("tmp");
         {
             let mut f = File::create(&tmp_path)?;
-            write!(f, "lsn={}\nsnapshot={}\n", lsn, snapshot_path)?;
+            write!(f, "checkpoint_lsn={}\nsnapshot_lsn={}\nsnapshot={}\n", ckpt_lsn, boundary_lsn, snapshot_path)?;
             f.sync_all()?;
         }
         std::fs::rename(&tmp_path, &manifest_path)?;
         fsync_dir(&self.base_dir)?;
 
-        self.ckpt_lsn.store(lsn, Ordering::SeqCst);
-        info!("WAL checkpoint lsn={} snapshot={}", lsn, snapshot_path);
-        Ok(lsn)
+        self.ckpt_lsn.store(ckpt_lsn, Ordering::SeqCst);
+        self.snapshot_lsn.store(boundary_lsn, Ordering::SeqCst);
+        info!(
+            "WAL checkpoint: checkpoint_lsn={} snapshot_lsn={} snapshot={}",
+            ckpt_lsn, boundary_lsn, snapshot_path
+        );
+        Ok(ckpt_lsn)
     }
 
     /// Streaming replay with bounded reads. Returns entries in LSN order.
@@ -572,6 +629,12 @@ impl Wal {
     /// Last checkpoint LSN (0 = no checkpoint yet).
     pub fn ckpt_lsn(&self) -> u64 {
         self.ckpt_lsn.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot boundary LSN — replay starts at snapshot_lsn + 1.
+    /// 0 = no checkpoint taken yet (full replay needed).
+    pub fn snapshot_lsn(&self) -> u64 {
+        self.snapshot_lsn.load(Ordering::SeqCst)
     }
 
     /// Replay entries with LSN > min_lsn. When min_lsn is 0, equivalent to replay().
@@ -1136,7 +1199,7 @@ mod tests {
             .unwrap();
         }
         // Take a checkpoint so retention can safely delete old segments.
-        wal.checkpoint("/tmp/test_ret_snap.bin").unwrap();
+        wal.finish_checkpoint(wal.begin_checkpoint().lsn, "/tmp/test_ret_snap.bin").unwrap();
         drop(wal);
 
         let segs: Vec<(std::path::PathBuf, u64)> = std::fs::read_dir(&dir)
@@ -1198,7 +1261,8 @@ mod tests {
     fn wal_checkpoint_atomic() {
         let dir = tmp("rs_wal_ckpt");
         let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
-        let lsn = wal.checkpoint("/tmp/snap.bin").unwrap();
+        let boundary = wal.begin_checkpoint();
+        let lsn = wal.finish_checkpoint(boundary.lsn, "/tmp/snap.bin").unwrap();
         assert!(lsn > 0);
         // Manifest should exist
         let manifest = PathBuf::from(&dir).join("MANIFEST");
@@ -1405,7 +1469,8 @@ mod tests {
             .unwrap();
         }
         // Checkpoint LSN is saved for replay acceleration.
-        let _ckpt_lsn = wal.checkpoint("/tmp/ckpt_test_snap.bin").unwrap();
+        let boundary = wal.begin_checkpoint();
+        let _ckpt_lsn = wal.finish_checkpoint(boundary.lsn, "/tmp/ckpt_test_snap.bin").unwrap();
         // Append 2 more after checkpoint.
         for i in 4..=5u64 {
             wal.append(&WalEntry::BlockIp {
@@ -1429,6 +1494,7 @@ mod tests {
         // Reopen to verify checkpoint LSN persisted.
         let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
         assert!(wal2.ckpt_lsn() > 0, "checkpoint LSN must be persisted");
+        assert!(wal2.snapshot_lsn() > 0, "snapshot LSN must be persisted");
         drop(wal2);
         let _ = std::fs::remove_dir_all(&dir);
     }

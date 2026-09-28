@@ -492,14 +492,18 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 let wal = Arc::new(wal);
 
                 // Load checkpoint snapshot if available.
-                let ckpt_lsn = wal.ckpt_lsn();
-                let snapshot_used = if ckpt_lsn > 0 {
-                    let snap_path = snapshot_path(&cfg_snapshot.wal.dir, ckpt_lsn);
+                // snapshot_lsn is the WAL boundary the snapshot captures
+                // (all entries <= snapshot_lsn are reflected). ckpt_lsn is
+                // the Checkpoint record's own LSN (used for retention).
+                let snap_lsn = wal.snapshot_lsn();
+                let _ckpt_lsn = wal.ckpt_lsn();
+                let snapshot_used = if snap_lsn > 0 {
+                    let snap_path = snapshot_path(&cfg_snapshot.wal.dir, snap_lsn);
                     match load_snapshot(&snap_path) {
                         Ok(Some(snap)) => {
                             info!(
-                                "Checkpoint snapshot found (lsn={}) — replaying tail only",
-                                ckpt_lsn
+                                "Checkpoint snapshot found (snap_lsn={}) — replaying tail only",
+                                snap_lsn
                             );
                             restore_from_snapshot(
                                 &store,
@@ -510,8 +514,8 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         }
                         _ => {
                             tracing::warn!(
-                                "MANIFEST lsn={} but snapshot missing — full WAL replay",
-                                ckpt_lsn
+                                "MANIFEST snap_lsn={} but snapshot missing — full WAL replay",
+                                snap_lsn
                             );
                             false
                         }
@@ -520,7 +524,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     false
                 };
 
-                let min_lsn = if snapshot_used { ckpt_lsn } else { 0u64 };
+                let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
                 match replay_wal_into_store(&store, &wal, min_lsn) {
                     Ok(restored) => {
@@ -529,9 +533,16 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                             restored.len(),
                             min_lsn
                         );
+                        // Stash restored TTLs for CIDR/TTL re-arm after enforcement constructed.
+                        // These are consumed after enforcement.with_wal() below.
                     }
                     Err(e) => {
                         tracing::error!("WAL replay: {}", e);
+                        if hard_wal {
+                            return Err(std::io::Error::other(format!(
+                                "WAL replay failed (allow_volatile_fallback=false): {e}"
+                            )));
+                        }
                     }
                 }
                 enforcement = enforcement.with_wal(Arc::clone(&wal));
@@ -630,20 +641,21 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         break;
                     }
                 }
+                let boundary = wal.begin_checkpoint();
                 let snap = build_snapshot(
                     &store_arc,
                     &std::collections::HashMap::new(),
-                    wal.ckpt_lsn() + 1,
+                    boundary.lsn,
                 );
-                let snap_path = match write_snapshot(&cfg_dir, &snap) {
+                let snap_path = match write_snapshot(&cfg_dir, &snap, boundary.lsn) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::error!("snapshot write: {}", e);
                         continue;
                     }
                 };
-                match wal.checkpoint(&snap_path) {
-                    Ok(new_lsn) => info!("checkpoint (lsn={}): {}", new_lsn, snap_path),
+                match wal.finish_checkpoint(boundary.lsn, &snap_path) {
+                    Ok(new_lsn) => info!("checkpoint (lsn={} snap_lsn={}): {}", new_lsn, boundary.lsn, snap_path),
                     Err(e) => tracing::error!("WAL checkpoint: {}", e),
                 }
             }

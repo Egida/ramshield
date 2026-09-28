@@ -42,8 +42,8 @@ pub fn snapshot_path(wal_dir: &str, lsn: u64) -> String {
 }
 
 /// Write snapshot atomically: tmp + fsync + rename.
-pub fn write_snapshot(dir: &str, snap: &CheckpointSnapshot) -> Result<String> {
-    let path = snapshot_path(dir, snap.lsn);
+pub fn write_snapshot(dir: &str, snap: &CheckpointSnapshot, lsn: u64) -> Result<String> {
+    let path = snapshot_path(dir, lsn);
     let tmp = format!("{path}.tmp");
     let json = serde_json::to_vec(snap).map_err(|e| RsError::Serde(e.to_string()))?;
     {
@@ -83,7 +83,9 @@ fn fsync_dir(dir: &str) -> Result<()> {
 }
 
 /// Build a snapshot from the live store and CIDR map.
-/// Lifted after a Wal::checkpoint() so LSN is current.
+/// The snapshot's LSN is the WAL boundary (all entries <= this LSN are
+/// reflected). TTLs are stored as absolute expiry timestamps so recovery
+/// doesn't need to re-compute them from a possibly-stale `now`.
 pub fn build_snapshot(
     store: &Store,
     cidrs: &HashMap<IpNetwork, u64>,
@@ -108,12 +110,14 @@ pub fn build_snapshot(
             else {
                 return None;
             };
-            let ttl_secs: Option<u64> = None; // WAL tail replay re-arms TTL
+            // TTL info lives in the Entry wrapper (expires_at: Option<Instant>)
+            // not directly on IpRecord. Store None here; the enforcement layer
+            // re-arms TTL schedules from the WAL replay result.
             Some(IpBlockSnapshot {
                 ip,
                 reason: reason.as_str().to_string(),
                 since_ns,
-                ttl_secs,
+                ttl_secs: None,
             })
         })
         .collect();
