@@ -51,11 +51,20 @@ sed -e "s|^[[:space:]]*tcp_addr = .*|tcp_addr = \"127.0.0.1:$IPC_PORT\"|" \
     "$CFG" > "$SMOKE_CFG"
 
 echo "→ booting binary with $SMOKE_CFG (WAL=$WAL_DIR)"
-# Inject test HMAC key for baseline configs that have none
-TEST_KEY="k1:0b8d647fda3a0ae3c38207e0d7e61edfdfe59bda7359c89f953f76ed68f3768b"
-if grep -q 'auth_keys = \[]' "$SMOKE_CFG" 2>/dev/null; then
-    sed -i 's/auth_keys = \[\]/auth_keys = ["k1:0b8d647fda3a0ae3c38207e0d7e61edfdfe59bda7359c89f953f76ed68f3768b"]/' "$SMOKE_CFG"
-fi
+python3 - "$SMOKE_CFG" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+t = p.read_text()
+if "auth_keys = []" in t:
+    t = t.replace(
+        "auth_keys = []",
+        'auth_keys = ["k1:0b8d647fda3a0ae3c38207e0d7e61edfdfe59bda7359c89f953f76ed68f3768b"]\n'
+        'key_roles = [{ key_id = "k1", role = "Admin" }]',
+        1,
+    )
+    p.write_text(t)
+PY
 RAMSHIELD_ENGINE__RAM_LIMIT_MB=1024 \
     "$BIN" --config "$SMOKE_CFG" --no-xdp > "$LOG" 2>&1 &
 PID=$!
