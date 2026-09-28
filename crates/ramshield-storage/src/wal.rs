@@ -178,7 +178,6 @@ impl Wal {
             snapshot_lsn_val = ckpt_lsn; // legacy: lsn was both
         }
 
-
         enforce_retention_with_ckpt(dir, retention_max, ckpt_lsn);
         // Don't accumulate into segments_pruned here — Wal not yet constructed.
         // Open is a one-time event; the full retention run happens at startup once.
@@ -385,7 +384,10 @@ impl Wal {
             .join(format!("snapshot.{lsn:020}.ckpt"))
             .to_string_lossy()
             .to_string();
-        CheckpointBoundary { lsn, snapshot_path: path }
+        CheckpointBoundary {
+            lsn,
+            snapshot_path: path,
+        }
     }
 
     /// Complete a checkpoint: append the Checkpoint record and atomically
@@ -416,7 +418,11 @@ impl Wal {
         let tmp_path = manifest_path.with_extension("tmp");
         {
             let mut f = File::create(&tmp_path)?;
-            write!(f, "checkpoint_lsn={}\nsnapshot_lsn={}\nsnapshot={}\n", ckpt_lsn, boundary_lsn, snapshot_path)?;
+            write!(
+                f,
+                "checkpoint_lsn={}\nsnapshot_lsn={}\nsnapshot={}\n",
+                ckpt_lsn, boundary_lsn, snapshot_path
+            )?;
             f.sync_all()?;
         }
         std::fs::rename(&tmp_path, &manifest_path)?;
@@ -1200,7 +1206,8 @@ mod tests {
             .unwrap();
         }
         // Take a checkpoint so retention can safely delete old segments.
-        wal.finish_checkpoint(wal.begin_checkpoint().lsn, "/tmp/test_ret_snap.bin").unwrap();
+        wal.finish_checkpoint(wal.begin_checkpoint().lsn, "/tmp/test_ret_snap.bin")
+            .unwrap();
         drop(wal);
 
         let segs: Vec<(std::path::PathBuf, u64)> = std::fs::read_dir(&dir)
@@ -1263,7 +1270,9 @@ mod tests {
         let dir = tmp("rs_wal_ckpt");
         let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
         let boundary = wal.begin_checkpoint();
-        let lsn = wal.finish_checkpoint(boundary.lsn, "/tmp/snap.bin").unwrap();
+        let lsn = wal
+            .finish_checkpoint(boundary.lsn, "/tmp/snap.bin")
+            .unwrap();
         assert!(lsn > 0);
         // Manifest should exist
         let manifest = PathBuf::from(&dir).join("MANIFEST");
@@ -1471,7 +1480,9 @@ mod tests {
         }
         // Checkpoint LSN is saved for replay acceleration.
         let boundary = wal.begin_checkpoint();
-        let _ckpt_lsn = wal.finish_checkpoint(boundary.lsn, "/tmp/ckpt_test_snap.bin").unwrap();
+        let _ckpt_lsn = wal
+            .finish_checkpoint(boundary.lsn, "/tmp/ckpt_test_snap.bin")
+            .unwrap();
         // Append 2 more after checkpoint.
         for i in 4..=5u64 {
             wal.append(&WalEntry::BlockIp {

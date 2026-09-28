@@ -17,7 +17,7 @@ use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };
 use crate::storage::Store;
-use ramshield_enforcement::{replay_wal_into_store, replay_wal_cidrs_from};
+use ramshield_enforcement::{replay_wal_cidrs_from, replay_wal_into_store};
 use ramshield_storage::wal::Wal;
 use ramshield_types::EnforceCommand;
 
@@ -656,11 +656,8 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     }
                 }
                 let boundary = wal.begin_checkpoint();
-                let snap = build_snapshot(
-                    &store_arc,
-                    &std::collections::HashMap::new(),
-                    boundary.lsn,
-                );
+                let snap =
+                    build_snapshot(&store_arc, &std::collections::HashMap::new(), boundary.lsn);
                 let snap_path = match write_snapshot(&cfg_dir, &snap, boundary.lsn) {
                     Ok(p) => p,
                     Err(e) => {
@@ -669,7 +666,10 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     }
                 };
                 match wal.finish_checkpoint(boundary.lsn, &snap_path) {
-                    Ok(new_lsn) => info!("checkpoint (lsn={} snap_lsn={}): {}", new_lsn, boundary.lsn, snap_path),
+                    Ok(new_lsn) => info!(
+                        "checkpoint (lsn={} snap_lsn={}): {}",
+                        new_lsn, boundary.lsn, snap_path
+                    ),
                     Err(e) => tracing::error!("WAL checkpoint: {}", e),
                 }
             }
