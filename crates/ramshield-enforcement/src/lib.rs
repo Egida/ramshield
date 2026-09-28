@@ -963,6 +963,19 @@ pub fn replay_wal_into_store(
     wal: &Wal,
     min_lsn: u64,
 ) -> anyhow::Result<Vec<(IpAddr, u64)>> {
+    replay_wal_into_store_seeded(store, wal, min_lsn, std::collections::HashMap::new())
+}
+
+/// Checkpoint-accelerated variant: the fold STARTS from `seed` (snapshot
+/// block state: ip → (reason, since_ns, deadline_ns)) so an IP blocked in
+/// the snapshot and untouched by the tail remains blocked, while a tail
+/// UnblockIp correctly removes it. Tail blocks/Unblocks then fold on top.
+pub fn replay_wal_into_store_seeded(
+    store: &Arc<Store>,
+    wal: &Wal,
+    min_lsn: u64,
+    seed: std::collections::HashMap<IpAddr, (String, u64, u64)>,
+) -> anyhow::Result<Vec<(IpAddr, u64)>> {
     let entries = if min_lsn > 0 {
         wal.replay_from(min_lsn)?
     } else {
@@ -973,9 +986,22 @@ pub fn replay_wal_into_store(
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
 
+    let seed_ips: Vec<IpAddr> = seed.keys().copied().collect();
     // Sequential fold: later entries win (unblock cancels earlier block).
-    let mut blocked: std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)> =
-        std::collections::HashMap::new();
+    // Seed = snapshot block state (reason, since_ns, deadline_ns); the fold
+    // overlays tail entries on top, so a tail UnblockIp removes a snapshot IP.
+    let mut blocked: std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)> = seed
+        .into_iter()
+        .map(|(ip, (reason, since, deadline_ns))| {
+            let ttl_secs = if deadline_ns > 0 {
+                let remaining = deadline_ns.saturating_sub(now_ns) / 1_000_000_000;
+                Some(remaining.max(1))
+            } else {
+                None
+            };
+            (ip, (reason_to_block_reason(&reason), since, ttl_secs))
+        })
+        .collect();
     for entry in entries {
         match entry {
             WalEntry::BlockIp {
@@ -998,6 +1024,15 @@ pub fn replay_wal_into_store(
     }
 
     let ram_lim = store.traffic.ram_limit_mb.load(Ordering::Relaxed).max(1) * 1024 * 1024;
+    // Seed reconciliation: snapshot IPs that the tail UNBLOCKED must have their
+    // store records (inserted by restore_from_snapshot) removed — the fold's
+    // final loop only touches surviving entries, so without this a tail unblock
+    // of a snapshot IP would leave a phantom block.
+    for seed_ip in seed_ips {
+        if !blocked.contains_key(&seed_ip) {
+            store.remove(&seed_ip);
+        }
+    }
     let mut restored: Vec<(IpAddr, u64)> = Vec::new();
     for (ip, (reason, ts_ns, ttl_secs)) in blocked {
         // Expired TTL → don't resurrect.

@@ -180,44 +180,46 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
     let mut ip_expirations = Vec::new();
     let mut cidr_expirations = Vec::new();
     for snap_ip in snap.blocked_ips.iter() {
+        let verdict = classify(snap_ip.expires_at_ns, now_ns);
+        if let ExpiryVerdict::Expired = verdict {
+            // Dead before recovery — drop entirely (never restore, never seed).
+            continue;
+        }
         snapshot_blocked_ips.push(snap_ip.ip);
-        match classify(snap_ip.expires_at_ns, now_ns) {
-            ExpiryVerdict::Expired => continue, // dead before recovery — drop
-            verdict => {
-                let rec = StorageIpRecord {
-                    ip: snap_ip.ip,
-                    request_count: 0,
-                    ewma_rps: 0.0,
-                    cusum_s: 0.0,
-                    baseline_rps: 0.0,
-                    prev_sample_hot: false,
-                    sample_count: 0,
-                    pulse_samples_in_window: 0,
-                    pulse_window_start_ns: 0,
-                    first_seen_ns: snap_ip.since_ns,
-                    last_seen_ns: snap_ip.since_ns,
-                    bytes_in: 0,
-                    status_dist: [0; 5],
-                    proto_fingerprint: 0,
-                    threat_score: 0.0,
-                    block_state: StorageBlockState::Blocked {
-                        reason: BlockReason::from_reason_str(&snap_ip.reason)
-                            .unwrap_or(BlockReason::ManualBlock),
-                        since_ns: snap_ip.since_ns,
-                    },
-                };
-                // Store-level TTL (secs) for its passive expiry wheel; the
-                // enforcement ring re-arms below from the same deadline.
-                let ttl_secs = match verdict {
-                    ExpiryVerdict::Live { remaining_ns } => {
-                        let secs = remaining_ns / 1_000_000_000;
-                        ip_expirations.push((snap_ip.ip, remaining_ns));
-                        Some(secs.max(1)) // never restore an already-dead wheel card
-                    }
-                    _ => None,
-                };
-                let _ = store.insert(snap_ip.ip, Value::IpRecord(rec), ttl_secs, ram_lim);
-            }
+        {
+            let rec = StorageIpRecord {
+                ip: snap_ip.ip,
+                request_count: 0,
+                ewma_rps: 0.0,
+                cusum_s: 0.0,
+                baseline_rps: 0.0,
+                prev_sample_hot: false,
+                sample_count: 0,
+                pulse_samples_in_window: 0,
+                pulse_window_start_ns: 0,
+                first_seen_ns: snap_ip.since_ns,
+                last_seen_ns: snap_ip.since_ns,
+                bytes_in: 0,
+                status_dist: [0; 5],
+                proto_fingerprint: 0,
+                threat_score: 0.0,
+                block_state: StorageBlockState::Blocked {
+                    reason: BlockReason::from_reason_str(&snap_ip.reason)
+                        .unwrap_or(BlockReason::ManualBlock),
+                    since_ns: snap_ip.since_ns,
+                },
+            };
+            // Store-level TTL (secs) for its passive expiry wheel; the
+            // enforcement ring re-arms below from the same deadline.
+            let ttl_secs = match verdict {
+                ExpiryVerdict::Live { remaining_ns } => {
+                    let secs = remaining_ns / 1_000_000_000;
+                    ip_expirations.push((snap_ip.ip, remaining_ns));
+                    Some(secs.max(1)) // never restore an already-dead wheel card
+                }
+                _ => None,
+            };
+            let _ = store.insert(snap_ip.ip, Value::IpRecord(rec), ttl_secs, ram_lim);
         }
     }
     for c in snap.active_cidrs.iter() {

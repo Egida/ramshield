@@ -18,7 +18,7 @@ use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };
 use crate::storage::Store;
-use ramshield_enforcement::{replay_wal_cidrs_from, replay_wal_into_store};
+use ramshield_enforcement::{replay_wal_cidrs_from, replay_wal_into_store_seeded};
 use ramshield_storage::{
     checkpoint_shared::{CheckpointShared, CheckpointState, CidrSnapshot},
     wal::Wal,
@@ -574,38 +574,52 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         "WAL history pruned past checkpoint boundary (snapshot_lsn={snap_lsn}, oldest_lsn={oldest}) — cannot reconstruct state (allow_volatile_fallback=false)"
                     )));
                 }
-                // Seed cleanup (PATCH 9): remove snapshot-blocked IPs from
-                // the Store before tail replay. Without this, an IP that was
-                // blocked in the snapshot and unblocked in the tail WAL stays
-                // blocked because the tail fold never touches it — the store
-                // record from restore_from_snapshot survives as a phantom block.
+                // Seed-fold (PATCH 9): the tail fold STARTS from snapshot
+                // block state, so snapshot IPs untouched by the tail remain
+                // blocked, and a tail UnblockIp correctly removes them.
+                // Pre-cleanup of snapshot IPs is implicit: restore_from_snapshot
+                // records are overwritten by the fold result below.
+                let mut replay_seed: std::collections::HashMap<
+                    std::net::IpAddr,
+                    (String, u64, u64),
+                > = std::collections::HashMap::new();
                 if let Some(seed) = snapshot_seed.as_ref() {
+                    let now_ns = crate::engine::checkpoint::now_unix_ns();
                     for ip in seed.snapshot_blocked_ips.iter() {
-                        let _ = store.remove(&ip);
+                        // Deadline lookup: temporary IPs carry remaining_ns;
+                        // deadline = now + remaining. Permanent = 0.
+                        let deadline_ns = seed
+                            .ip_expirations
+                            .iter()
+                            .find(|(sip, _)| sip == ip)
+                            .map(|(_, ns)| now_ns.saturating_add(*ns))
+                            .unwrap_or(0);
+                        replay_seed.insert(*ip, ("manual_block".to_string(), now_ns, deadline_ns));
                     }
                 }
 
                 let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
-                let restored_ttls = match replay_wal_into_store(&store, &wal, min_lsn) {
-                    Ok(r) => {
-                        info!(
-                            "WAL replay: restored {} IP blocks (min_lsn={})",
-                            r.len(),
-                            min_lsn
-                        );
-                        r
-                    }
-                    Err(e) => {
-                        tracing::error!("WAL replay: {}", e);
-                        if hard_wal {
-                            return Err(std::io::Error::other(format!(
-                                "WAL replay failed (allow_volatile_fallback=false): {e}"
-                            )));
+                let restored_ttls =
+                    match replay_wal_into_store_seeded(&store, &wal, min_lsn, replay_seed) {
+                        Ok(r) => {
+                            info!(
+                                "WAL replay: restored {} IP blocks (min_lsn={})",
+                                r.len(),
+                                min_lsn
+                            );
+                            r
                         }
-                        vec![]
-                    }
-                };
+                        Err(e) => {
+                            tracing::error!("WAL replay: {}", e);
+                            if hard_wal {
+                                return Err(std::io::Error::other(format!(
+                                    "WAL replay failed (allow_volatile_fallback=false): {e}"
+                                )));
+                            }
+                            vec![]
+                        }
+                    };
                 // PATCH 6: CIDR replay obeys hard-WAL semantics — a replay
                 // failure under allow_volatile_fallback=false fails startup,
                 // same as IP replay. No silent empty-state degradation.

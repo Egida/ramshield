@@ -23,7 +23,7 @@ spec:
         - operator: Exists
       containers:
         - name: ramshield
-          image: ghcr.io/grep999/ramshield:0.3.1
+          image: ghcr.io/grep999/ramshield:0.3.2
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/ramshield/config.toml"]
           securityContext:
