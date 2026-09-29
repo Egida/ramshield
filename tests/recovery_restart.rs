@@ -36,6 +36,7 @@ fn now_ns() -> u64 {
 }
 
 /// Fresh store + reopen WAL from dir, replay all entries.
+/// Mirrors the engine's no-snapshot recovery path: IP fold + CIDR fold.
 fn restart_full_replay(dir: &str) -> (Arc<Store>, Vec<(IpAddr, u64)>) {
     let store = Arc::new(Store::new(16));
     store
@@ -44,6 +45,10 @@ fn restart_full_replay(dir: &str) -> (Arc<Store>, Vec<(IpAddr, u64)>) {
         .store(256, std::sync::atomic::Ordering::Relaxed);
     let wal = Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
     let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
+    // Engine full replay also folds CIDRs (replay_wal_cidrs_from min_lsn=0).
+    for (net, _remaining) in replay_wal_cidrs_from(&wal, 0).unwrap() {
+        store.active_cidrs.insert(net, ());
+    }
     drop(wal);
     (store, ttls)
 }
@@ -648,6 +653,119 @@ fn checkpoint_temporary_cidr() {
         store2.active_cidrs.get(&net).is_some(),
         "temporary CIDR must survive checkpoint restart"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Audit P0 gate — recovery equivalence: the SAME WAL replayed two ways must
+/// yield identical enforcement state.
+///   A: full WAL replay (min_lsn=0)
+///   B: snapshot restore + tail replay (min_lsn=snap_lsn)
+/// Compared exhaustively over every IP and CIDR in the scenario: block status
+/// and CIDR membership must match term-for-term.
+#[test]
+fn checkpoint_equivalence_full_replay_vs_snapshot() {
+    let dir = wal_dir("ckpt_equiv");
+    let wal = Wal::open(&dir, false, Durability::None, 4 * 1024 * 1024, 0).unwrap();
+
+    let perm = IpAddr::from([10, 90, 0, 1]); // permanent, survives
+    let temp = IpAddr::from([10, 90, 0, 2]); // temporary, survives
+    let killed = IpAddr::from([10, 90, 0, 3]); // blocked then unblocked in tail
+    let tail = IpAddr::from([10, 90, 0, 4]); // only in tail
+    let net_pre = IpNetwork::new(IpAddr::from([172, 90, 1, 0]), 24).unwrap();
+    let net_tail = IpNetwork::new(IpAddr::from([172, 90, 2, 0]), 24).unwrap();
+
+    // ── Pre-checkpoint phase ──
+    for (ip, ttl) in [(perm, None), (temp, Some(30)), (killed, None)] {
+        wal.append(&WalEntry::BlockIp {
+            ip: ip.to_string(),
+            reason: "equiv".into(),
+            ttl_secs: ttl,
+            ts_ns: now_ns(),
+        })
+        .unwrap();
+    }
+    wal.append(&WalEntry::BlockCidr {
+        cidr: net_pre,
+        reason: "equiv".into(),
+        ttl_secs: None,
+        ts_ns: now_ns(),
+    })
+    .unwrap();
+
+    // ── Checkpoint (snapshot + MANIFEST) ──
+    wal.append(&WalEntry::UnblockIp {
+        ip: killed.to_string(),
+        ts_ns: now_ns(),
+    })
+    .unwrap();
+    drop(wal);
+    let wal = Wal::open(&dir, false, Durability::None, 4 * 1024 * 1024, 0).unwrap();
+    let store_ck = Arc::new(Store::new(16));
+    let ttls = replay_wal_into_store(&store_ck, &wal, 0).unwrap();
+    let cidrs = replay_wal_cidrs_from(&wal, 0).unwrap();
+    for (n, _) in &cidrs {
+        store_ck.active_cidrs.insert(*n, ());
+    }
+    let mut ip_exp = std::collections::HashMap::new();
+    for (ip, remaining) in &ttls {
+        ip_exp.insert(*ip, unix_deadline_ahead(*remaining));
+    }
+    checkpoint_now(&wal, &store_ck, ip_exp);
+
+    // ── Tail phase (after the checkpoint boundary) ──
+    wal.append(&WalEntry::BlockIp {
+        ip: tail.to_string(),
+        reason: "tail".into(),
+        ttl_secs: None,
+        ts_ns: now_ns(),
+    })
+    .unwrap();
+    wal.append(&WalEntry::BlockCidr {
+        cidr: net_tail,
+        reason: "tail".into(),
+        ttl_secs: None,
+        ts_ns: now_ns(),
+    })
+    .unwrap();
+    wal.append(&WalEntry::UnblockIp {
+        ip: perm.to_string(),
+        ts_ns: now_ns(),
+    })
+    .unwrap();
+    drop(wal);
+
+    // ── A: full WAL replay ──
+    let (store_full, _) = restart_full_replay(&dir);
+
+    // ── B: snapshot restore + tail replay ──
+    let (store_snap, _restored, _lsn) = restart_from_snapshot(&dir);
+
+    // ── Compare, exhaustively ──
+    let universe = [perm, temp, killed, tail];
+    for ip in universe {
+        let a = store_full.get(&ip).is_some_and(|v| v.is_blocked());
+        let b = store_snap.get(&ip).is_some_and(|v| v.is_blocked());
+        assert_eq!(
+            a, b,
+            "equivalence broken for {ip}: full_replay blocked={a}, snapshot+tail blocked={b}"
+        );
+    }
+    for net in [net_pre, net_tail] {
+        let a = store_full.active_cidrs.contains_key(&net);
+        let b = store_snap.active_cidrs.contains_key(&net);
+        assert_eq!(
+            a, b,
+            "CIDR equivalence broken for {net}: full_replay={a}, snapshot+tail={b}"
+        );
+    }
+    // Sanity: the scenario actually exercised both directions.
+    assert!(store_full.get(&temp).is_some_and(|v| v.is_blocked()));
+    assert!(store_full.get(&tail).is_some_and(|v| v.is_blocked()));
+    assert!(!store_full.get(&perm).is_some_and(|v| v.is_blocked()));
+    assert!(!store_full.get(&killed).is_some_and(|v| v.is_blocked()));
+    assert!(store_full.active_cidrs.contains_key(&net_pre));
+    assert!(store_full.active_cidrs.contains_key(&net_tail));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

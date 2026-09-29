@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# upgrade_qualification.sh — test 0.3.0 → 0.3.1 upgrade and 0.3.1 → 0.3.0 rollback.
+# upgrade_qualification.sh — test $OLD_TAG → current upgrade and current → $OLD_TAG rollback.
+# Current version is read from Cargo.toml (one release identity).
 # Run on a non-production host.
 set -euo pipefail
 
 PREFIX="${1:-/tmp/ramshield_upgrade_test}"
 OLD_TAG="${2:-v0.3.0}"
+NEW_TAG="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 NEW_DIR="$PREFIX/new"
 OLD_DIR="$PREFIX/old"
 WAL_DIR="$PREFIX/wal"
@@ -74,7 +76,7 @@ EOF
 }
 
 test_upgrade() {
-    log "=== Upgrade test: $OLD_TAG → 0.3.1 ==="
+    log "=== Upgrade test: $OLD_TAG → $NEW_TAG ==="
 
     # Start old version, create persistent block
     "$OLD_DIR/target/release/ramshield" --config "$CONFIG_FILE" &
@@ -87,7 +89,7 @@ test_upgrade() {
     kill "$OLD_PID" 2>/dev/null; wait "$OLD_PID" 2>/dev/null || true
     log "old version stopped"
 
-    # Start 0.3.1 with same WAL
+    # Start current release with same WAL
     "$NEW_DIR/ramshield" --config "$CONFIG_FILE" &
     NEW_PID=$!
     sleep 2
@@ -107,9 +109,9 @@ test_upgrade() {
 }
 
 test_rollback() {
-    log "=== Rollback test: 0.3.1 → $OLD_TAG ==="
+    log "=== Rollback test: $NEW_TAG → $OLD_TAG ==="
 
-    # Create block with 0.3.1
+    # Create block with current release
     "$NEW_DIR/ramshield" --config "$CONFIG_FILE" &
     NEW_PID=$!
     sleep 2
@@ -138,6 +140,7 @@ test_rollback() {
 
 main() {
     log "=== RamShield Upgrade/Rollback Qualification ==="
+    log "old=$OLD_TAG new=$NEW_TAG"
     trap cleanup EXIT
     need_cmd cargo
     need_cmd git
