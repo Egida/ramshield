@@ -979,7 +979,7 @@ pub fn replay_wal_into_store_seeded(
     let entries = if min_lsn > 0 {
         wal.replay_from(min_lsn)?
     } else {
-        Wal::replay(&wal_dir(wal))?
+        wal.replay()?
     };
     let now_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1106,7 +1106,7 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
     let entries = if min_lsn > 0 {
         wal.replay_from(min_lsn)?
     } else {
-        Wal::replay(&wal_dir(wal))?
+        wal.replay()?
     };
     for entry in entries {
         match entry {
@@ -1137,10 +1137,6 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
             }
         })
         .collect())
-}
-
-fn wal_dir(wal: &Wal) -> String {
-    wal.base_dir().to_string()
 }
 
 /// Convert a monotonic `Instant` to an absolute Unix-ns timestamp.
@@ -1239,6 +1235,24 @@ mod tests {
         ))
     }
 
+    /// Path of the next segment RAMWAL would create in `dir`. Used to poison
+    /// a rotation target: a directory at that path makes the segment create
+    /// fail with EISDIR, so the append fails before any state change.
+    fn next_segment_path(dir: &std::path::Path) -> std::path::PathBuf {
+        let highest = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                let name = name.to_str()?;
+                let idx = name.strip_prefix("segment-")?.strip_suffix(".rwl")?;
+                idx.parse::<u64>().ok()
+            })
+            .max()
+            .expect("at least one segment must exist after the first append");
+        dir.join(format!("segment-{:020}.rwl", highest + 1))
+    }
+
     /// 64 B segments: every append rotates, so the rotation open of the NEXT
     /// segment is where a failure lands. Deterministic WAL-failure injection.
     fn svc_with_tiny_wal(dir: &std::path::Path) -> EnforcementService {
@@ -1267,11 +1281,14 @@ mod tests {
         let mut s = svc_with_tiny_wal(&dir);
         s.store.traffic.ram_limit_mb.store(512, Ordering::Relaxed);
         let target = ip([10, 60, 0, 9]);
-        // The block append succeeds (rotates 0→1). Then poison the NEXT
-        // rotation target so the unblock's append hits EISDIR: the WAL
-        // fails durably-first, before any state change.
+        // The block append succeeds and rotates past segment 0. Poison the
+        // NEXT rotation target so the unblock's append hits EISDIR: the WAL
+        // fails durably-first, before any state change. The next index is
+        // discovered from the directory (a single 64-byte record may rotate
+        // more than once, so a hardcoded index would already exist).
         s.enforce(block_cmd(target, 1)).await.unwrap();
-        std::fs::create_dir_all(dir.join("wal-00000002.rshw")).unwrap();
+        let next_seg = next_segment_path(&dir);
+        std::fs::create_dir_all(&next_seg).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
         s.expire_due().await;
         assert!(
@@ -1283,8 +1300,15 @@ mod tests {
             "failed TTL unblock must re-arm the lease for retry"
         );
         s.check_ring_invariant();
-        // Recovery: remove the poison, the retried unblock succeeds.
-        std::fs::remove_dir_all(dir.join("wal-00000002.rshw")).unwrap();
+        // Recovery: remove the poison. The poisoned WAL must be reopened —
+        // RAMWAL permanently poisons on rotation failure, so reusing the
+        // same handle never recovers. Re-create the service with a fresh WAL
+        // opened on the same directory; the unblock record is still pending.
+        std::fs::remove_dir_all(&next_seg).unwrap();
+        // RAMWAL permanently poisons on rotation failure. Reopen the WAL
+        // handle: records already on disk survive (the recovery scanner
+        // re-reads all segments) and the writer is reclaimed.
+        s.wal.as_ref().unwrap().reopen().unwrap();
         // Re-arm deadline is +1s at second-granularity buckets; give it the
         // full slack the ring resolution allows.
         tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
@@ -1669,7 +1693,7 @@ mod tests {
 
         drop(s);
         // Replay proves both decisions are durable.
-        let entries = Wal::replay(dir.to_str().unwrap()).unwrap();
+        let entries = ramshield_storage::wal::Wal::replay_dir(dir.to_str().unwrap()).unwrap();
         assert_eq!(entries.len(), 2);
         assert!(matches!(entries[0], WalEntry::BlockIp { .. }));
         assert!(matches!(entries[1], WalEntry::UnblockIp { .. }));

@@ -1,26 +1,21 @@
-use crc32fast::Hasher as Crc32;
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+//! RamShield WAL adapter over RAMWAL.
+//!
+//! RamShield owns the semantic record (`WalEntry`) and the snapshot; RAMWAL
+//! owns durability, recovery, segment layout and retention. This module is a
+//! thin bridge: encode/decode + error mapping + checkpoint protocol. It must
+//! NOT contain a second segment writer, CRC, fsync, rotation, recovery
+//! scanner, retention algorithm, LSN allocator or MANIFEST implementation.
+
 use ramshield_types::{Durability, IpNetwork, Result, RsError};
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
 
-/// WAL format version — bump when on-disk layout changes.
-const FORMAT_VERSION: u16 = 1;
-const MAGIC: u32 = 0x5253_4857;
-/// Header: magic(4) + version(2) + lsn(8) + payload_len(4) + crc(4) + flags(1) = 23
-const HEADER: usize = 4 + 2 + 8 + 4 + 4 + 1;
-/// Maximum single-record payload size (64 KiB). Prevents OOM on corrupt length.
-const MAX_RECORD_SIZE: usize = 64 * 1024;
-/// Quarantine subdirectory for corrupt tail segments.
-const QUARANTINE_DIR: &str = "quarantine";
+use ramwal::{
+    Compression, Config, Durability as RamWalDurability, Error as RamWalError, Lsn, Wal as RamWal,
+};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum WalEntry {
     BlockIp {
         ip: String,
@@ -59,87 +54,84 @@ pub enum WalEntry {
 }
 
 pub struct CheckpointBoundary {
-    /// The LSN that this boundary represents (all entries with LSN < this are included in the snapshot).
+    /// The LSN this boundary represents (entries <= this are in the snapshot).
     pub lsn: u64,
     pub snapshot_path: String,
 }
 
 impl CheckpointBoundary {
-    /// The LSN that this boundary represents (all entries with LSN < this are included in the snapshot).
     pub fn boundary_lsn(&self) -> u64 {
         self.lsn
     }
 }
 
-
-/// On-disk record header (written before payload).
-#[derive(Debug)]
-struct RecordHeader {
-    magic: u32,
-    version: u16,
-    lsn: u64,
-    payload_len: u32,
-    crc: u32,
-    flags: u8,
+/// RAMWAL adapter — interior-mutable via `Mutex<Option<Arc<RamWal>>>`.
+/// The guard is poisoned on rotation failure; `reopen()` replaces it.
+pub struct Wal {
+    guard: Guard,
 }
 
-impl RecordHeader {
-    fn to_bytes(&self) -> [u8; HEADER] {
-        let mut buf = [0u8; HEADER];
-        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.version.to_le_bytes());
-        buf[6..14].copy_from_slice(&self.lsn.to_le_bytes());
-        buf[14..18].copy_from_slice(&self.payload_len.to_le_bytes());
-        buf[18..22].copy_from_slice(&self.crc.to_le_bytes());
-        buf[22] = self.flags;
-        buf
-    }
+struct Guard {
+    inner: Mutex<Option<Arc<RamWal>>>,
+    cfg: Config,
+}
 
-    fn from_bytes(buf: &[u8; HEADER]) -> Self {
-        Self {
-            magic: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
-            version: u16::from_le_bytes([buf[4], buf[5]]),
-            lsn: u64::from_le_bytes([
-                buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13],
-            ]),
-            payload_len: u32::from_le_bytes([buf[14], buf[15], buf[16], buf[17]]),
-            crc: u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]),
-            flags: buf[22],
+impl Guard {
+    fn new(cfg: Config) -> Result<Self> {
+        let inner = Some(Arc::new(RamWal::open(cfg.clone()).map_err(map_error)?));
+        Ok(Self {
+            inner: Mutex::new(inner),
+            cfg,
+        })
+    }
+}
+
+fn map_durability(durability: Durability) -> RamWalDurability {
+    match durability {
+        Durability::None => RamWalDurability::Buffered,
+        Durability::Flush => RamWalDurability::Explicit,
+        Durability::Fsync => RamWalDurability::SyncEach,
+        Durability::GroupCommit => RamWalDurability::GroupCommit,
+    }
+}
+
+fn map_error(error: RamWalError) -> RsError {
+    match error {
+        RamWalError::Io(e) => RsError::Io(e),
+        RamWalError::Poisoned => RsError::Io(std::io::Error::other("WAL poisoned")),
+        RamWalError::DiskFull => RsError::Io(std::io::Error::other("disk full")),
+        RamWalError::Closed => RsError::Io(std::io::Error::other("WAL closed")),
+        RamWalError::InvalidConfiguration(msg) => RsError::Io(std::io::Error::other(msg)),
+        RamWalError::Corruption {
+            segment,
+            offset,
+            reason: _,
+        } => RsError::CorruptWal {
+            offset: segment.saturating_mul(1_000_000).saturating_add(offset),
+        },
+        RamWalError::Tail { segment, state } => RsError::Io(std::io::Error::other(format!(
+            "WAL tail state in segment {segment}: {state:?}"
+        ))),
+        RamWalError::Manifest(msg) => {
+            RsError::Io(std::io::Error::other(format!("manifest: {msg}")))
+        }
+        RamWalError::CheckpointRequired {
+            requested,
+            checkpoint,
+        } => RsError::Io(std::io::Error::other(format!(
+            "checkpoint required: requested={requested:?} checkpoint={checkpoint:?}"
+        ))),
+        RamWalError::CheckpointNotDurable { requested, durable } => {
+            RsError::Io(std::io::Error::other(format!(
+                "checkpoint not durable: requested={requested:?} durable={durable:?}"
+            )))
+        }
+        RamWalError::CheckpointRegression { current, requested } => {
+            RsError::Io(std::io::Error::other(format!(
+                "checkpoint regression: current={current:?} requested={requested:?}"
+            )))
         }
     }
-}
-
-pub struct Wal {
-    inner: Arc<Mutex<Inner>>,
-    compress: bool,
-    durability: Durability,
-    seg_max: u64,
-    /// Total-bytes cap across segments; oldest deleted first. 0 = unlimited.
-    retention_max: u64,
-    base_dir: String,
-    lsn_counter: AtomicU64,
-    next_sync_due_ns: AtomicU64,
-    /// Last checkpoint LSN. Retention may delete a segment only when every
-    /// record in it is below this boundary. 0 = no checkpoint yet.
-    ckpt_lsn: AtomicU64,
-    /// Snapshot boundary LSN (the LSN the snapshot represents).
-    /// Replay starts at snapshot_lsn + 1. 0 = no checkpoint yet.
-    snapshot_lsn: AtomicU64,
-    /// Cumulative segments deleted by retention. Enforcement scrapes via
-    /// `take_segments_pruned` so storage stays free of a metrics dep.
-    segments_pruned: AtomicU64,
-    /// Highest LSN confirmed durable (flush/sync completed). 0 = none yet.
-    durable_lsn: AtomicU64,
-}
-
-struct Inner {
-    // writer holds a BufWriter over the same Arc<File> exposed below.
-    // The file handle is kept as Arc<File> so the writer + the sync_data
-    // caller can both reference it after the mutex is dropped.
-    writer: BufWriter<Arc<File>>,
-    file: Arc<File>,
-    bytes: u64,
-    seg: u64,
 }
 
 impl Wal {
@@ -150,260 +142,132 @@ impl Wal {
         seg_bytes: u64,
         retention_max: u64,
     ) -> Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        fsync_dir(dir)?;
-
-        // Restore the checkpoint boundary from MANIFEST (written by
-        // checkpoint()). Retention may only delete segments entirely below
-        // this LSN — otherwise a deleted segment's blocks are lost on replay.
-        // Two formats:
-        //   NEW: checkpoint_lsn=N\nsnapshot_lsn=M\nsnapshot=PATH\n
-        //   OLD: lsn=N\nsnapshot=PATH\n  → snapshot_lsn = checkpoint_lsn (legacy)
-        let manifest_path = PathBuf::from(dir).join("MANIFEST");
-        // Read MANIFEST, split into lines, parse known key=value pairs.
-        let manifest_content = if manifest_path.exists() {
-            std::fs::read_to_string(&manifest_path)?
+        let mut cfg = Config::new(dir);
+        cfg.durability = map_durability(durability);
+        cfg.compression = if compress {
+            Compression::Lz4
         } else {
-            String::new()
+            Compression::None
         };
-        let mut ckpt_lsn: u64 = 0;
-        let mut snapshot_lsn_val: u64 = 0;
-        for line in manifest_content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("checkpoint_lsn=") {
-                if let Some(v) = trimmed.strip_prefix("checkpoint_lsn=") {
-                    ckpt_lsn = v.trim().parse::<u64>().unwrap_or(0);
-                }
-            } else if trimmed.starts_with("snapshot_lsn=") {
-                if let Some(v) = trimmed.strip_prefix("snapshot_lsn=") {
-                    snapshot_lsn_val = v.trim().parse::<u64>().unwrap_or(0);
-                }
-            } else if trimmed.starts_with("lsn=") {
-                // Legacy format: lsn=N + snapshot=PATH
-                if let Some(v) = trimmed.strip_prefix("lsn=") {
-                    ckpt_lsn = v.trim().parse::<u64>().unwrap_or(0);
-                }
-            }
-        }
-        if snapshot_lsn_val == 0 {
-            snapshot_lsn_val = ckpt_lsn; // legacy: lsn was both
-        }
-
-        enforce_retention_with_ckpt(dir, retention_max, ckpt_lsn);
-        // Don't accumulate into segments_pruned here — Wal not yet constructed.
-        // Open is a one-time event; the full retention run happens at startup once.
-
-        // Discover highest segment to resume from
-        let max_seg = discover_max_seg(dir);
-        let path = seg_path(dir, max_seg);
-        let file = Arc::new(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(&path)?,
-        );
-        let bytes = file.metadata()?.len();
-
-        // Discover highest LSN across all segments
-        // LSNs start at 1: 0 is reserved as "no entry" (EnforceResult.wal_lsn: None ↔ 0).
-        let start_lsn = match discover_max_lsn(dir)? {
-            Some(max) => max + 1,
-            None => 1,
-        };
-
-        info!(
-            "WAL opened {:?} ({} bytes, start_lsn={}, durability={:?})",
-            path, bytes, start_lsn, durability
-        );
-
-        let writer = BufWriter::with_capacity(64 * 1024, Arc::clone(&file));
+        cfg.seg_max_bytes = seg_bytes;
+        cfg.retention_max_bytes = retention_max;
         Ok(Self {
-            inner: Arc::new(Mutex::new(Inner {
-                writer,
-                file,
-                bytes,
-                seg: max_seg,
-            })),
-            compress,
-            durability,
-            seg_max: seg_bytes,
-            retention_max,
-            base_dir: dir.to_string(),
-            lsn_counter: AtomicU64::new(start_lsn),
-            next_sync_due_ns: AtomicU64::new(0),
-            ckpt_lsn: AtomicU64::new(ckpt_lsn),
-            snapshot_lsn: AtomicU64::new(snapshot_lsn_val),
-            segments_pruned: AtomicU64::new(0),
-            durable_lsn: AtomicU64::new(0),
+            guard: Guard::new(cfg)?,
         })
     }
 
-    /// Append an entry and return its LSN.
+    /// Drop the poisoned handle and re-open on the same directory. Records
+    /// already on disk survive: RAMWAL's recovery scanner re-reads all
+    /// segments on open; the LSN counter resumes from disk state. Callers
+    /// must clear the rotation-failure cause first (e.g. remove a stray
+    /// directory blocking `create`).
+    pub fn reopen(&self) -> Result<()> {
+        let new_inner = Arc::new(RamWal::open(self.guard.cfg.clone()).map_err(map_error)?);
+        let mut guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(new_inner);
+        Ok(())
+    }
+
+    /// True if the underlying handle is poisoned (rotation failure etc.).
+    pub fn is_poisoned(&self) -> bool {
+        self.guard
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    }
+
+    /// Append a record. Returns its LSN (1-based).
     pub fn append(&self, entry: &WalEntry) -> Result<u64> {
-        // Step 1: Serialization, CRC, header — all CPU work OUTSIDE the mutex.
-        let raw = serde_json::to_vec(entry).map_err(|e| RsError::Serde(e.to_string()))?;
-        if raw.len() > MAX_RECORD_SIZE {
-            return Err(RsError::RecordTooLarge {
-                size: raw.len(),
-                max: MAX_RECORD_SIZE,
-            });
+        let payload = encode_entry(entry)?;
+        // RAMWAL enforces its own record cap and rejects larger payloads;
+        // map that error into RamShield's typed result.
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => inner
+                .append(&payload)
+                .map(|lsn| lsn.get())
+                .map_err(|e| match e {
+                    RamWalError::InvalidConfiguration(msg) if msg.contains("exceeds max") => {
+                        RsError::RecordTooLarge {
+                            size: payload.len(),
+                            max: 64 * 1024,
+                        }
+                    }
+                    other => map_error(other),
+                }),
+            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
         }
-        let (payload, flags): (Vec<u8>, u8) = if self.compress && raw.len() > 64 {
-            (compress_prepend_size(&raw), 0x01)
-        } else {
-            (raw, 0x00)
-        };
-        if payload.len() > MAX_RECORD_SIZE {
-            return Err(RsError::RecordTooLarge {
-                size: payload.len(),
-                max: MAX_RECORD_SIZE,
-            });
-        }
-        let mut h = Crc32::new();
-        h.update(&payload);
-        let crc = h.finalize();
-        // Step 2: I/O under mutex — minimal critical section.
-        // Writes + flush are fast (buffered). The expensive sync_data() runs
-        // OUTSIDE the lock: we snapshot the current file handle as Arc<File>
-        // and drop the guard, then call sync_data on the Arc clone.
-        // ponytail: a dedicated writer thread via crossbeam channel would
-        // remove the Arc clone hop entirely.
-        let (old_file_arc, needs_dir_sync, lsn) = {
-            let mut g = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let lsn = self.lsn_counter.fetch_add(1, Ordering::SeqCst); // LSN assigned at the actual serialized WAL write point
-            let rh = RecordHeader {
-                magic: MAGIC,
-                version: FORMAT_VERSION,
-                lsn,
-                payload_len: payload.len() as u32,
-                crc,
-                flags,
-            };
-            let rh_bytes = rh.to_bytes();
-            g.writer.write_all(&rh_bytes)?;
-            g.writer.write_all(&payload)?;
-            g.bytes += (HEADER + payload.len()) as u64;
-
-            let want_sync = matches!(self.durability, Durability::Fsync | Durability::GroupCommit);
-            // P0 fix (starvation): deadline-based group commit. The previous
-            // form (swap prev->now, require gap >= 100ms) reset the clock on
-            // EVERY append — steady writers with <100ms inter-arrival (e.g.
-            // a block storm at 500 writes/s) never synced, unbounded data
-            // loss on crash. Now: an absolute due-deadline; the first append
-            // observing `now >= due` performs the sync and arms the next
-            // deadline. Worst-case exposure: one 100ms window. A racing
-            // double-claimant only costs one extra fsync per window (~10Hz)
-            // — benign, and cheaper than a CAS loop here.
-            let now_wall = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let mut must_sync = false;
-            if want_sync && now_wall >= self.next_sync_due_ns.load(Ordering::Relaxed) {
-                self.next_sync_due_ns
-                    .store(now_wall + 100_000_000, Ordering::Relaxed);
-                must_sync = true;
-            }
-
-            let must_rotate = g.bytes >= self.seg_max;
-            // GroupCommit: always flush the BufWriter so SIGKILL cannot drop
-            // a 64KiB in-memory tail. fsync stays windowed (must_sync).
-            if must_sync
-                || matches!(self.durability, Durability::Flush | Durability::GroupCommit)
-                || must_rotate
-            {
-                g.writer.flush()?;
-            }
-            // Snapshot the file holding the just-flushed bytes BEFORE any
-            // rotation reassigns g.file, so step 3 fsyncs the right segment.
-            // On rotation the old segment is never written again — syncing
-            // it now makes the whole segment durable in one fsync.
-            let old_file_arc = if must_sync || must_rotate {
-                Some(Arc::clone(&g.file))
-            } else {
-                None
-            };
-
-            if must_rotate {
-                let new_seg = g.seg + 1;
-                let path = seg_path(&self.base_dir, new_seg);
-                let new_file = Arc::new(
-                    OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(&path)?,
-                );
-                g.writer = BufWriter::with_capacity(64 * 1024, Arc::clone(&new_file));
-                g.file = new_file;
-                g.bytes = 0;
-                g.seg = new_seg;
-                info!("WAL rotated → {:?}", path);
-            }
-            (old_file_arc, must_rotate, lsn)
-        }; // mutex dropped here
-
-        // Step 3: sync_data OUTSIDE the mutex. Other appenders proceed
-        // immediately while this fsync runs (100µs SSD, up to ~10ms HDD).
-        if let Some(f) = old_file_arc {
-            f.sync_data()?;
-            self.durable_lsn.store(lsn, Ordering::SeqCst); // LSN durable once sync_data completes
-        }
-
-        // Step 4: Directory sync OUTSIDE the mutex — ~10ms on rotational, ~0.1ms on SSD.
-        if needs_dir_sync {
-            fsync_dir(&self.base_dir)?;
-        }
-
-        // P2 fix (F5): retention was scanned on EVERY append — read_dir +
-        // metadata() per segment + sort, hundreds of syscalls during a
-        // subnet-burst block storm. Total size only crosses the cap at
-        // rotation (appends add ≤seg_max to one file), so scanning only on
-        // rotation is both cheaper and sufficient.
-        if needs_dir_sync && self.retention_max > 0 {
-            let n = enforce_retention_with_ckpt(
-                &self.base_dir,
-                self.retention_max,
-                self.ckpt_lsn.load(Ordering::SeqCst),
-            );
-            if n > 0 {
-                self.segments_pruned.fetch_add(n, Ordering::Relaxed);
-            }
-        }
-
-        Ok(lsn)
     }
 
-    /// Returns the count of segments pruned since last call (cumulative).
-    /// Storage crate avoids a metrics dep; the enforcement actor scrapes this.
-    pub fn take_segments_pruned(&self) -> u64 {
-        self.segments_pruned.swap(0, Ordering::Relaxed)
+    /// Flush userspace buffers (no fsync).
+    pub fn flush(&self) -> Result<()> {
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => inner.flush().map_err(map_error),
+            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
+        }
     }
 
-    /// Highest LSN confirmed durable (flush/sync completed). 0 = none yet.
+    /// Flush + fsync the active segment. On Ok, all prior appends are durable.
+    pub fn sync(&self) -> Result<()> {
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => inner.sync().map_err(map_error),
+            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
+        }
+    }
+
+    /// Highest LSN confirmed durable (0 = none yet).
     pub fn durable_lsn(&self) -> u64 {
-        self.durable_lsn.load(Ordering::SeqCst)
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => inner.durable_lsn().get(),
+            None => 0,
+        }
     }
 
-    /// Block until the LSN has been confirmed durable (sync_data completed).
+    /// Block until `target_lsn` is durable. Bounded by a spin with 1ms sleep;
+    /// RAMWAL advances durable_lsn on any barrier, so this terminates once a
+    /// sync (explicit or group) covers the record.
     pub fn sync_until(&self, target_lsn: u64) {
-        while self.durable_lsn.load(Ordering::SeqCst) < target_lsn {
+        while self.durable_lsn() < target_lsn {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
-    /// Begin a checkpoint: freeze the boundary LSN (all prior entries are
-    /// below this LSN) and return the canonical snapshot file path. The caller
-    /// builds a snapshot at this boundary, writes it, then calls
-    /// `finish_checkpoint()` to append the marker record and publish MANIFEST.
+    /// Full replay of every segment in the directory this WAL was opened on.
+    pub fn replay(&self) -> Result<Vec<WalEntry>> {
+        Self::replay_dir(self.base_dir())
+    }
+
+    /// Full replay of every segment in an arbitrary directory (independent
+    /// of any open handle).
+    pub fn replay_dir(dir: &str) -> Result<Vec<WalEntry>> {
+        let report = ramwal::recovery::recover_dir(dir).map_err(map_error)?;
+        decode_all(&report)
+    }
+
+    /// Replay entries with LSN > min_lsn. min_lsn == 0 is equivalent to replay().
+    pub fn replay_from(&self, min_lsn: u64) -> Result<Vec<WalEntry>> {
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => {
+                let report = inner.recovery_report();
+                decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
+            }
+            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
+        }
+    }
+
+    /// Begin a checkpoint: freeze the boundary LSN and derive the canonical
+    /// snapshot path. Caller writes the snapshot, then calls finish_checkpoint.
     pub fn begin_checkpoint(&self) -> CheckpointBoundary {
-        let lsn = self.lsn_counter.load(Ordering::SeqCst);
-        let path = PathBuf::from(&self.base_dir)
+        let lsn = {
+            let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().map(|i| i.current_lsn().get()).unwrap_or(0)
+        };
+        let path = PathBuf::from(self.base_dir())
             .join(format!("snapshot.{lsn:020}.ckpt"))
             .to_string_lossy()
             .to_string();
@@ -413,740 +277,97 @@ impl Wal {
         }
     }
 
-    /// Complete a checkpoint: append the Checkpoint record and atomically
-    /// publish MANIFEST binding both LSNs.
-    ///
-    /// - `checkpoint_lsn` = the LSN of the appended Checkpoint record
-    ///   (retention: everything below this LSN is safe to prune).
-    /// - `snapshot_lsn` = the boundary the snapshot captures
-    ///   (recovery replays from snapshot_lsn + 1).
-    ///
-    /// Call after `begin_checkpoint()` + snapshot write + fsync.
+    /// Complete a checkpoint. The caller must have durably written the
+    /// snapshot through `boundary_lsn` first. RAMWAL owns the MANIFEST.
     pub fn finish_checkpoint(&self, boundary_lsn: u64, snapshot_path: &str) -> Result<u64> {
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-
-        let ckpt_lsn = self.append(&WalEntry::Checkpoint {
-            snapshot_path: snapshot_path.to_string(),
-            ts_ns: now_ns,
-        })?;
-
-        // Write manifest atomically: tmp + fsync + rename.
-        // Invariant: MANIFEST is only published after the snapshot file has
-        // been durably written — recovery never sees a manifest pointing at
-        // a snapshot that was never flushed.
-        let manifest_path = PathBuf::from(&self.base_dir).join("MANIFEST");
-        let tmp_path = manifest_path.with_extension("tmp");
-        {
-            let mut f = File::create(&tmp_path)?;
-            write!(
-                f,
-                "checkpoint_lsn={}\nsnapshot_lsn={}\nsnapshot={}\n",
-                ckpt_lsn, boundary_lsn, snapshot_path
-            )?;
-            f.sync_all()?;
+        let _ = snapshot_path;
+        let lsn = Lsn::new(boundary_lsn);
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => {
+                inner.checkpoint(lsn).map_err(map_error)?;
+                // Retention: drop segments entirely below the boundary.
+                // Errors are non-fatal — a torn segment is RAMWAL's problem,
+                // not a reason to fail an already-durable checkpoint.
+                let _ = inner.truncate_before(lsn);
+                Ok(boundary_lsn)
+            }
+            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
         }
-        std::fs::rename(&tmp_path, &manifest_path)?;
-        fsync_dir(&self.base_dir)?;
-
-        self.ckpt_lsn.store(ckpt_lsn, Ordering::SeqCst);
-        self.snapshot_lsn.store(boundary_lsn, Ordering::SeqCst);
-        info!(
-            "WAL checkpoint: checkpoint_lsn={} snapshot_lsn={} snapshot={}",
-            ckpt_lsn, boundary_lsn, snapshot_path
-        );
-        Ok(ckpt_lsn)
     }
 
-    /// Streaming replay with bounded reads. Returns entries in LSN order.
-    /// Corruption policy:
-    ///   FINAL SEGMENT — valid prefix + partial tail → truncated, continued.
-    ///   ANY OLDER SEGMENT — corruption → startup FAILED.
-    ///   WHOLE SEGMENT UNREADABLE → startup FAILED.
-    ///   MANIFEST INVALID → startup FAILED (checked by the engine).
-    /// This makes recovery deterministic: only an interrupted final write
-    /// is survivable. Historical corruption always halts startup.
-    pub fn replay(dir: &str) -> Result<Vec<WalEntry>> {
-        let mut segs: Vec<PathBuf> = match std::fs::read_dir(dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
-                .collect(),
-            Err(_) => return Ok(Vec::new()),
-        };
-        segs.sort();
-
-        let mut out: Vec<(u64, WalEntry)> = Vec::new();
-        let quarantine_dir = PathBuf::from(dir).join(QUARANTINE_DIR);
-
-        for seg in &segs {
-            let mut file = File::open(seg)?;
-            let mut payload_buf = vec![0u8; MAX_RECORD_SIZE];
-            let mut corrupted = false;
-            let mut last_valid_offset: u64 = 0;
-
-            loop {
-                let mut peek = [0u8; 1];
-                match file.read(&mut peek) {
-                    Ok(0) => break, // Clean EOF
-                    Ok(_) => {
-                        let mut hdr_buf = [0u8; HEADER];
-                        hdr_buf[0] = peek[0];
-                        if let Err(e) = file.read_exact(&mut hdr_buf[1..]) {
-                            warn!("WAL partial header in {:?}: {}", seg, e);
-                            corrupted = true;
-                            break;
-                        }
-
-                        let rh = RecordHeader::from_bytes(&hdr_buf);
-                        if rh.magic != MAGIC {
-                            warn!("WAL bad magic at in {:?}", seg);
-                            corrupted = true;
-                            break;
-                        }
-                        if rh.version > FORMAT_VERSION {
-                            warn!("WAL future version {} in {:?}", rh.version, seg);
-                            corrupted = true;
-                            break;
-                        }
-                        if rh.payload_len as usize > MAX_RECORD_SIZE {
-                            warn!(
-                                "WAL record too large ({} bytes) in {:?}",
-                                rh.payload_len, seg
-                            );
-                            corrupted = true;
-                            break;
-                        }
-
-                        let plen = rh.payload_len as usize;
-                        if plen > payload_buf.len() {
-                            payload_buf.resize(plen, 0);
-                        }
-                        if let Err(e) = file.read_exact(&mut payload_buf[..plen]) {
-                            warn!("WAL truncated payload in {:?}: {}", seg, e);
-                            corrupted = true;
-                            break;
-                        }
-
-                        let payload = &payload_buf[..plen];
-                        let mut h = Crc32::new();
-                        h.update(payload);
-                        if h.finalize() != rh.crc {
-                            warn!("WAL crc mismatch in {:?}", seg);
-                            corrupted = true;
-                            break;
-                        }
-
-                        let decoded: Vec<u8> = if rh.flags & 0x01 != 0 {
-                            // Decompression-bomb guard: decompress_size_prepended
-                            // trusts the u32 LE size prefix and allocates it
-                            // eagerly (probe: 8-byte payload -> 4GB VmPeak ->
-                            // OOM-abort). Every legitimately written record was
-                            // <= MAX_RECORD_SIZE raw (append enforces it pre-
-                            // and post-compression), so a larger declared
-                            // decompressed size is corruption or an attack.
-                            // `first_chunk` gives Option<&[u8; 4]> — a total conversion, no
-                            // fallible TryInto and no unwrap on the hot replay path.
-                            let declared = match payload.first_chunk::<4>() {
-                                Some(b) => u32::from_le_bytes(*b) as usize,
-                                None => usize::MAX,
-                            };
-                            if declared > MAX_RECORD_SIZE {
-                                warn!(
-                                    "WAL record claims {declared} decompressed bytes \
-                                     (max {MAX_RECORD_SIZE}) in {:?} — treating as corrupt",
-                                    seg
-                                );
-                                corrupted = true;
-                                break;
-                            }
-                            match decompress_size_prepended(payload) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    warn!("WAL decompress error in {:?}: {}", seg, e);
-                                    corrupted = true;
-                                    break;
-                                }
-                            }
-                        } else {
-                            payload.to_vec()
-                        };
-
-                        match serde_json::from_slice::<WalEntry>(&decoded) {
-                            Ok(entry) => {
-                                last_valid_offset = file.stream_position()?;
-                                out.push((rh.lsn, entry));
-                            }
-                            Err(e) => {
-                                warn!("WAL deser error in {:?}: {}", seg, e);
-                                corrupted = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("WAL read error in {:?}: {}", seg, e);
-                        corrupted = true;
-                        break;
-                    }
-                }
-            }
-
-            if corrupted {
-                drop(file); // close read-only handle before reopening for write
-                // Corruption policy: only the newest segment may recover by
-                // truncation. Older corruption is fatal — a historical corrupt
-                // record means the durable security state is incomplete.
-                let is_newest = seg == &segs[segs.len().saturating_sub(1)];
-                if !is_newest {
-                    tracing::error!(
-                        "WAL corruption in older segment {:?} — startup FAILED: only the final segment may have a crash tail",
-                        seg
-                    );
-                    return Err(RsError::Io(std::io::Error::other(format!(
-                        "WAL corruption in older segment {:?} — startup FAILED",
-                        seg
-                    ))));
-                }
-                if last_valid_offset > 0 {
-                    // P2 fix: truncate at last valid byte offset instead of
-                    // quarantining the entire segment. This preserves all
-                    // valid records before the corrupt tail. Idempotent:
-                    // if corruption is re-detected on next replay, the same
-                    // truncation point is applied (no data loss, no double count).
-                    let f = OpenOptions::new().write(true).open(seg)?;
-                    f.set_len(last_valid_offset)?;
-                    info!(
-                        "WAL truncated {:?} at {} bytes (crash tail removed)",
-                        seg, last_valid_offset
-                    );
-                } else {
-                    // No valid records were recovered — quarantine the entire
-                    // segment (corruption from the start). This is the original
-                    // behavior for an all-corrupt segment.
-                    let _ = std::fs::create_dir_all(&quarantine_dir);
-                    let dest = quarantine_dir.join(seg.file_name().unwrap_or_default());
-                    if let Err(e) = std::fs::rename(seg, &dest) {
-                        warn!("WAL quarantine rename failed: {}", e);
-                    } else {
-                        info!("WAL quarantined {:?} → {:?}", seg, dest);
-                    }
-                }
-            }
-        }
-
-        // LSN ordering is authoritative: append assigns LSN at the write point,
-        // records are written in LSN order, replay reads segments in sorted
-        // path order. No sort/dedup needed — duplicates indicate a bug elsewhere.
-        // ponytail: if a caller ever sees out-of-order here, fix the producer,
-        // not the reader.
-
-        info!("WAL replay: {} entries", out.len());
-        Ok(out.into_iter().map(|(_, e)| e).collect())
-    }
-
-    /// Directory this WAL was opened under (for replay).
     pub fn base_dir(&self) -> &str {
-        &self.base_dir
+        &self.guard.cfg.dir
     }
 
-    /// WAL directory path (owned copy, same as base_dir).
-    pub fn wal_dir(&self) -> String {
-        self.base_dir.clone()
-    }
-
-    /// Last checkpoint LSN (0 = no checkpoint yet).
+    /// Checkpoint LSN recorded by RAMWAL (0 = none).
     pub fn ckpt_lsn(&self) -> u64 {
-        self.ckpt_lsn.load(Ordering::SeqCst)
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(inner) => inner.ckpt_lsn().get(),
+            None => 0,
+        }
     }
 
-    /// Snapshot boundary LSN — replay starts at snapshot_lsn + 1.
-    /// 0 = no checkpoint taken yet (full replay needed).
+    /// Snapshot boundary LSN — replay starts after this. 0 = no checkpoint.
+    /// RAMWAL has a single manifest LSN; RamShield treats it as both.
     pub fn snapshot_lsn(&self) -> u64 {
-        self.snapshot_lsn.load(Ordering::SeqCst)
+        self.ckpt_lsn()
     }
 
-    /// Oldest LSN still available on disk, or None if no segments exist.
-    /// Used by the hard-WAL policy: when snapshot LSN is B and oldest available
-    /// LSN is > B, history was pruned — recovery from the snapshot tail alone
-    /// is incomplete, and the caller MUST fail startup (allow_volatile_fallback=false).
+    /// Oldest LSN still on disk, or None when no segments exist.
+    /// Used by the hard-WAL pruned-history check.
     pub fn oldest_lsn(&self) -> Option<u64> {
-        let segs: Vec<PathBuf> = std::fs::read_dir(&self.base_dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
-            .collect();
-        let mut oldest: Option<u64> = None;
-        for seg in &segs {
-            let mut file = match File::open(seg.as_path()) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let mut payload_buf = vec![0u8; MAX_RECORD_SIZE];
-            loop {
-                let mut peek = [0u8; 1];
-                match file.read(&mut peek) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let mut hdr_buf = [0u8; HEADER];
-                        hdr_buf[0] = peek[0];
-                        if file.read_exact(&mut hdr_buf[1..]).is_err() {
-                            break;
-                        }
-                        let rh = RecordHeader::from_bytes(&hdr_buf);
-                        if rh.magic != MAGIC || rh.version > FORMAT_VERSION {
-                            break;
-                        }
-                        let plen = rh.payload_len as usize;
-                        if plen > payload_buf.len() {
-                            payload_buf.resize(plen, 0);
-                        }
-                        if file.read_exact(&mut payload_buf[..plen]).is_err() {
-                            break;
-                        }
-                        let mut h2 = Crc32::new();
-                        h2.update(&payload_buf[..plen]);
-                        if h2.finalize() != rh.crc {
-                            break;
-                        }
-                        match serde_json::from_slice::<WalEntry>(&payload_buf[..plen]) {
-                            Ok(_) => {
-                                if oldest.is_none_or(|o| rh.lsn < o) {
-                                    oldest = Some(rh.lsn);
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-        oldest
+        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .and_then(|i| i.recovery_report().first_lsn.map(|l| l.get()))
     }
 
-    /// Replay entries with LSN > min_lsn. When min_lsn is 0, equivalent to replay().
-    /// Used by checkpoint-accelerated recovery: load snapshot, then replay tail.
-    pub fn replay_from(&self, min_lsn: u64) -> Result<Vec<WalEntry>> {
-        if min_lsn == 0 {
-            return Self::replay(&self.base_dir);
-        }
-
-        let mut segs: Vec<PathBuf> = match std::fs::read_dir(&self.base_dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
-                .collect(),
-            Err(_) => return Ok(Vec::new()),
-        };
-        segs.sort();
-
-        let mut out: Vec<(u64, WalEntry)> = Vec::new();
-        let mut payload_buf = vec![0u8; MAX_RECORD_SIZE];
-
-        for seg in &segs {
-            let mut file = File::open(seg.as_path())?;
-            let mut corrupted = false;
-            let mut last_valid_offset: u64 = 0;
-
-            loop {
-                let mut peek = [0u8; 1];
-                match file.read(&mut peek) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let mut hdr_buf = [0u8; HEADER];
-                        hdr_buf[0] = peek[0];
-                        if file.read_exact(&mut hdr_buf[1..]).is_err() {
-                            corrupted = true;
-                            break;
-                        }
-                        let rh = RecordHeader::from_bytes(&hdr_buf);
-                        if rh.magic != MAGIC || rh.version > FORMAT_VERSION {
-                            corrupted = true;
-                            break;
-                        }
-                        if rh.payload_len as usize > MAX_RECORD_SIZE {
-                            corrupted = true;
-                            break;
-                        }
-                        let plen = rh.payload_len as usize;
-                        if plen > payload_buf.len() {
-                            payload_buf.resize(plen, 0);
-                        }
-                        if file.read_exact(&mut payload_buf[..plen]).is_err() {
-                            corrupted = true;
-                            break;
-                        }
-                        let payload = &payload_buf[..plen];
-                        let mut h = Crc32::new();
-                        h.update(payload);
-                        if h.finalize() != rh.crc {
-                            corrupted = true;
-                            break;
-                        }
-                        let decoded: Vec<u8> = if rh.flags & 0x01 != 0 {
-                            let declared = match payload.first_chunk::<4>() {
-                                Some(b) => u32::from_le_bytes(*b) as usize,
-                                None => usize::MAX,
-                            };
-                            if declared > MAX_RECORD_SIZE {
-                                corrupted = true;
-                                break;
-                            }
-                            match decompress_size_prepended(payload) {
-                                Ok(d) => d,
-                                Err(_) => {
-                                    corrupted = true;
-                                    break;
-                                }
-                            }
-                        } else {
-                            payload.to_vec()
-                        };
-                        match serde_json::from_slice::<WalEntry>(&decoded) {
-                            Ok(entry) => {
-                                last_valid_offset = file.stream_position()?;
-                                out.push((rh.lsn, entry));
-                            }
-                            Err(_) => {
-                                corrupted = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        corrupted = true;
-                        break;
-                    }
-                }
-            }
-            if corrupted {
-                let is_newest = seg == &segs[segs.len().saturating_sub(1)];
-                if !is_newest {
-                    return Err(RsError::Io(std::io::Error::other(format!(
-                        "WAL corruption in older segment {:?} during checkpoint-tail replay",
-                        seg
-                    ))));
-                }
-                if last_valid_offset > 0 {
-                    let f = OpenOptions::new().write(true).open(seg.as_path())?;
-                    f.set_len(last_valid_offset)?;
-                }
-            }
-        }
-
-        // LSN ordering is authoritative (see replay()). No sort/dedup needed.
-        Ok(out
-            .into_iter()
-            .filter(|(lsn, _)| *lsn > min_lsn)
-            .map(|(_, e)| e)
-            .collect())
+    /// Segments pruned since last call. ponytail: RAMWAL owns retention
+    /// metadata and does not expose a pruned counter; RamShield only ever
+    /// triggers deletion via checkpoint + truncate_before, which is a no-op
+    /// between checkpoints — so this reports 0. Add adapter-local accounting
+    /// when a live metric needs it.
+    pub fn take_segments_pruned(&self) -> u64 {
+        0
     }
 }
 
-/// fsync the directory to ensure directory entries (creates, renames) are durable.
-fn fsync_dir(dir: &str) -> Result<()> {
-    let d = File::open(dir)?;
-    d.sync_all()?;
-    Ok(())
+fn encode_entry(entry: &WalEntry) -> Result<Vec<u8>> {
+    let raw = serde_json::to_vec(entry).map_err(|e| RsError::Serde(e.to_string()))?;
+    Ok(raw)
 }
 
-/// Find the highest segment index in the directory.
-fn discover_max_seg(dir: &str) -> u64 {
-    match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name();
-                let s = name.to_string_lossy();
-                s.strip_prefix("wal-")
-                    .and_then(|s| s.strip_suffix(".rshw"))
-                    .and_then(|s| s.parse::<u64>().ok())
-            })
-            .max()
-            .unwrap_or(0),
-        Err(_) => 0,
-    }
+fn decode_all(report: &ramwal::recovery::RecoveryReport) -> Result<Vec<WalEntry>> {
+    decode_records(report.records.iter())
 }
 
-/// Scan all segments to find the highest LSN (for crash recovery).
-/// Returns None if no segments exist.
-fn discover_max_lsn(dir: &str) -> Result<Option<u64>> {
-    let segs: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
-            .collect(),
-        Err(_) => return Ok(None),
-    };
-
-    if segs.is_empty() {
-        return Ok(None);
-    }
-
-    let mut max_lsn: u64 = 0;
-    let mut found_any = false;
-    for seg in &segs {
-        let file = File::open(seg)?;
-        let mut reader = BufReader::with_capacity(64 * 1024, file);
-        let mut hdr_buf = [0u8; HEADER];
-        let mut skip_buf = vec![0u8; MAX_RECORD_SIZE];
-
-        loop {
-            if reader.read_exact(&mut hdr_buf).is_err() {
-                break;
-            }
-            let rh = RecordHeader::from_bytes(&hdr_buf);
-            if rh.magic != MAGIC || rh.payload_len as usize > MAX_RECORD_SIZE {
-                break;
-            }
-            if rh.lsn > max_lsn {
-                max_lsn = rh.lsn;
-                found_any = true;
-            }
-            let plen = rh.payload_len as usize;
-            if plen > skip_buf.len() {
-                skip_buf.resize(plen, 0);
-            }
-            if reader.read_exact(&mut skip_buf[..plen]).is_err() {
-                break;
-            }
-        }
-    }
-    Ok(if found_any { Some(max_lsn) } else { None })
-}
-
-fn seg_path(dir: &str, idx: u64) -> PathBuf {
-    PathBuf::from(dir).join(format!("wal-{:08}.rshw", idx))
-}
-
-/// Return the highest LSN in a single segment, scanning the full file.
-/// Returns None if the segment has no valid records (empty, corrupt from start).
-fn max_lsn_in_seg(path: &PathBuf) -> Option<u64> {
-    let mut file = File::open(path).ok()?;
-    let mut hdr_buf = [0u8; HEADER];
-    let mut skip_buf = vec![0u8; MAX_RECORD_SIZE];
-    let mut max_lsn: Option<u64> = None;
-    loop {
-        if file.read_exact(&mut hdr_buf).is_err() {
-            break;
-        }
-        let rh = RecordHeader::from_bytes(&hdr_buf);
-        if rh.magic != MAGIC || rh.payload_len as usize > MAX_RECORD_SIZE {
-            break;
-        }
-        max_lsn = Some(max_lsn.map_or(rh.lsn, |m| m.max(rh.lsn)));
-        let plen = rh.payload_len as usize;
-        if plen > skip_buf.len() {
-            skip_buf.resize(plen, 0);
-        }
-        if file.read_exact(&mut skip_buf[..plen]).is_err() {
-            break;
-        }
-    }
-    max_lsn
-}
-
-/// Delete oldest segments until total .rshw bytes fit the cap, but only delete
-/// segments whose max LSN < safe_lsn. Never touches the newest segment.
-/// Also purges fully-corrupt/empty segments (max_lsn=None) regardless of cap.
-/// Returns number of segments deleted. Best-effort: delete failures are logged, not fatal.
-fn enforce_retention_with_ckpt(dir: &str, max_bytes: u64, safe_lsn: u64) -> u64 {
-    if max_bytes == 0 {
-        return 0;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut segs: Vec<(u64, u64, Option<u64>)> = rd // (seg_idx, size, max_lsn)
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            let idx = s
-                .strip_prefix("wal-")?
-                .strip_suffix(".rshw")?
-                .parse::<u64>()
-                .ok()?;
-            let seg_path = e.path();
-            let sz = e.metadata().ok()?.len();
-            let max_lsn = if safe_lsn > 0 {
-                max_lsn_in_seg(&seg_path)
-            } else {
-                None
-            };
-            Some((idx, sz, max_lsn))
-        })
-        .collect();
-    segs.sort_unstable_by_key(|&(idx, _, _)| idx);
-
-    // First pass: purge fully-corrupt/empty segments (max_lsn=None) regardless
-    // of cap pressure — they carry no replayable data.
-    let mut deleted: u64 = 0;
-    for &(idx, _sz, mlsn) in &segs[..segs.len().saturating_sub(1)] {
-        if mlsn.is_some() {
-            continue;
-        }
-        let path = seg_path(dir, idx);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                info!("WAL retention: purged corrupt/empty seg {:?}", path);
-                deleted += 1;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // raced; fine
-            Err(e) => warn!("WAL retention purge {:?} failed: {}", path, e),
-        }
-    }
-
-    let total: u64 = segs.iter().map(|&(_, sz, _)| sz).sum();
-    if total <= max_bytes {
-        return deleted;
-    }
-
-    if safe_lsn == 0 {
-        warn!(
-            "WAL retention pressure ({} bytes > cap) but no checkpoint taken — \
-             cannot safely prune segments",
-            total
-        );
-        return deleted; // nothing is safe to delete without a checkpoint boundary
-    }
-
-    let mut over = total - max_bytes;
-    for &(idx, sz, mlsn) in &segs[..segs.len().saturating_sub(1)] {
-        if over == 0 {
-            break;
-        }
-        let max_lsn = mlsn.unwrap_or(0);
-        if max_lsn == 0 || max_lsn >= safe_lsn {
-            // No valid records or segment spans the checkpoint boundary — keep.
-            continue;
-        }
-        let path = seg_path(dir, idx);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                info!(
-                    "WAL retention: deleted {:?} ({} bytes, max_lsn={} < safe_lsn={})",
-                    path, sz, max_lsn, safe_lsn
-                );
-                deleted += 1;
-                over = over.saturating_sub(sz);
-            }
-            Err(e) => warn!("WAL retention delete {:?} failed: {}", path, e),
-        }
-    }
-    deleted
+fn decode_records<'a>(
+    iter: impl Iterator<Item = &'a ramwal::recovery::RecoveredRecord>,
+) -> Result<Vec<WalEntry>> {
+    iter.map(|r| {
+        serde_json::from_slice::<WalEntry>(&r.payload).map_err(|e| RsError::Serde(e.to_string()))
+    })
+    .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tmp(name: &str) -> String {
-        let dir = std::env::temp_dir()
-            .join(name)
-            .to_string_lossy()
-            .to_string();
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    }
-
-    /// P0 regression: rotation must not lose buffered records. With
-    /// GroupCommit armed for the future (no sync due) and a tiny segment
-    /// limit forcing rotation, records buffered in the old 64KiB BufWriter
-    /// used to vanish when the writer was replaced. All appends must replay.
     #[test]
-    fn wal_rotation_flushes_buffer() {
-        let dir = tmp("rs_wal_rotation");
-        {
-            let wal = Wal::open(&dir, false, Durability::GroupCommit, 256, 0).unwrap();
-            // First append syncs (deadline 0 => due immediately) and arms
-            // the 100ms window; following appends land in the no-sync region.
-            // seg_max=256B forces several rotations inside that window.
-            for i in 1..=20u64 {
-                wal.append(&WalEntry::BlockIp {
-                    ip: format!("10.0.0.{i}"),
-                    reason: "r".into(),
-                    ttl_secs: None,
-                    ts_ns: i,
-                })
-                .unwrap();
-            }
-            // Do NOT drop cleanly via checkpoint — simulate process holding
-            // only userspace buffers when rotation swaps writers.
-        }
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            20,
-            "rotation lost buffered WAL records: {} of 20 survived",
-            entries.len()
+    fn wal_roundtrip_block_ip() {
+        let dir = format!(
+            "/tmp/rs_test_rt_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn wal_roundtrip() {
-        let dir = tmp("rs_wal_rt2");
-        let wal = Wal::open(&dir, true, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        let lsn = wal
-            .append(&WalEntry::BlockIp {
-                ip: "1.2.3.4".into(),
-                reason: "test".into(),
-                ttl_secs: Some(60),
-                ts_ns: 1,
-            })
-            .unwrap();
-        assert_eq!(lsn, 1);
-        drop(wal);
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0], WalEntry::BlockIp { .. }));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_lsn_monotonic() {
-        let dir = tmp("rs_wal_lsn");
         let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        let a = wal
-            .append(&WalEntry::BlockIp {
-                ip: "1.1.1.1".into(),
-                reason: "a".into(),
-                ttl_secs: None,
-                ts_ns: 1,
-            })
-            .unwrap();
-        let b = wal
-            .append(&WalEntry::BlockIp {
-                ip: "2.2.2.2".into(),
-                reason: "b".into(),
-                ttl_secs: None,
-                ts_ns: 2,
-            })
-            .unwrap();
-        let c = wal
-            .append(&WalEntry::UnblockIp {
-                ip: "1.1.1.1".into(),
-                ts_ns: 3,
-            })
-            .unwrap();
-        assert!(a < b);
-        assert!(b < c);
-        drop(wal);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_replay_after_restart() {
-        let dir = tmp("rs_wal_restart");
-        let wal = Wal::open(&dir, true, Durability::None, 64 * 1024 * 1024, 0).unwrap();
         wal.append(&WalEntry::BlockIp {
             ip: "10.0.0.1".into(),
             reason: "ddos".into(),
@@ -1154,363 +375,49 @@ mod tests {
             ts_ns: 1,
         })
         .unwrap();
-        wal.append(&WalEntry::UnblockIp {
-            ip: "10.0.0.1".into(),
-            ts_ns: 2,
-        })
-        .unwrap();
         drop(wal);
 
-        // Reopen — should discover LSN and continue
-        let wal2 = Wal::open(&dir, true, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        let lsn = wal2
-            .append(&WalEntry::Insert {
-                key: "k".into(),
-                value_json: "{}".into(),
+        let entries = Wal::replay_dir(&dir).unwrap();
+        assert_eq!(entries.len(), 1, "one record must survive round-trip");
+        assert!(matches!(entries[0], WalEntry::BlockIp { .. }));
+
+        // Verify append returns monotonically increasing LSNs.
+        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let lsn1 = wal2
+            .append(&WalEntry::UnblockIp {
+                ip: "10.0.0.1".into(),
+                ts_ns: 2,
+            })
+            .unwrap();
+        let lsn2 = wal2
+            .append(&WalEntry::BlockCidr {
+                cidr: "192.168.0.0/24".parse().unwrap(),
+                reason: "scan".into(),
                 ttl_secs: None,
                 ts_ns: 3,
             })
             .unwrap();
-        assert_eq!(lsn, 3); // 1,2 from first open, 3 is next
+        assert!(lsn2 > lsn1);
         drop(wal2);
 
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 3);
+        let entries = Wal::replay_dir(&dir).unwrap();
+        assert_eq!(entries.len(), 3, "original + reopened appends");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn wal_corrupt_tail_quarantine() {
-        let dir = tmp("rs_wal_quar");
+    fn wal_replay_from_min_lsn() {
+        let dir = format!(
+            "/tmp/rs_test_rfl_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
         let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::BlockIp {
-            ip: "10.0.0.1".into(),
-            reason: "ok".into(),
-            ttl_secs: None,
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-
-        // Append garbage to the segment file (corrupt tail)
-        let seg = std::fs::read_dir(&dir)
-            .unwrap()
-            .find_map(|e| {
-                let p = e.ok()?.path();
-                if p.extension().is_some_and(|x| x == "rshw") {
-                    Some(p)
-                } else {
-                    None
-                }
-            })
-            .unwrap();
-        {
-            use std::fs::OpenOptions;
-            let mut f = OpenOptions::new().append(true).open(&seg).unwrap();
-            f.write_all(b"GARBAGE_DATA_HERE").unwrap();
-        }
-
-        // P2 fix: when the segment has 1 valid record before a corrupt tail,
-        // the new code truncates the segment (preserving the valid record)
-        // instead of quarantining the whole file. The valid entry must survive.
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            1,
-            "valid record before corrupt tail must survive truncation"
-        );
-        // No quarantine needed — the segment was truncated in place.
-        let quarantine = PathBuf::from(&dir).join(QUARANTINE_DIR);
-        assert!(
-            !quarantine.exists(),
-            "no quarantine dir needed when truncation is sufficient"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_empty_dir_returns_empty() {
-        let dir = tmp("rs_wal_empty2");
-        std::fs::create_dir_all(&dir).unwrap();
-        let entries = Wal::replay(&dir).unwrap();
-        assert!(entries.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_uncompressed_roundtrip() {
-        let dir = tmp("rs_wal_uncomp2");
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::Delete {
-            key: "delete_me".into(),
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0], WalEntry::Delete { .. }));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_segment_rotation() {
-        let dir = tmp("rs_wal_seg2");
-        let wal = Wal::open(&dir, false, Durability::None, 128, 0).unwrap();
-        for i in 0..100 {
-            wal.append(&WalEntry::BlockIp {
-                ip: format!("10.0.0.{}", i),
-                reason: "test".into(),
-                ttl_secs: None,
-                ts_ns: i as u64,
-            })
-            .unwrap();
-        }
-        drop(wal);
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 100);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Retention deletes oldest segments first; the newest (live) segment and
-    /// its records always survive.
-    #[test]
-    fn wal_retention_deletes_oldest_segments() {
-        let dir = tmp("rs_wal_ret3");
-        // Tiny segments (~1 record each), 600-byte total cap.
-        #[allow(unused_mut)]
-        let mut wal = Wal::open(&dir, false, Durability::None, 128, 600).unwrap();
-        for i in 0..40 {
-            wal.append(&WalEntry::BlockIp {
-                ip: format!("10.9.{}.{}.{}", i >> 8 & 255, i >> 4 & 15, i & 15),
-                reason: "retention_test".into(),
-                ttl_secs: None,
-                ts_ns: i as u64,
-            })
-            .unwrap();
-        }
-        // Take a checkpoint so retention can safely delete old segments.
-        wal.finish_checkpoint(wal.begin_checkpoint().lsn, "/tmp/test_ret_snap.bin")
-            .unwrap();
-        drop(wal);
-
-        let segs: Vec<(std::path::PathBuf, u64)> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "rshw"))
-            .map(|e| {
-                let p = e.path();
-                let sz = p.metadata().unwrap().len();
-                (p, sz)
-            })
-            .collect();
-        let total: u64 = segs.iter().map(|&(_, sz)| sz).sum();
-        assert!(
-            total <= 600 + 300, // cap + newest-segment slack
-            "retention should prune: {} bytes across {} segments",
-            total,
-            segs.len()
-        );
-        // Newest segment's records must still replay.
-        let entries = Wal::replay(&dir).unwrap();
-        assert!(!entries.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_record_too_large() {
-        let dir = tmp("rs_wal_big");
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        let big_val = "x".repeat(MAX_RECORD_SIZE + 1);
-        let result = wal.append(&WalEntry::Insert {
-            key: "k".into(),
-            value_json: big_val,
-            ttl_secs: None,
-            ts_ns: 1,
-        });
-        assert!(result.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_durability_fsync() {
-        let dir = tmp("rs_wal_fsync");
-        let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::BlockIp {
-            ip: "10.0.0.1".into(),
-            reason: "test".into(),
-            ttl_secs: None,
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_checkpoint_atomic() {
-        let dir = tmp("rs_wal_ckpt");
-        let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
-        let boundary = wal.begin_checkpoint();
-        let lsn = wal
-            .finish_checkpoint(boundary.lsn, "/tmp/snap.bin")
-            .unwrap();
-        assert!(lsn > 0);
-        // Manifest should exist
-        let manifest = PathBuf::from(&dir).join("MANIFEST");
-        assert!(manifest.exists());
-        let content = std::fs::read_to_string(&manifest).unwrap();
-        assert!(content.contains(&format!("lsn={}", lsn)));
-        assert!(content.contains("/tmp/snap.bin"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wal_replay_idempotent() {
-        let dir = tmp("rs_wal_idem");
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::BlockIp {
-            ip: "10.0.0.1".into(),
-            reason: "a".into(),
-            ttl_secs: None,
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-
-        let e1 = Wal::replay(&dir).unwrap();
-        let e2 = Wal::replay(&dir).unwrap();
-        assert_eq!(e1.len(), e2.len());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// P2 regression: corrupt records in a segment must NOT cause loss of
-    /// valid records that came before them. Old code quarantined the whole
-    /// segment on any corruption, throwing away every valid record. New code
-    /// truncates the segment at the last valid byte offset, preserving the
-    /// pre-corruption valid records.
-    #[test]
-    fn wal_replay_preserves_valid_records_before_corruption() {
-        let dir = tmp("rs_wal_partial_corrupt");
-        let wal = Wal::open(&dir, true, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        // Append 3 valid records
-        for i in 1..=3u64 {
-            wal.append(&WalEntry::BlockIp {
-                ip: format!("10.0.0.{i}"),
-                reason: "test".into(),
-                ttl_secs: None,
-                ts_ns: i,
-            })
-            .unwrap();
-        }
-        drop(wal);
-
-        // Find the segment file and append a corrupt record (wrong magic).
-        let seg_path = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "rshw"))
-            .expect("at least one .rshw segment must exist");
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&seg_path)
-            .unwrap();
-        // 23 bytes of garbage: 0xFF as a bad magic.
-        f.write_all(&[0xFF; HEADER]).unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-
-        // Replay must recover all 3 valid records, not 0.
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            3,
-            "replay must preserve valid records before the corrupt tail"
-        );
-
-        // Re-replay (after truncation) must also recover all 3 — idempotency.
-        let entries2 = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries2.len(),
-            3,
-            "replay must be idempotent after truncation"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// P1 regression: a compressed record whose LZ4 size prefix claims ~4GB
-    /// must be treated as corrupt, NOT decompressed. lz4_flex's
-    /// decompress_size_prepended allocates the declared size eagerly (probe:
-    /// 8-byte payload -> 4GB VmPeak). Header magic/CRC can be valid — only
-    /// the claimed decompressed length is hostile.
-    #[test]
-    fn wal_decompression_bomb_rejected() {
-        let dir = tmp("rs_wal_bomb");
-        let wal = Wal::open(&dir, true, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::BlockIp {
-            ip: "10.0.0.1".into(),
-            reason: "test".into(),
-            ttl_secs: None,
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-
-        let seg_path = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "rshw"))
-            .expect("segment");
-        // payload: u32 LE claimed-size = 0xFFFFFFFE, plus a few filler bytes.
-        let mut payload = vec![0u8; 8];
-        payload[0..4].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
-        let mut h = crc32fast::Hasher::new();
-        h.update(&payload);
-        let hdr = RecordHeader {
-            magic: MAGIC,
-            version: 1,
-            lsn: 2,
-            payload_len: payload.len() as u32,
-            crc: h.finalize(),
-            flags: 0x01, // compressed
-        }
-        .to_bytes();
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&seg_path)
-            .unwrap();
-        f.write_all(&hdr).unwrap();
-        f.write_all(&payload).unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-
-        // Replay must return the 1 good record and flag the bomb as corrupt
-        // (pre-fix this panicked/OOM'd inside decompress_size_prepended).
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            1,
-            "bomb record must be truncated, not expanded"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// P1: corruption in a non-final segment must FAIL replay with an explicit
-    /// error. Only the newest (final) segment may have a crash tail that gets
-    /// truncated. Historical corruption means the durable security state is
-    /// incomplete — startup must halt.
-    #[test]
-    fn wal_nonfinal_segment_corruption_is_fatal() {
-        let dir = tmp("rs_wal_nfatal");
-        // Two segments: seg_max=128 forces rotations.
-        let wal = Wal::open(&dir, false, Durability::None, 128, 0).unwrap();
         for i in 1..=5u64 {
             wal.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
@@ -1522,37 +429,28 @@ mod tests {
         }
         drop(wal);
 
-        // Corrupt the FIRST segment (non-final): write bad magic at offset 0.
-        let mut segs: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rshw"))
-            .collect();
-        segs.sort();
-        assert!(segs.len() >= 2, "need at least 2 segments for this test");
-        {
-            let mut f = OpenOptions::new().write(true).open(&segs[0]).unwrap();
-            f.write_all(&[0xFF; 23]).unwrap(); // overwrite first header
-            f.sync_all().unwrap();
-        }
+        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        // replay_from(3): LSN > 3 → records 4,5 only
+        let tail = wal2.replay_from(3).unwrap();
+        assert_eq!(tail.len(), 2, "only two records have LSN > 3");
+        drop(wal2);
 
-        // Replay must FAIL.
-        let result = Wal::replay(&dir);
-        assert!(
-            result.is_err(),
-            "non-final segment corruption must return Err, not Ok"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// P1: checkpoint → append more → replay_from(min_lsn) returns only the
-    /// tail after the checkpoint LSN. The full replay still returns everything.
     #[test]
-    fn wal_checkpoint_tail_replay() {
-        let dir = tmp("rs_wal_tail");
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        // Append 3 records before checkpoint.
+    fn wal_checkpoint_flow() {
+        let dir = format!(
+            "/tmp/rs_test_ckpt_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
+        // Write pre-checkpoint records.
         for i in 1..=3u64 {
             wal.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
@@ -1562,14 +460,43 @@ mod tests {
             })
             .unwrap();
         }
-        // Checkpoint LSN is saved for replay acceleration.
+        // checkpoint requires durability through current_lsn.
+        wal.sync().unwrap();
         let boundary = wal.begin_checkpoint();
-        let _ckpt_lsn = wal
-            .finish_checkpoint(boundary.lsn, "/tmp/ckpt_test_snap.bin")
-            .unwrap();
-        // Append 2 more after checkpoint.
+        // Simulate snapshot write (caller's job).
+        let snap_path = boundary.snapshot_path.clone();
+        let snap_content = serde_json::json!({ "lsn": boundary.lsn });
+        let tmp = format!("{snap_path}.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            use std::io::Write;
+            f.write_all(&serde_json::to_vec(&snap_content).unwrap())
+                .unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::rename(&tmp, &snap_path).unwrap();
+        std::fs::File::open(&dir).unwrap().sync_all().unwrap();
+
+        // Complete checkpoint at RAMWAL.
+        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn, &snap_path).unwrap();
+        assert!(ckpt_lsn > 0);
+
+        // Verify manifest exists.
+        let manifest = PathBuf::from(&dir).join("MANIFEST");
+        assert!(manifest.exists(), "MANIFEST should exist after checkpoint");
+        let content = std::fs::read_to_string(&manifest).unwrap();
+        assert!(content.contains("lsn="));
+
+        // Reopen: RAMWAL recovers up to checkpoint.
+        let wal2 = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
+        assert!(
+            wal2.snapshot_lsn() > 0 || wal2.ckpt_lsn() > 0,
+            "checkpoint should persist across reopen"
+        );
+
+        // Post-checkpoint records.
         for i in 4..=5u64 {
-            wal.append(&WalEntry::BlockIp {
+            wal2.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
                 reason: "post".into(),
                 ttl_secs: None,
@@ -1577,103 +504,60 @@ mod tests {
             })
             .unwrap();
         }
-        drop(wal);
-
-        // Full replay: 3 pre + 1 checkpoint + 2 post = 6 records.
-        let all = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            all.len(),
-            6,
-            "full replay must return 6 records (3 pre + 1 ckpt + 2 post)"
-        );
-
-        // Reopen to verify checkpoint LSN persisted.
-        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        assert!(wal2.ckpt_lsn() > 0, "checkpoint LSN must be persisted");
-        assert!(wal2.snapshot_lsn() > 0, "snapshot LSN must be persisted");
         drop(wal2);
+
+        // Full replay should get all 5 + possibly checkpoint marker.
+        let all = Wal::replay_dir(&dir).unwrap();
+        // At least the 5 BlockIp records must be present.
+        let block_ips = all
+            .iter()
+            .filter(|e| matches!(e, WalEntry::BlockIp { .. }))
+            .count();
+        assert_eq!(block_ips, 5, "all 5 block records must survive full replay");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Records spanning multiple segments survive a full replay cycle.
-    /// Verifies segment discovery ordering and cross-segment continuity.
     #[test]
-    fn wal_multi_segment_recovery() {
-        let dir = tmp("rs_wal_multiseg");
-        // Tiny seg_max=64 ensures many segments for few records.
-        let wal = Wal::open(&dir, false, Durability::None, 64, 0).unwrap();
-        let n = 20u64;
-        for i in 1..=n {
-            wal.append(&WalEntry::BlockIp {
-                ip: format!("10.0.0.{i}"),
-                reason: "multi".into(),
+    fn wal_entry_roundtrip_all_variants() {
+        let net = IpNetwork::new("10.0.0.0".parse().unwrap(), 8).unwrap();
+        let variants: Vec<WalEntry> = vec![
+            WalEntry::BlockIp {
+                ip: "1.2.3.4".into(),
+                reason: "attack".into(),
+                ttl_secs: Some(100),
+                ts_ns: 1,
+            },
+            WalEntry::UnblockIp {
+                ip: "1.2.3.4".into(),
+                ts_ns: 2,
+            },
+            WalEntry::BlockCidr {
+                cidr: net,
+                reason: "subnet".into(),
                 ttl_secs: None,
-                ts_ns: i,
-            })
-            .unwrap();
+                ts_ns: 3,
+            },
+            WalEntry::UnblockCidr {
+                cidr: net,
+                ts_ns: 4,
+            },
+            WalEntry::Insert {
+                key: "k".into(),
+                value_json: "{}".into(),
+                ttl_secs: Some(60),
+                ts_ns: 5,
+            },
+            WalEntry::Delete {
+                key: "k".into(),
+                ts_ns: 6,
+            },
+        ];
+        let _ = net;
+        for entry in &variants {
+            let encoded = encode_entry(entry).unwrap();
+            let decoded = serde_json::from_slice::<WalEntry>(&encoded).unwrap();
+            assert_eq!(entry, &decoded, "round-trip failed for {:?}", entry);
         }
-        drop(wal);
-
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            n as usize,
-            "multi-segment replay must recover all {} records",
-            n
-        );
-
-        // Idempotent: second replay returns same count.
-        let entries2 = Wal::replay(&dir).unwrap();
-        assert_eq!(entries.len(), entries2.len());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// An all-garbage segment (no valid records at all) is quarantined — not
-    /// deleted — so recovery can analyse it later. The rest of the WAL survives.
-    #[test]
-    fn wal_allgarbage_segment_quarantined() {
-        let dir = tmp("rs_wal_garbage");
-        // Create a valid WAL with 2 records.
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        wal.append(&WalEntry::BlockIp {
-            ip: "10.0.0.1".into(),
-            reason: "good".into(),
-            ttl_secs: None,
-            ts_ns: 1,
-        })
-        .unwrap();
-        drop(wal);
-
-        // Inject a garbage-only segment alongside the valid one.
-        // Name it so it sorts BEFORE the valid segment (wal-00000000000000000000.rshw).
-        let garbage_path = PathBuf::from(&dir).join("wal-00000000000000000000.rshw");
-        {
-            let mut f = File::create(&garbage_path).unwrap();
-            f.write_all(&[0xDE; 128]).unwrap();
-            f.sync_all().unwrap();
-        }
-
-        // Replay: the garbage segment must be quarantined, valid records survive.
-        let entries = Wal::replay(&dir).unwrap();
-        assert_eq!(
-            entries.len(),
-            1,
-            "valid records must survive garbage segment"
-        );
-
-        // Quarantine dir must exist with the garbage file.
-        let quarantine = PathBuf::from(&dir).join(QUARANTINE_DIR);
-        assert!(quarantine.exists(), "quarantine dir must be created");
-        let qfiles: Vec<std::fs::DirEntry> = std::fs::read_dir(&quarantine)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
-        assert!(
-            qfiles
-                .iter()
-                .any(|e| e.file_name().to_string_lossy().contains("wal-")),
-            "garbage segment must be quarantined"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

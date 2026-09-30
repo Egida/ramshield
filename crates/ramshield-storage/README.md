@@ -88,7 +88,7 @@ pub struct Wal {
 }
 ```
 
-On startup, `Wal::replay(dir)` reads all WAL segments and returns the entries in LSN order. `EnforcementService` replays them to restore blocked IPs and re-apply XDP rules — the system recovers from a crash without losing block state.
+On startup, `Wal::replay_dir(dir)` reads all WAL segments and returns the entries in LSN order. `EnforcementService` replays them to restore blocked IPs and re-apply XDP rules — the system recovers from a crash without losing block state.
 
 The WAL supports three durability modes:
 - `NoSync`: fastest, blocks may be lost on power failure.

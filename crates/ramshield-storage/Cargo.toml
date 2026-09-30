@@ -10,9 +10,8 @@ dashmap = "6.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-crc32fast = "1"
 crossbeam-queue = "0.3"
-lz4_flex = "0.11"
+ramwal = { path = "/home/m/vehicle_of_rationalism/icebox/ramwal" }
 
 [dev-dependencies]
 tempfile = "3"

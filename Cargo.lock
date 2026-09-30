@@ -321,6 +321,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -750,11 +765,11 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lz4_flex"
-version = "0.11.6"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+checksum = "4c53a7600c134cb724ad22655c4c52faf327722fb16ca74279e818deff25817e"
 dependencies = [
- "twox-hash",
+ "quick-error",
 ]
 
 [[package]]
@@ -1172,12 +1187,11 @@ name = "ramshield-storage"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "crc32fast",
  "crossbeam-queue",
  "dashmap",
- "lz4_flex",
  "proptest",
  "ramshield-types",
+ "ramwal",
  "serde",
  "serde_json",
  "tempfile",
@@ -1200,6 +1214,14 @@ version = "0.1.0"
 dependencies = [
  "aya",
  "libc",
+]
+
+[[package]]
+name = "ramwal"
+version = "0.9.0-rc.1"
+dependencies = [
+ "crc",
+ "lz4_flex",
 ]
 
 [[package]]
@@ -1744,12 +1766,6 @@ dependencies = [
  "tracing",
  "tracing-core",
 ]
-
-[[package]]
-name = "twox-hash"
-version = "2.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
 
 [[package]]
 name = "typenum"

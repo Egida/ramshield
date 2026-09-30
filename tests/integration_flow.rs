@@ -110,7 +110,7 @@ async fn enforcement_wal_replay_roundtrip() {
     handle.await.unwrap().unwrap();
 
     // Replay proves durability.
-    let entries = Wal::replay(dir.to_str().unwrap()).unwrap();
+    let entries = ramshield_storage::wal::Wal::replay_dir(dir.to_str().unwrap()).unwrap();
     assert_eq!(entries.len(), 1, "one BlockIp entry expected");
     let _ = std::fs::remove_dir_all(&dir);
 }

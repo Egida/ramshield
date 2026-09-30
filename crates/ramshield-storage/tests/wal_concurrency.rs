@@ -42,7 +42,7 @@ fn wal_concurrent_appends() {
     let total = THREADS * APPENDS;
     drop(wal);
 
-    let entries = Wal::replay(dir).unwrap();
+    let entries = Wal::replay_dir(dir).unwrap();
     assert_eq!(
         entries.len(),
         total,
