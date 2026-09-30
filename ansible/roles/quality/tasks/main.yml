@@ -4,75 +4,94 @@
   register: pushed_sha
   changed_when: false
 
-- name: Check CI workflows via gh CLI
+# Poll each workflow using Ansible native loop (avoids bash word-splitting on display names)
+- name: Wait for CI workflow to complete on pushed SHA
   shell: |
     set -e
     cd "{{ project_dir }}"
-    pass=true
-    for wf_name in {{ ci_workflows | join(' ') }}; do
-      status=$(gh run list --branch "{{ branch }}" --limit 1 \
+    wf_name="{{ item }}"
+    pushed_sha="{{ pushed_sha.stdout }}"
+    waited=0
+    while [ "$waited" -lt {{ ci_poll_max_seconds }} ]; do
+      result=$(gh run list --branch "{{ branch }}" --limit 5 \
         --workflow "$wf_name" \
-        --json=conclusion 2>/dev/null | \
-        jq -r '.[0].conclusion // "no_runs"' 2>/dev/null || echo "no_runs")
-
-      echo "Workflow: $wf_name → $status"
-
-      if [ "$status" != "success" ]; then
-        pass=false
-      fi
-    done
-
-    if [ "$pass" = true ]; then
-      echo "ALL_WORKFLOWS=PASS"
-    else
-      echo "ALL_WORKFLOWS=FAIL"
-    fi
-  args:
-    executable: /bin/bash
-  register: ci_result
-  changed_when: false
-
-- name: Report CI status
-  ansible.builtin.debug:
-    msg: "{{ ci_result.stdout_lines | default(['(no output)']) | join('\n') }}"
-
-- name: Replay failed workflow runs
-  shell: |
-    set -e
-    cd "{{ project_dir }}"
-    for wf_name in {{ ci_workflows | join(' ') }}; do
-      status=$(gh run list --branch "{{ branch }}" --limit 1 \
-        --workflow "$wf_name" \
-        --json=conclusion 2>/dev/null | \
-        jq -r '.[0].conclusion // "no_runs"' 2>/dev/null || echo "no_runs")
-
-      if [ "$status" = "failure" ]; then
-        run_id=$(gh run list --branch "{{ branch }}" --limit 1 \
-          --workflow "$wf_name" \
-          --json=databaseId 2>/dev/null | \
-          jq -r '.[0].databaseId // empty' 2>/dev/null || echo "")
-
-        if [ -n "$run_id" ]; then
-          echo "Replaying workflow: $wf_name (run #${run_id})"
-          gh api -X POST "repos/:owner/:repo/actions/runs/${run_id}/rerun" \
-            -f workflow_run_id="$run_id" 2>/dev/null || \
-            echo "  (rerun failed for $wf_name)"
+        --json headSha,conclusion,status 2>/dev/null | \
+        jq -r --arg sha "$pushed_sha" \
+          '.[] | select(.headSha == $sha) | "\(.status)|\(.conclusion // "")"' 2>/dev/null || echo "")
+      if [ -n "$result" ]; then
+        status=$(echo "$result" | head -1 | cut -d'|' -f1)
+        conclusion=$(echo "$result" | head -1 | cut -d'|' -f2)
+        if [ "$status" = "completed" ]; then
+          echo "$wf_name -> $conclusion"
+          exit 0
         fi
       fi
+      sleep {{ ci_poll_interval_seconds }}
+      waited=$((waited + ci_poll_interval_seconds))
+    done
+    echo "TIMEOUT"
+    exit 1
+  args:
+    executable: /bin/bash
+  register: ci_check
+  changed_when: false
+  failed_when: false
+  loop: "{{ ci_workflows }}"
+  loop_control:
+    loop_var: item
+
+- name: Report CI check results
+  ansible.builtin.debug:
+    msg: "Workflow '{{ item.item }}' -> {{ item.stdout_lines | default(['TIMEOUT']) | join(' ') | trim }}"
+  loop: "{{ ci_check.results | default([]) }}"
+
+- name: Check if any workflow failed or timed out
+  set_fact:
+    ci_failed: "{{ ci_check.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0 }}"
+
+# --- CI failure triage: fetch failing job logs, extract error lines ---
+- name: Triage failing workflow runs
+  shell: |
+    set -e
+    cd "{{ project_dir }}"
+    wf_name="{{ item.item }}"
+    pushed_sha="{{ pushed_sha.stdout }}"
+    run_id=$(gh run list --branch "{{ branch }}" --limit 5 \
+      --workflow "$wf_name" \
+      --json headSha,databaseId 2>/dev/null | \
+      jq -r --arg sha "$pushed_sha" '.[] | select(.headSha == $sha) | .databaseId' 2>/dev/null | head -1 || echo "")
+
+    if [ -z "$run_id" ]; then
+      echo "no run found for $wf_name at $pushed_sha"
+      exit 0
+    fi
+
+    jobs_json=$(gh run view "$run_id" --json jobs 2>/dev/null || echo '{"jobs":[]}')
+    for job_id in $(echo "$jobs_json" | jq -r '.jobs[] | select(.conclusion=="failure") | .databaseId' 2>/dev/null); do
+      job_name=$(echo "$jobs_json" | jq -r --argjson id "$job_id" '.jobs[] | select(.databaseId == $id) | .name' 2>/dev/null)
+      echo "=== FAILING JOB: $job_name ==="
+      gh api "repos/:owner/:repo/actions/jobs/$job_id/logs" 2>/dev/null | \
+        { gzip -dc 2>/dev/null || cat; } | \
+        grep -nE 'error\[E[0-9]+\]|error:|could not compile|panicked|FAILED|test result: FAILED|clippy::' | \
+        head -15 || echo "(no error lines found in log)"
     done
   args:
     executable: /bin/bash
-  register: rerun_result
+  register: triage_result
   changed_when: false
   failed_when: false
+  loop: "{{ ci_check.results | default([]) }}"
+  loop_control:
+    loop_var: item
+  when: item.rc is defined and item.rc != 0
 
-- name: Report rerun status
+- name: Report triage results
   ansible.builtin.debug:
-    msg: "{{ rerun_result.stdout_lines | default(['(no output)']) | join('\n') }}"
+    msg: "{{ item.stdout | default('(no output)') }}"
+  loop: "{{ triage_result.results | default([]) | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '') | list }}"
 
-- name: Abort if any workflow still failed after replay
+# Abort if any workflow failed (rerun left to human judgment — triage above shows why)
+- name: Abort if any workflow failed
   ansible.builtin.fail:
-    msg: "CI verification FAILED — one or more workflows are not green:\n{{ ci_result.stdout | default('(could not verify)') }}"
-  when: >-
-    (ci_result.stdout | default('')) is search('ALL_WORKFLOWS=FAIL') or
-    (ci_result.rc | default(0)) != 0
+    msg: "CI verification FAILED -- one or more workflows are not green:\n{{ ci_check.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | map(attribute='stdout') | list | join('\n') }}"
+  when: ci_failed

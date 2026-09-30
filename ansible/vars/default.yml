@@ -30,3 +30,8 @@ ci_poll_max_seconds: 300
 
 # Commit message prefix convention
 commit_prefix: "chore"
+
+# Deployment mode: systemd | k8s
+deploy_mode: "systemd"
+deploy_host: "127.0.0.1"
+dashboard_port: 9999
