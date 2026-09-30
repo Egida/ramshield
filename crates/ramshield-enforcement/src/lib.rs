@@ -588,7 +588,15 @@ impl EnforcementService {
             if remaining_secs == 0 {
                 continue;
             }
-            self.schedule_expiration(ip, Instant::now() + Duration::from_secs(remaining_secs));
+            let at = Instant::now() + Duration::from_secs(remaining_secs);
+            self.schedule_expiration(ip, at);
+            if let Some(shared) = &self.checkpoint_shared {
+                let now_unix_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                shared.set_ip_expiration(ip, unix_ns_from_instant(at, now_unix_ns));
+            }
         }
     }
 
@@ -620,11 +628,18 @@ impl EnforcementService {
             // of the XDP projection result. XDP failure must not destroy the
             // durable security decision — reconciliation retries later.
             self.store.active_cidrs.insert(network, ());
+            let at = Instant::now() + Duration::from_secs(remaining_secs);
             if remaining_secs > 0 {
-                self.cidr_expirations.insert(
-                    network,
-                    Instant::now() + Duration::from_secs(remaining_secs),
-                );
+                self.cidr_expirations.insert(network, at);
+                if let Some(shared) = &self.checkpoint_shared {
+                    let now_unix_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    shared.set_cidr_expiration(network, unix_ns_from_instant(at, now_unix_ns));
+                }
+            } else if let Some(shared) = &self.checkpoint_shared {
+                shared.remove_cidr_expiration(&network);
             }
             if let Err(e) = self
                 .xdp
@@ -813,15 +828,34 @@ impl EnforcementService {
                         .unwrap_or_else(|| {
                             Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
                         });
+                    let now_unix_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
                     if let Some(network) = cmd.cidr {
                         self.cidr_expirations.insert(network, at);
+                        if let Some(shared) = &self.checkpoint_shared {
+                            shared.set_cidr_expiration(
+                                network,
+                                unix_ns_from_instant(at, now_unix_ns),
+                            );
+                        }
                     } else {
                         self.schedule_expiration(cmd.ip, at);
+                        if let Some(shared) = &self.checkpoint_shared {
+                            shared.set_ip_expiration(cmd.ip, unix_ns_from_instant(at, now_unix_ns));
+                        }
                     }
                 } else {
                     self.detach_expiration(cmd.ip);
+                    if let Some(shared) = &self.checkpoint_shared {
+                        shared.remove_ip_expiration(&cmd.ip);
+                    }
                     if let Some(network) = cmd.cidr {
                         self.cidr_expirations.remove(&network);
+                        if let Some(shared) = &self.checkpoint_shared {
+                            shared.remove_cidr_expiration(&network);
+                        }
                     }
                 }
 
@@ -901,8 +935,14 @@ impl EnforcementService {
                 }
                 // Purge any pending TTL so a later re-block starts clean.
                 self.detach_expiration(cmd.ip);
+                if let Some(shared) = &self.checkpoint_shared {
+                    shared.remove_ip_expiration(&cmd.ip);
+                }
                 if let Some(network) = cmd.cidr {
                     self.cidr_expirations.remove(&network);
+                    if let Some(shared) = &self.checkpoint_shared {
+                        shared.remove_cidr_expiration(&network);
+                    }
                     self.store.active_cidrs.remove(&network);
                 }
                 let xdp_applied = match cmd.cidr {
@@ -987,19 +1027,15 @@ pub fn replay_wal_into_store_seeded(
         .unwrap_or(0);
 
     let seed_ips: Vec<IpAddr> = seed.keys().copied().collect();
-    // Sequential fold: later entries win (unblock cancels earlier block).
-    // Seed = snapshot block state (reason, since_ns, deadline_ns); the fold
-    // overlays tail entries on top, so a tail UnblockIp removes a snapshot IP.
+    // Keep absolute deadlines throughout the fold. Converting a snapshot
+    // deadline to whole seconds here loses precision and can resurrect a
+    // nearly-expired block. Only convert to remaining seconds at the final
+    // scheduler hand-off.
     let mut blocked: std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)> = seed
         .into_iter()
         .map(|(ip, (reason, since, deadline_ns))| {
-            let ttl_secs = if deadline_ns > 0 {
-                let remaining = deadline_ns.saturating_sub(now_ns) / 1_000_000_000;
-                Some(remaining.max(1))
-            } else {
-                None
-            };
-            (ip, (reason_to_block_reason(&reason), since, ttl_secs))
+            let deadline = (deadline_ns > 0).then_some(deadline_ns);
+            (ip, (reason_to_block_reason(&reason), since, deadline))
         })
         .collect();
     for entry in entries {
@@ -1011,7 +1047,9 @@ pub fn replay_wal_into_store_seeded(
                 ts_ns,
             } => {
                 if let Ok(ip) = ip.parse() {
-                    blocked.insert(ip, (reason_to_block_reason(&reason), ts_ns, ttl_secs));
+                    let deadline = ttl_secs
+                        .map(|secs| ts_ns.saturating_add(secs.saturating_mul(1_000_000_000)));
+                    blocked.insert(ip, (reason_to_block_reason(&reason), ts_ns, deadline));
                 }
             }
             WalEntry::UnblockIp { ip, .. } => {
@@ -1034,10 +1072,10 @@ pub fn replay_wal_into_store_seeded(
         }
     }
     let mut restored: Vec<(IpAddr, u64)> = Vec::new();
-    for (ip, (reason, ts_ns, ttl_secs)) in blocked {
-        // Expired TTL → don't resurrect.
-        if let Some(ttl) = ttl_secs
-            && ts_ns.saturating_add(ttl.saturating_mul(1_000_000_000)) <= now_ns
+    for (ip, (reason, ts_ns, deadline_ns)) in blocked {
+        // Expired absolute deadline → don't resurrect.
+        if let Some(deadline) = deadline_ns
+            && deadline <= now_ns
         {
             continue;
         }
@@ -1074,14 +1112,12 @@ pub fn replay_wal_into_store_seeded(
         store
             .insert(ip, Value::IpRecord(rec), None, ram_lim)
             .map_err(|e| anyhow::anyhow!("WAL replay insert {ip}: {e}"))?;
-        // Remaining TTL = original minus time already served (P1-4 re-arm).
-        let remaining = match ttl_secs {
-            Some(0) | None => 0,
-            Some(ttl) => {
-                let elapsed = now_ns.saturating_sub(ts_ns) / 1_000_000_000;
-                ttl.saturating_sub(elapsed).max(1)
-            }
-        };
+        // Scheduler APIs use whole seconds, so round UP only at this final
+        // boundary. The authoritative expiration check above used the exact
+        // absolute deadline. This avoids extending a block during state fold.
+        let remaining = deadline_ns
+            .map(|deadline| deadline.saturating_sub(now_ns).div_ceil(1_000_000_000))
+            .unwrap_or(0);
         restored.push((ip, remaining));
     }
     info!(
@@ -1116,7 +1152,9 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
                 ts_ns,
                 ..
             } => {
-                blocked.insert(cidr, (ts_ns, ttl_secs));
+                let deadline =
+                    ttl_secs.map(|secs| ts_ns.saturating_add(secs.saturating_mul(1_000_000_000)));
+                blocked.insert(cidr, (ts_ns, deadline));
             }
             WalEntry::UnblockCidr { cidr, .. } => {
                 blocked.remove(&cidr);
@@ -1126,10 +1164,9 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
     }
     Ok(blocked
         .into_iter()
-        .filter_map(|(cidr, (ts_ns, ttl))| {
-            let remaining = ttl.map(|seconds| {
-                seconds.saturating_sub(now_ns.saturating_sub(ts_ns) / 1_000_000_000)
-            });
+        .filter_map(|(cidr, (_ts_ns, deadline))| {
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_sub(now_ns).div_ceil(1_000_000_000));
             if remaining == Some(0) {
                 None
             } else {

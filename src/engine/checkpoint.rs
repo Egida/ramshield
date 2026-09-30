@@ -177,6 +177,7 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
     let now_ns = now_unix_ns();
     let ram_lim = store.get_stats().ram_limit_mb.max(1) * 1024 * 1024;
     let mut snapshot_blocked_ips = Vec::new();
+    let mut ip_states = Vec::new();
     let mut ip_expirations = Vec::new();
     let mut cidr_expirations = Vec::new();
     for snap_ip in snap.blocked_ips.iter() {
@@ -186,6 +187,12 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
             continue;
         }
         snapshot_blocked_ips.push(snap_ip.ip);
+        ip_states.push((
+            snap_ip.ip,
+            snap_ip.reason.clone(),
+            snap_ip.since_ns,
+            snap_ip.expires_at_ns,
+        ));
         {
             let rec = StorageIpRecord {
                 ip: snap_ip.ip,
@@ -213,9 +220,12 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
             // enforcement ring re-arms below from the same deadline.
             let ttl_secs = match verdict {
                 ExpiryVerdict::Live { remaining_ns } => {
-                    let secs = remaining_ns / 1_000_000_000;
-                    ip_expirations.push((snap_ip.ip, remaining_ns));
-                    Some(secs.max(1)) // never restore an already-dead wheel card
+                    let secs = remaining_ns.div_ceil(1_000_000_000);
+                    ip_expirations.push((
+                        snap_ip.ip,
+                        snap_ip.expires_at_ns.expect("live snapshot has deadline"),
+                    ));
+                    Some(secs)
                 }
                 _ => None,
             };
@@ -227,14 +237,18 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
             ExpiryVerdict::Expired => continue,
             verdict => {
                 store.active_cidrs.insert(c.network, ());
-                if let ExpiryVerdict::Live { remaining_ns } = verdict {
-                    cidr_expirations.push((c.network, remaining_ns));
+                if let ExpiryVerdict::Live { remaining_ns: _ } = verdict {
+                    cidr_expirations.push((
+                        c.network,
+                        c.expires_at_ns.expect("live snapshot has deadline"),
+                    ));
                 }
             }
         }
     }
     SnapshotRestore {
         snapshot_blocked_ips,
+        ip_states,
         ip_expirations,
         cidr_expirations,
         lsn: snap.lsn,
@@ -248,9 +262,15 @@ pub struct SnapshotRestore {
     /// IP unblocked in the tail stays blocked because the tail fold doesn't
     /// touch it.
     pub snapshot_blocked_ips: Vec<IpAddr>,
-    /// (ip, remaining_ns) — enforcement re-arms via restore_expirations_ns.
+    /// Exact semantic snapshot state: (ip, reason, since_ns, absolute_expiry).
+    /// None expiry means permanent. Used to seed WAL tail replay without
+    /// reconstructing history from recovery-time clocks.
+    pub ip_states: Vec<(IpAddr, String, u64, Option<u64>)>,
+    /// (ip, absolute Unix-ns deadline) — enforcement converts to remaining
+    /// seconds only when re-arming the monotonic TTL ring.
     pub ip_expirations: Vec<(IpAddr, u64)>,
-    /// (network, remaining_ns) — enforcement re-arms via restore_cidr_blocks_ns.
+    /// (network, absolute Unix-ns deadline) — enforcement converts to
+    /// remaining seconds only when re-arming the CIDR TTL index.
     pub cidr_expirations: Vec<(IpNetwork, u64)>,
     /// Snapshot LSN — WAL tail replay starts after it.
     pub lsn: u64,
@@ -333,9 +353,13 @@ mod tests {
         assert!(store2.get(&ip).unwrap().is_blocked());
         assert!(store2.active_cidrs.get(&net([172, 16, 9, 0])).is_some());
         assert_eq!(restored.lsn, 42);
-        // Remaining ≈ 30s minus test time (bounded, generous tolerance).
-        let (_, rem) = restored.ip_expirations[0];
-        assert!(rem > 29_000_000_000 && rem <= 30_000_000_000, "rem={rem}");
+        assert_eq!(restored.ip_states.len(), 1);
+        assert_eq!(restored.ip_states[0].0, ip);
+        assert_eq!(restored.ip_states[0].2, snap.blocked_ips[0].since_ns);
+        assert_eq!(restored.ip_states[0].3, Some(deadline));
+        // Restore keeps the authoritative absolute deadline intact.
+        let (_, restored_deadline) = restored.ip_expirations[0];
+        assert_eq!(restored_deadline, deadline);
         assert!(
             restored.cidr_expirations.is_empty(),
             "permanent CIDR has no deadline"

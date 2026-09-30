@@ -8,7 +8,6 @@
 
 use ramshield_types::{Durability, IpNetwork, Result, RsError};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use ramwal::{
@@ -56,7 +55,6 @@ pub enum WalEntry {
 pub struct CheckpointBoundary {
     /// The LSN this boundary represents (entries <= this are in the snapshot).
     pub lsn: u64,
-    pub snapshot_path: String,
 }
 
 impl CheckpointBoundary {
@@ -103,12 +101,10 @@ fn map_error(error: RamWalError) -> RsError {
         RamWalError::Closed => RsError::Io(std::io::Error::other("WAL closed")),
         RamWalError::InvalidConfiguration(msg) => RsError::Io(std::io::Error::other(msg)),
         RamWalError::Corruption {
-            segment,
+            segment: _,
             offset,
             reason: _,
-        } => RsError::CorruptWal {
-            offset: segment.saturating_mul(1_000_000).saturating_add(offset),
-        },
+        } => RsError::CorruptWal { offset },
         RamWalError::Tail { segment, state } => RsError::Io(std::io::Error::other(format!(
             "WAL tail state in segment {segment}: {state:?}"
         ))),
@@ -189,10 +185,7 @@ impl Wal {
                 .map(|lsn| lsn.get())
                 .map_err(|e| match e {
                     RamWalError::InvalidConfiguration(msg) if msg.contains("exceeds max") => {
-                        RsError::RecordTooLarge {
-                            size: payload.len(),
-                            max: 64 * 1024,
-                        }
+                        RsError::Io(std::io::Error::other(msg))
                     }
                     other => map_error(other),
                 }),
@@ -227,18 +220,9 @@ impl Wal {
         }
     }
 
-    /// Block until `target_lsn` is durable. Bounded by a spin with 1ms sleep;
-    /// RAMWAL advances durable_lsn on any barrier, so this terminates once a
-    /// sync (explicit or group) covers the record.
-    pub fn sync_until(&self, target_lsn: u64) {
-        while self.durable_lsn() < target_lsn {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-
     /// Full replay of every segment in the directory this WAL was opened on.
     pub fn replay(&self) -> Result<Vec<WalEntry>> {
-        Self::replay_dir(self.base_dir())
+        Self::replay_dir(&self.guard.cfg.dir)
     }
 
     /// Full replay of every segment in an arbitrary directory (independent
@@ -248,56 +232,56 @@ impl Wal {
         decode_all(&report)
     }
 
-    /// Replay entries with LSN > min_lsn. min_lsn == 0 is equivalent to replay().
+    /// Replay entries with LSN > min_lsn. The directory is rescanned so
+    /// records appended after the WAL handle was opened are visible.
     pub fn replay_from(&self, min_lsn: u64) -> Result<Vec<WalEntry>> {
-        let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(inner) => {
-                let report = inner.recovery_report();
-                decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
-            }
-            None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
+        if min_lsn == 0 {
+            return self.replay();
         }
+        let dir = self.guard.cfg.dir.clone();
+        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
     }
 
-    /// Begin a checkpoint: freeze the boundary LSN and derive the canonical
-    /// snapshot path. Caller writes the snapshot, then calls finish_checkpoint.
+    /// Begin a checkpoint by reading the current WAL boundary. The caller is
+    /// responsible for taking the application snapshot and then publishing
+    /// this LSN with `finish_checkpoint`.
     pub fn begin_checkpoint(&self) -> CheckpointBoundary {
         let lsn = {
             let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.as_ref().map(|i| i.current_lsn().get()).unwrap_or(0)
         };
-        let path = PathBuf::from(self.base_dir())
-            .join(format!("snapshot.{lsn:020}.ckpt"))
-            .to_string_lossy()
-            .to_string();
-        CheckpointBoundary {
-            lsn,
-            snapshot_path: path,
-        }
+        CheckpointBoundary { lsn }
     }
 
     /// Complete a checkpoint. The caller must have durably written the
-    /// snapshot through `boundary_lsn` first. RAMWAL owns the MANIFEST.
-    pub fn finish_checkpoint(&self, boundary_lsn: u64, snapshot_path: &str) -> Result<u64> {
-        let _ = snapshot_path;
+    /// application snapshot through `boundary_lsn` first. RAMWAL owns the
+    /// manifest; RamShield owns the snapshot path and contents.
+    pub fn finish_checkpoint(&self, boundary_lsn: u64) -> Result<u64> {
         let lsn = Lsn::new(boundary_lsn);
         let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(inner) => {
+                // RAMWAL checkpoints require the boundary LSN to be durable.
+                // RamShield's default Flush mode is not an fsync barrier, so
+                // checkpoint completion must establish durability here rather
+                // than relying on every caller to remember an extra sync().
+                inner.sync().map_err(map_error)?;
                 inner.checkpoint(lsn).map_err(map_error)?;
-                // Retention: drop segments entirely below the boundary.
-                // Errors are non-fatal — a torn segment is RAMWAL's problem,
-                // not a reason to fail an already-durable checkpoint.
-                let _ = inner.truncate_before(lsn);
+                // Retention happens only after the checkpoint manifest is
+                // durable. A retention failure must be observable but must not
+                // turn an already-durable checkpoint into a failed checkpoint.
+                if let Err(err) = inner.truncate_before(lsn) {
+                    tracing::warn!(
+                        error = %err,
+                        checkpoint_lsn = boundary_lsn,
+                        "WAL retention failed after checkpoint commit"
+                    );
+                }
                 Ok(boundary_lsn)
             }
             None => Err(RsError::Io(std::io::Error::other("WAL poisoned"))),
         }
-    }
-
-    pub fn base_dir(&self) -> &str {
-        &self.guard.cfg.dir
     }
 
     /// Checkpoint LSN recorded by RAMWAL (0 = none).
@@ -354,6 +338,7 @@ fn decode_records<'a>(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -407,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn wal_replay_from_min_lsn() {
+    fn wal_replay_from_min_lsn_sees_records_appended_after_open() {
         let dir = format!(
             "/tmp/rs_test_rfl_{}",
             std::time::SystemTime::now()
@@ -418,7 +403,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        for i in 1..=5u64 {
+        for i in 1..=2u64 {
             wal.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
                 reason: "test".into(),
@@ -427,13 +412,30 @@ mod tests {
             })
             .unwrap();
         }
-        drop(wal);
+        wal.sync().unwrap();
 
-        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
-        // replay_from(3): LSN > 3 → records 4,5 only
-        let tail = wal2.replay_from(3).unwrap();
-        assert_eq!(tail.len(), 2, "only two records have LSN > 3");
-        drop(wal2);
+        let first = wal.replay_from(0).unwrap();
+        assert_eq!(first.len(), 2, "current WAL contents must be visible");
+
+        for i in 3..=4u64 {
+            wal.append(&WalEntry::BlockIp {
+                ip: format!("10.0.0.{i}"),
+                reason: "test".into(),
+                ttl_secs: None,
+                ts_ns: i,
+            })
+            .unwrap();
+        }
+        wal.sync().unwrap();
+
+        let tail = wal.replay_from(2).unwrap();
+        assert_eq!(
+            tail.len(),
+            2,
+            "records appended after open must be replayed"
+        );
+        assert!(matches!(&tail[0], WalEntry::BlockIp { ip, .. } if ip == "10.0.0.3"));
+        assert!(matches!(&tail[1], WalEntry::BlockIp { ip, .. } if ip == "10.0.0.4"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -449,7 +451,7 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
+        let wal = Wal::open(&dir, false, Durability::Flush, 64 * 1024 * 1024, 0).unwrap();
         // Write pre-checkpoint records.
         for i in 1..=3u64 {
             wal.append(&WalEntry::BlockIp {
@@ -460,11 +462,13 @@ mod tests {
             })
             .unwrap();
         }
-        // checkpoint requires durability through current_lsn.
-        wal.sync().unwrap();
+        // finish_checkpoint establishes the WAL durability barrier itself.
         let boundary = wal.begin_checkpoint();
         // Simulate snapshot write (caller's job).
-        let snap_path = boundary.snapshot_path.clone();
+        let snap_path = std::path::PathBuf::from(&dir)
+            .join(format!("snapshot.{:020}.ckpt", boundary.lsn))
+            .to_string_lossy()
+            .to_string();
         let snap_content = serde_json::json!({ "lsn": boundary.lsn });
         let tmp = format!("{snap_path}.tmp");
         {
@@ -478,11 +482,11 @@ mod tests {
         std::fs::File::open(&dir).unwrap().sync_all().unwrap();
 
         // Complete checkpoint at RAMWAL.
-        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn, &snap_path).unwrap();
+        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn).unwrap();
         assert!(ckpt_lsn > 0);
 
         // Verify manifest exists.
-        let manifest = PathBuf::from(&dir).join("MANIFEST");
+        let manifest = std::path::PathBuf::from(&dir).join("MANIFEST");
         assert!(manifest.exists(), "MANIFEST should exist after checkpoint");
         let content = std::fs::read_to_string(&manifest).unwrap();
         assert!(content.contains("lsn="));

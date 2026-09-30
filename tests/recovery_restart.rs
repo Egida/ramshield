@@ -192,7 +192,7 @@ fn recovery_tail_replay() {
     // Checkpoint (writes manifest).
     wal.sync().unwrap();
     let boundary = wal.begin_checkpoint();
-    wal.finish_checkpoint(boundary.lsn, "").unwrap();
+    wal.finish_checkpoint(boundary.lsn).unwrap();
 
     // Entry after checkpoint (tail).
     wal.append(&WalEntry::BlockIp {
@@ -240,6 +240,7 @@ fn unix_deadline_ahead(secs: u64) -> u64 {
 
 /// Block via WAL, checkpoint at current LSN, then write snapshot to disk.
 fn checkpoint_now(
+    dir: &str,
     wal: &Wal,
     store: &Store,
     ip_exp: std::collections::HashMap<std::net::IpAddr, u64>,
@@ -261,15 +262,10 @@ fn checkpoint_now(
         cidrs,
     };
     let snap = build_snapshot(store, &state, boundary.lsn);
-    write_snapshot(&dir_of(wal), &snap, boundary.lsn).unwrap();
+    write_snapshot(dir, &snap, boundary.lsn).unwrap();
     wal.sync().unwrap();
-    wal.finish_checkpoint(boundary.lsn, &snapshot_path(&dir_of(wal), boundary.lsn))
-        .unwrap();
+    wal.finish_checkpoint(boundary.lsn).unwrap();
     boundary.lsn
-}
-
-fn dir_of(wal: &Wal) -> String {
-    wal.base_dir().to_string()
 }
 
 /// Test 10.1 — Permanent IP via checkpoint path: block permanently,
@@ -293,7 +289,7 @@ fn checkpoint_permanent_ip() {
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
     // Snapshot with no expirations (permanent).
-    checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     drop(wal);
 
     // Restart: load snapshot + tail replay.
@@ -333,7 +329,7 @@ fn checkpoint_temporary_ip_active() {
 
     let mut ip_exp = std::collections::HashMap::new();
     ip_exp.insert(ip, unix_deadline_ahead(remaining_at_ckpt));
-    checkpoint_now(&wal, &store, ip_exp);
+    checkpoint_now(&dir, &wal, &store, ip_exp);
     drop(wal);
 
     sleep_ms(500); // downtime
@@ -344,13 +340,19 @@ fn checkpoint_temporary_ip_active() {
         rec.is_blocked(),
         "temporary IP must survive checkpoint restart"
     );
-    let rem = restored
+    // ip_expirations now carries the absolute Unix-ns deadline (snapshot
+    // semantic state preserved end-to-end). Convert back to remaining seconds
+    // the same way the engine does at scheduler hand-off.
+    let deadline_ns = restored
         .ip_expirations
         .iter()
         .find(|(a, _)| *a == ip)
         .map(|(_, ns)| *ns);
-    assert!(rem.is_some(), "temporary IP must have a re-arm deadline");
-    let rem_secs = rem.unwrap() / 1_000_000_000;
+    assert!(deadline_ns.is_some(), "temporary IP must carry a deadline");
+    let rem_secs = deadline_ns
+        .unwrap()
+        .saturating_sub(now_ns())
+        .div_ceil(1_000_000_000);
     assert!(
         rem_secs > remaining_at_ckpt.saturating_sub(2) && rem_secs <= remaining_at_ckpt,
         "remaining TTL should be close to at-checkpoint value, got {rem_secs} (was {remaining_at_ckpt})"
@@ -380,7 +382,7 @@ fn checkpoint_temporary_ip_expires_during_downtime() {
 
     let mut ip_exp = std::collections::HashMap::new();
     ip_exp.insert(ip, now_ns() + 2 * 1_000_000_000); // expires in 2s
-    checkpoint_now(&wal, &store, ip_exp);
+    checkpoint_now(&dir, &wal, &store, ip_exp);
     drop(wal);
 
     sleep_ms(2500); // downtime exceeds TTL
@@ -423,7 +425,7 @@ fn checkpoint_cidr_only() {
         store.active_cidrs.insert(n, ());
     }
 
-    checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     drop(wal);
 
     let (store2, _restored, _lsn) = restart_from_snapshot(&dir);
@@ -458,7 +460,7 @@ fn checkpoint_mixed_snapshot_and_tail() {
     let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
-    let lsn = checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    let lsn = checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
 
     // Tail: block B, block CIDR, unblock A.
     wal.append(&WalEntry::BlockIp {
@@ -518,7 +520,7 @@ fn checkpoint_corrupt_snapshot_falls_back_to_wal() {
     let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
-    let lsn = checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    let lsn = checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     drop(wal);
 
     // Corrupt the snapshot file.
@@ -555,7 +557,7 @@ fn checkpoint_missing_snapshot_falls_back_to_wal() {
     drop(wal);
     let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
-    checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     drop(wal);
 
     // Delete snapshot file.
@@ -647,7 +649,7 @@ fn checkpoint_temporary_cidr() {
     for (n, _) in cidrs {
         store.active_cidrs.insert(n, ());
     }
-    checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     drop(wal);
 
     let (store2, _restored, _lsn) = restart_from_snapshot(&dir);
@@ -712,7 +714,7 @@ fn checkpoint_equivalence_full_replay_vs_snapshot() {
     for (ip, remaining) in &ttls {
         ip_exp.insert(*ip, unix_deadline_ahead(*remaining));
     }
-    checkpoint_now(&wal, &store_ck, ip_exp);
+    checkpoint_now(&dir, &wal, &store_ck, ip_exp);
 
     // ── Tail phase (after the checkpoint boundary) ──
     wal.append(&WalEntry::BlockIp {
@@ -800,7 +802,7 @@ fn checkpoint_hard_wal_fail_closed() {
     drop(wal);
     let wal = Wal::open(&dir, false, Durability::None, 320, 0).unwrap();
     let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
-    let _checkpoint_lsn = checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    let _checkpoint_lsn = checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     // Write 100 more records to segments strictly after the checkpoint LSN.
     for i in 0..100 {
         wal.append(&WalEntry::BlockIp {
@@ -885,7 +887,7 @@ fn checkpoint_concurrency() {
         wal = flush(wal); // flush → disk consistent
         let store1 = Arc::new(Store::new(16));
         replay_wal_into_store(&store1, &wal, 0).unwrap();
-        checkpoint_now(&wal, &store1, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store1, std::collections::HashMap::new());
 
         // Mutations: unblock ips[0], block 99.0.0.1.
         wal.append(&WalEntry::UnblockIp {
@@ -903,7 +905,7 @@ fn checkpoint_concurrency() {
         wal = flush(wal);
         let store2 = Arc::new(Store::new(16));
         replay_wal_into_store(&store2, &wal, 0).unwrap();
-        checkpoint_now(&wal, &store2, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store2, std::collections::HashMap::new());
 
         // Tail after last checkpoint.
         wal.append(&WalEntry::UnblockIp {
@@ -989,7 +991,7 @@ fn checkpoint_equivalent_overlapping_cidrs() {
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
             store.active_cidrs.insert(*n, ());
         }
-        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     };
 
     // Tail: more overlapping CIDR
@@ -1045,7 +1047,7 @@ fn checkpoint_equivalent_block_unblock() {
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
             store.active_cidrs.insert(*n, ());
         }
-        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     };
 
     // Tail: unblock
@@ -1104,7 +1106,7 @@ fn checkpoint_equivalent_ttl() {
             .unwrap_or(0);
         let mut ip_exp = std::collections::HashMap::new();
         ip_exp.insert(ip, unix_deadline_ahead(remaining));
-        checkpoint_now(&wal, &store, ip_exp);
+        checkpoint_now(&dir, &wal, &store, ip_exp);
     };
 
     sleep_ms(100); // small downtime sim
@@ -1179,7 +1181,7 @@ fn checkpoint_equivalent_multiple_ckpt() {
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
             store.active_cidrs.insert(*n, ());
         }
-        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
         drop(wal);
     }
 
@@ -1579,7 +1581,7 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
         wal.sync().unwrap();
         let store = Arc::new(Store::new(16));
         replay_wal_into_store(&store, &wal, 0).unwrap();
-        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+        checkpoint_now(&dir, &wal, &store, std::collections::HashMap::new());
     }
     let manifest_before =
         std::fs::read_to_string(std::path::Path::new(&dir).join("MANIFEST")).unwrap();

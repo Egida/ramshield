@@ -79,6 +79,44 @@ impl CheckpointShared {
     pub fn state(&self) -> SharedState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+
+    /// Publish one IP expiration immediately. The periodic enforcement tick
+    /// still refreshes the complete mirror, but checkpoint creation must not
+    /// wait up to one tick to observe a newly scheduled TTL.
+    pub fn set_ip_expiration(&self, ip: IpAddr, deadline_ns: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ip_expirations
+            .insert(ip, deadline_ns);
+    }
+
+    /// Remove one IP expiration immediately.
+    pub fn remove_ip_expiration(&self, ip: &IpAddr) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ip_expirations
+            .remove(ip);
+    }
+
+    /// Publish one CIDR expiration immediately.
+    pub fn set_cidr_expiration(&self, network: IpNetwork, deadline_ns: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cidr_expirations
+            .insert(network, deadline_ns);
+    }
+
+    /// Remove one CIDR expiration immediately.
+    pub fn remove_cidr_expiration(&self, network: &IpNetwork) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cidr_expirations
+            .remove(network);
+    }
 }
 
 #[cfg(test)]

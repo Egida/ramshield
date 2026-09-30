@@ -584,17 +584,12 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     (String, u64, u64),
                 > = std::collections::HashMap::new();
                 if let Some(seed) = snapshot_seed.as_ref() {
-                    let now_ns = crate::engine::checkpoint::now_unix_ns();
-                    for ip in seed.snapshot_blocked_ips.iter() {
-                        // Deadline lookup: temporary IPs carry remaining_ns;
-                        // deadline = now + remaining. Permanent = 0.
-                        let deadline_ns = seed
-                            .ip_expirations
-                            .iter()
-                            .find(|(sip, _)| sip == ip)
-                            .map(|(_, ns)| now_ns.saturating_add(*ns))
-                            .unwrap_or(0);
-                        replay_seed.insert(*ip, ("manual_block".to_string(), now_ns, deadline_ns));
+                    // Seed from the exact snapshot record. Do not replace the
+                    // historical reason/since timestamp, and do not reconstruct
+                    // an absolute deadline from a rounded remaining TTL.
+                    for (ip, reason, since_ns, expires_at_ns) in seed.ip_states.iter() {
+                        replay_seed
+                            .insert(*ip, (reason.clone(), *since_ns, expires_at_ns.unwrap_or(0)));
                     }
                 }
 
@@ -649,14 +644,17 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     if !seed.ip_expirations.is_empty() {
                         let now_ns = crate::engine::checkpoint::now_unix_ns();
                         let pairs = seed.ip_expirations.iter().map(|(ip, deadline)| {
-                            (*ip, deadline.saturating_sub(now_ns) / 1_000_000_000)
+                            (*ip, deadline.saturating_sub(now_ns).div_ceil(1_000_000_000))
                         });
                         enforcement.restore_expirations(pairs);
                     }
                     if !seed.cidr_expirations.is_empty() {
                         let now_ns = crate::engine::checkpoint::now_unix_ns();
                         let pairs = seed.cidr_expirations.iter().map(|(net, deadline)| {
-                            (*net, deadline.saturating_sub(now_ns) / 1_000_000_000)
+                            (
+                                *net,
+                                deadline.saturating_sub(now_ns).div_ceil(1_000_000_000),
+                            )
                         });
                         enforcement.restore_cidr_blocks(pairs);
                     }
@@ -770,14 +768,18 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         break;
                     }
                 }
-                let boundary = wal.begin_checkpoint();
-                // Real runtime state, captured under the checkpoint barrier so
-                // no enforcement mutation can straddle boundary + capture.
-                let ckpt_state = {
+                // The boundary and the complete snapshot image must be
+                // captured while holding the same barrier used by enforcement
+                // for [WAL append + Store mutation]. Do not move build_snapshot
+                // outside this guard: it reads the Store, so capturing only the
+                // LSN under the guard is not sufficient.
+                let (boundary, snap) = {
                     let _guard = checkpoint_shared
                         .barrier
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
+
+                    let boundary = wal.begin_checkpoint();
                     let mirror = checkpoint_shared.state();
                     // CIDR deadlines: mirror covers temporaries; permanent
                     // CIDRs (in store.active_cidrs but absent from the mirror)
@@ -791,12 +793,16 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                             expires_at_ns: mirror.cidr_expirations.get(&network).copied(),
                         })
                         .collect();
-                    CheckpointState {
+                    let ckpt_state = CheckpointState {
                         ip_expirations: mirror.ip_expirations.clone(),
                         cidrs,
-                    }
+                    };
+                    let snap = build_snapshot(&store_arc, &ckpt_state, boundary.lsn);
+                    (boundary, snap)
                 };
-                let snap = build_snapshot(&store_arc, &ckpt_state, boundary.lsn);
+
+                // Filesystem I/O deliberately happens after the barrier is
+                // released. The barrier protects logical consistency, not disk I/O.
                 let snap_path = match write_snapshot(&cfg_dir, &snap, boundary.lsn) {
                     Ok(p) => p,
                     Err(e) => {
@@ -804,7 +810,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         continue;
                     }
                 };
-                match wal.finish_checkpoint(boundary.lsn, &snap_path) {
+                match wal.finish_checkpoint(boundary.lsn) {
                     Ok(new_lsn) => info!(
                         "checkpoint (lsn={} snap_lsn={}): {}",
                         new_lsn, boundary.lsn, snap_path
