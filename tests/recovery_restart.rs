@@ -1268,8 +1268,6 @@ fn resize_newest_segment(dir: &str, delta: i64) -> u64 {
     new_len
 }
 
-
-
 /// Crash point 1 — during WAL append.
 /// A partially-written trailing record (torn header/payload) is the last
 /// thing on disk. The record was never acknowledged, so recovery is allowed
