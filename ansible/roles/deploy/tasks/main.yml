@@ -32,6 +32,8 @@
     src: "{{ project_dir }}/config.prod.toml"
     dest: /etc/ramshield/config.toml
     mode: '0640'
+    # NOTE: config.prod.toml is gitignored (secrets). Must exist locally.
+    #       Generate from config.baseline.toml + secret overrides before deploy.
   when: deploy_mode == "systemd"
 
 - name: Daemon-reload systemd
