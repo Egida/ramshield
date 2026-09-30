@@ -13,6 +13,7 @@ members = [
     "crates/ramshield-cgnat",
     "crates/ramshield-analytics",
     "crates/ramshield-mesh",
+    "crates/ramwal",
 ]
 resolver = "3"
 
