@@ -290,7 +290,6 @@ fn checkpoint_now(
     };
     let snap = build_snapshot(store, &state, boundary.lsn);
     write_snapshot(dir, &snap, boundary.lsn).unwrap();
-    wal.sync().unwrap();
     wal.finish_checkpoint(boundary.lsn).unwrap();
     boundary.lsn
 }
