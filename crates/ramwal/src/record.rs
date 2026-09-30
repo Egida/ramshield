@@ -69,7 +69,9 @@ impl RecordHeader {
             return Some(Err(Corruption::UnsupportedVersion { offset: 4, version }));
         }
 
-        let raw = u64::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13]]);
+        let raw = u64::from_le_bytes([
+            bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
+        ]);
         let lsn = Lsn::new(raw);
 
         let plen = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);

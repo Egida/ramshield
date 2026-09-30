@@ -232,16 +232,13 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
         }
     }
     for c in snap.active_cidrs.iter() {
-        match classify(c.expires_at_ns, now_ns) {
-            ExpiryVerdict::Expired => continue,
-            verdict => {
-                store.active_cidrs.insert(c.network, ());
-                if let ExpiryVerdict::Live { remaining_ns: _ } = verdict {
-                    if let Some(deadline) = c.expires_at_ns {
-                        cidr_expirations.push((c.network, deadline));
-                    }
-                }
-            }
+        let verdict = classify(c.expires_at_ns, now_ns);
+        if matches!(verdict, ExpiryVerdict::Expired) {
+            continue;
+        }
+        store.active_cidrs.insert(c.network, ());
+        if let (ExpiryVerdict::Live { .. }, Some(deadline)) = (&verdict, c.expires_at_ns) {
+            cidr_expirations.push((c.network, deadline));
         }
     }
     SnapshotRestore {
