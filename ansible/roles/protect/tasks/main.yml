@@ -27,3 +27,4 @@
       - "'memory_usage_mb' in metrics.content"
     fail_msg: "Metrics missing cpu_usage or memory_usage_mb"
     success_msg: "Protection gate passed — service live and observable"
+  when: metrics is defined and metrics.content is defined  # uri skips in --check (no .content); skip assert there

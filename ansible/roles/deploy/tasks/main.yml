@@ -1,6 +1,7 @@
 ---
 # DEPLOY — build, install, start (systemd or k8s)
 # Vars: deploy_mode (systemd | k8s), dashboard_port, deploy_host
+#       deploy_build (bool, default true) — set false to skip the release build
 - name: Build release artifact
   command: cargo build --release --locked --features full
   args:
@@ -8,6 +9,7 @@
   register: build_result
   changed_when: true
   failed_when: build_result.rc != 0
+  when: (deploy_build | default('true')) | bool
 
 - name: Assert binary produced
   stat:
