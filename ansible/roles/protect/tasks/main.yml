@@ -1,0 +1,29 @@
+---
+# PROTECT — post-deploy health checks
+- name: Wait for healthz endpoint
+  uri:
+    url: "http://{{ deploy_host | default('127.0.0.1') }}:{{ dashboard_port | default(9999) }}/healthz"
+    method: GET
+    status_code: 200
+    timeout: 10
+  register: healthz
+  retries: "{{ ci_poll_max_seconds // ci_poll_interval_seconds | default(30) }}"
+  delay: "{{ ci_poll_interval_seconds | default(10) }}"
+  until: healthz.status == 200
+  changed_when: false
+
+- name: Verify metrics surface
+  uri:
+    url: "http://{{ deploy_host | default('127.0.0.1') }}:{{ dashboard_port | default(9999) }}/metrics"
+    method: GET
+    return_content: true
+  register: metrics
+  changed_when: false
+
+- name: Guardrail — expected gauges present
+  assert:
+    that:
+      - "'cpu_usage' in metrics.content"
+      - "'memory_usage_mb' in metrics.content"
+    fail_msg: "Metrics missing cpu_usage or memory_usage_mb"
+    success_msg: "Protection gate passed — service live and observable"
