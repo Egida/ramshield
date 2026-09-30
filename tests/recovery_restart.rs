@@ -970,3 +970,233 @@ fn checkpoint_concurrency() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Batch 2 — Phase 4 extended: checkpoint equivalence + tail replay tests
+// Each validates: full WAL replay ≡ snapshot(N) + WAL(N+1...)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Case 2: Overlapping CIDRs ──
+#[test]
+fn checkpoint_equivalent_overlapping_cidrs() {
+    let dir = wal_dir("ckpt_equiv_overlap");
+
+    // Pre-checkpoint: overlapping CIDR blocks
+    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let net1 = IpNetwork::new(IpAddr::from([10, 0, 0, 0]), 8).unwrap();
+    let net2 = IpNetwork::new(IpAddr::from([10, 1, 0, 0]), 16).unwrap();
+    let net3 = IpNetwork::new(IpAddr::from([10, 1, 2, 0]), 24).unwrap();
+    for net in [net1, net2, net3] {
+        wal_pre.append(&WalEntry::BlockCidr {
+            cidr: net,
+            reason: "overlap".into(),
+            ttl_secs: None,
+            ts_ns: now_ns(),
+        }).unwrap();
+    }
+    drop(wal_pre);
+
+    // Checkpoint boundary (snapshot)
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let store = Arc::new(Store::new(16));
+        let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
+        for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
+            store.active_cidrs.insert(*n, ());
+        }
+        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    };
+
+    // Tail: more overlapping CIDR
+    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let net4 = IpNetwork::new(IpAddr::from([10, 1, 2, 128]), 25).unwrap();
+    wal_tail.append(&WalEntry::BlockCidr {
+        cidr: net4,
+        reason: "tail_overlap".into(),
+        ttl_secs: None,
+        ts_ns: now_ns(),
+    }).unwrap();
+    drop(wal_tail);
+
+    // Verify: full replay ≡ snapshot+tail
+    let store_full = restart_full_replay(&dir).0;
+    let store_snap = restart_from_snapshot(&dir).0;
+    for net in [net1, net2, net3, net4] {
+        assert_eq!(
+            store_full.active_cidrs.contains_key(&net),
+            store_snap.active_cidrs.contains_key(&net),
+            "overlapping CIDRs: checkpoint+tail == full replay"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Case 3: Block / unblock ──
+#[test]
+fn checkpoint_equivalent_block_unblock() {
+    let dir = wal_dir("ckpt_equiv_blkunblk");
+
+    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let ip_a = IpAddr::from([192, 168, 0, 1]);
+    for _ in 0..2 {
+        wal_pre.append(&WalEntry::BlockIp {
+            ip: ip_a.to_string(), reason: "dbl_blk".into(),
+            ttl_secs: None, ts_ns: now_ns(),
+        }).unwrap();
+    }
+    drop(wal_pre);
+
+    // Checkpoint boundary
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let store = Arc::new(Store::new(16));
+        let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
+        for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
+            store.active_cidrs.insert(*n, ());
+        }
+        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+    };
+
+    // Tail: unblock
+    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    wal_tail.append(&WalEntry::UnblockIp {
+        ip: ip_a.to_string(), ts_ns: now_ns(),
+    }).unwrap();
+    drop(wal_tail);
+
+    // Both paths must agree: IP NOT blocked
+    let store_full = restart_full_replay(&dir).0;
+    let store_snap = restart_from_snapshot(&dir).0;
+    for (source, st) in [("full_replay", store_full), ("snapshot+tail", store_snap)] {
+        let rec = st.get(&ip_a);
+        let blocked = rec.map(|v| v.is_blocked()).unwrap_or(false);
+        assert!(!blocked, "{source}: {ip_a} must NOT be blocked after unblock tail");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Case 4: TTL survival through checkpoint ──
+#[test]
+fn checkpoint_equivalent_ttl() {
+    let dir = wal_dir("ckpt_equiv_ttl");
+
+    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let ip = IpAddr::from([172, 16, 0, 1]);
+    wal_pre.append(&WalEntry::BlockIp {
+        ip: ip.to_string(), reason: "ttl_src".into(),
+        ttl_secs: Some(60), ts_ns: now_ns(),
+    }).unwrap();
+    drop(wal_pre);
+
+    // Checkpoint with TTL tracking
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let store = Arc::new(Store::new(16));
+        let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
+        for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
+            store.active_cidrs.insert(*n, ());
+        }
+        let remaining = ttls.iter().find(|(a,_)| *a == ip)
+            .map(|(_, s)| *s).unwrap_or(0);
+        let mut ip_exp = std::collections::HashMap::new();
+        ip_exp.insert(ip, unix_deadline_ahead(remaining));
+        checkpoint_now(&wal, &store, ip_exp);
+    };
+
+    sleep_ms(100); // small downtime sim
+    // Tail: re-block (update TTL)
+    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    wal_tail.append(&WalEntry::BlockIp {
+        ip: ip.to_string(), reason: "ttl_update".into(),
+        ttl_secs: Some(30), ts_ns: now_ns(),
+    }).unwrap();
+    drop(wal_tail);
+
+    let store_full = restart_full_replay(&dir).0;
+    let store_snap = restart_from_snapshot(&dir).0;
+    let rec_full = store_full.get(&ip);
+    let rec_snap = store_snap.get(&ip);
+    assert_eq!(
+        rec_full.map(|v| v.is_blocked()),
+        rec_snap.map(|v| v.is_blocked()),
+        "TTL path: blocked state must match between full_replay and snapshot+tail"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Case 5: Multiple checkpoints ──
+#[test]
+fn checkpoint_equivalent_multiple_ckpt() {
+    let dir = wal_dir("ckpt_equiv_multi");
+
+    // Round 1: block A, B, C → checkpoint #1
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let nets = [
+            IpNetwork::new(IpAddr::from([10,0,0,0]),8).unwrap(),
+            IpNetwork::new(IpAddr::from([10,1,0,0]),16).unwrap(),
+            IpNetwork::new(IpAddr::from([10,2,0,0]),16).unwrap(),
+        ];
+        for n in &nets {
+            wal.append(&WalEntry::BlockCidr {
+                cidr:*n, reason:"r1".into(), ttl_secs:None, ts_ns:now_ns(),
+            }).unwrap();
+        }
+        drop(wal);
+    }
+
+    // Round 2: unblock C, block D → checkpoint #2
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        wal.append(&WalEntry::UnblockCidr {
+            cidr:IpNetwork::new(IpAddr::from([10,2,0,0]),16).unwrap(), ts_ns:now_ns(),
+        }).unwrap();
+        wal.append(&WalEntry::BlockCidr {
+            cidr:IpNetwork::new(IpAddr::from([10,3,0,0]),16).unwrap(),
+            reason:"r2".into(), ttl_secs:None, ts_ns:now_ns(),
+        }).unwrap();
+        drop(wal);
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let store = Arc::new(Store::new(16));
+        let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
+        for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
+            store.active_cidrs.insert(*n, ());
+        }
+        checkpoint_now(&wal, &store, std::collections::HashMap::new());
+        drop(wal);
+    }
+
+    // Tail: block E, F
+    {
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        for i in [4, 5] {
+            wal.append(&WalEntry::BlockCidr {
+                cidr:IpNetwork::new(IpAddr::from([10,i,0,0]),16).unwrap(),
+                reason:"tail".into(), ttl_secs:None, ts_ns:now_ns(),
+            }).unwrap();
+        }
+        drop(wal);
+    }
+
+    // Compare full replay vs snapshot+tail
+    let store_full = restart_full_replay(&dir).0;
+    let store_snap = restart_from_snapshot(&dir).0;
+
+    let expected_cidrs = vec![
+        ([10,0,0,0], 8),   // r1, survives
+        ([10,1,0,0], 16),  // r1, survives
+        ([10,3,0,0], 16),  // r2, survives (C unblocked)
+        ([10,4,0,0], 16),  // tail
+        ([10,5,0,0], 16),  // tail
+    ];
+
+    for (octets, prefix) in expected_cidrs {
+        let net = IpNetwork::new(IpAddr::from(octets), prefix).unwrap();
+        let a = store_full.active_cidrs.contains_key(&net);
+        let b = store_snap.active_cidrs.contains_key(&net);
+        assert_eq!(a, b, "multi-ckpt: {net} mismatch");
+        assert!(a && b, "multi-ckpt: {net} must be in both recoveries");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

@@ -59,9 +59,18 @@ pub enum WalEntry {
 }
 
 pub struct CheckpointBoundary {
+    /// The LSN that this boundary represents (all entries with LSN < this are included in the snapshot).
     pub lsn: u64,
     pub snapshot_path: String,
 }
+
+impl CheckpointBoundary {
+    /// The LSN that this boundary represents (all entries with LSN < this are included in the snapshot).
+    pub fn boundary_lsn(&self) -> u64 {
+        self.lsn
+    }
+}
+
 
 /// On-disk record header (written before payload).
 #[derive(Debug)]
@@ -119,6 +128,8 @@ pub struct Wal {
     /// Cumulative segments deleted by retention. Enforcement scrapes via
     /// `take_segments_pruned` so storage stays free of a metrics dep.
     segments_pruned: AtomicU64,
+    /// Highest LSN confirmed durable (flush/sync completed). 0 = none yet.
+    durable_lsn: AtomicU64,
 }
 
 struct Inner {
@@ -224,6 +235,7 @@ impl Wal {
             ckpt_lsn: AtomicU64::new(ckpt_lsn),
             snapshot_lsn: AtomicU64::new(snapshot_lsn_val),
             segments_pruned: AtomicU64::new(0),
+            durable_lsn: AtomicU64::new(0),
         })
     }
 
@@ -251,29 +263,27 @@ impl Wal {
         let mut h = Crc32::new();
         h.update(&payload);
         let crc = h.finalize();
-        let lsn = self.lsn_counter.fetch_add(1, Ordering::SeqCst);
-
-        let rh = RecordHeader {
-            magic: MAGIC,
-            version: FORMAT_VERSION,
-            lsn,
-            payload_len: payload.len() as u32,
-            crc,
-            flags,
-        };
-        let rh_bytes = rh.to_bytes();
-
         // Step 2: I/O under mutex — minimal critical section.
         // Writes + flush are fast (buffered). The expensive sync_data() runs
         // OUTSIDE the lock: we snapshot the current file handle as Arc<File>
         // and drop the guard, then call sync_data on the Arc clone.
         // ponytail: a dedicated writer thread via crossbeam channel would
         // remove the Arc clone hop entirely.
-        let (old_file_arc, needs_dir_sync) = {
+        let (old_file_arc, needs_dir_sync, lsn) = {
             let mut g = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let lsn = self.lsn_counter.fetch_add(1, Ordering::SeqCst); // LSN assigned at the actual serialized WAL write point
+            let rh = RecordHeader {
+                magic: MAGIC,
+                version: FORMAT_VERSION,
+                lsn,
+                payload_len: payload.len() as u32,
+                crc,
+                flags,
+            };
+            let rh_bytes = rh.to_bytes();
             g.writer.write_all(&rh_bytes)?;
             g.writer.write_all(&payload)?;
             g.bytes += (HEADER + payload.len()) as u64;
@@ -335,13 +345,14 @@ impl Wal {
                 g.seg = new_seg;
                 info!("WAL rotated → {:?}", path);
             }
-            (old_file_arc, must_rotate)
+            (old_file_arc, must_rotate, lsn)
         }; // mutex dropped here
 
         // Step 3: sync_data OUTSIDE the mutex. Other appenders proceed
         // immediately while this fsync runs (100µs SSD, up to ~10ms HDD).
         if let Some(f) = old_file_arc {
             f.sync_data()?;
+            self.durable_lsn.store(lsn, Ordering::SeqCst); // LSN durable once sync_data completes
         }
 
         // Step 4: Directory sync OUTSIDE the mutex — ~10ms on rotational, ~0.1ms on SSD.
@@ -372,6 +383,18 @@ impl Wal {
     /// Storage crate avoids a metrics dep; the enforcement actor scrapes this.
     pub fn take_segments_pruned(&self) -> u64 {
         self.segments_pruned.swap(0, Ordering::Relaxed)
+    }
+
+    /// Highest LSN confirmed durable (flush/sync completed). 0 = none yet.
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn.load(Ordering::SeqCst)
+    }
+
+    /// Block until the LSN has been confirmed durable (sync_data completed).
+    pub fn sync_until(&self, target_lsn: u64) {
+        while self.durable_lsn.load(Ordering::SeqCst) < target_lsn {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Begin a checkpoint: freeze the boundary LSN (all prior entries are
@@ -615,9 +638,11 @@ impl Wal {
             }
         }
 
-        // Idempotent replay: sort by LSN, dedup by LSN
-        out.sort_by_key(|(lsn, _)| *lsn);
-        out.dedup_by_key(|(lsn, _)| *lsn);
+        // LSN ordering is authoritative: append assigns LSN at the write point,
+        // records are written in LSN order, replay reads segments in sorted
+        // path order. No sort/dedup needed — duplicates indicate a bug elsewhere.
+        // ponytail: if a caller ever sees out-of-order here, fix the producer,
+        // not the reader.
 
         info!("WAL replay: {} entries", out.len());
         Ok(out.into_iter().map(|(_, e)| e).collect())
@@ -815,8 +840,7 @@ impl Wal {
             }
         }
 
-        out.sort_by_key(|(lsn, _)| *lsn);
-        out.dedup_by_key(|(lsn, _)| *lsn);
+        // LSN ordering is authoritative (see replay()). No sort/dedup needed.
         Ok(out
             .into_iter()
             .filter(|(lsn, _)| *lsn > min_lsn)
