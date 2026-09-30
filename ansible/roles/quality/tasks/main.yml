@@ -1,0 +1,47 @@
+---
+- name: QUALITY — verify CI workflows on pushed SHA
+  block:
+    - name: Fetch current commit SHA
+      command: git -C "{{ project_dir }}" rev-parse HEAD
+      register: pushed_sha
+
+    - name: Poll all CI workflows via gh CLI
+      shell: |
+        set -e
+        cd "{{ project_dir }}"
+        pass=true
+        for wf in {{ ci_workflows | join(' ') }}; do
+          result=$(gh run list --branch "{{ branch }}" --limit 1 \
+            --json=name,conclusion 2>/dev/null | \
+            jq -r --arg name "$wf" '
+              .[] | select(.name == $name) | "\(.conclusion)"
+            ' 2>/dev/null || echo "no_runs")
+          
+          if [ "$result" = "success" ]; then
+            echo "$wf → SUCCESS"
+          else
+            echo "$wf → $result (FAIL)"
+            pass=false
+          fi
+        done
+        
+        if [ "$pass" = true ]; then
+          echo "ALL_WORKFLOWS=PASS"
+        else
+          echo "ALL_WORKFLOWS=FAIL"
+        fi
+      args:
+        executable: /bin/bash
+      register: ci_result
+      changed_when: false
+
+    - name: Report CI status
+      debug:
+        msg: "{{ ci_result.stdout_lines | default(['(no output)']) | join('\n') }}"
+
+    - name: Abort if any workflow failed
+      fail:
+        msg: "CI verification FAILED — one or more workflows are not green:\n{{ ci_result.stdout | default('(could not verify)') }}"
+      when: >-
+        (ci_result.stdout | default('')) is search('ALL_WORKFLOWS=FAIL') or
+        (ci_result.rc | default(0)) != 0
