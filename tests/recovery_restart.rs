@@ -43,7 +43,7 @@ fn restart_full_replay(dir: &str) -> (Arc<Store>, Vec<(IpAddr, u64)>) {
         .traffic
         .ram_limit_mb
         .store(256, std::sync::atomic::Ordering::Relaxed);
-    let wal = Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(dir);
     let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
     // Engine full replay also folds CIDRs (replay_wal_cidrs_from min_lsn=0).
     for (net, _remaining) in replay_wal_cidrs_from(&wal, 0).unwrap() {
@@ -58,7 +58,7 @@ fn restart_full_replay(dir: &str) -> (Arc<Store>, Vec<(IpAddr, u64)>) {
 #[test]
 fn recovery_permanent_ip() {
     let dir = wal_dir("perm_ip");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 0, 0, 1]);
 
     wal.append(&WalEntry::BlockIp {
@@ -81,7 +81,7 @@ fn recovery_permanent_ip() {
 #[test]
 fn recovery_temporary_ip_ttl_active() {
     let dir = wal_dir("tmp_ip_ttl");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 0, 0, 2]);
 
     wal.append(&WalEntry::BlockIp {
@@ -115,7 +115,7 @@ fn recovery_temporary_ip_ttl_active() {
 #[test]
 fn recovery_expired_before_restart() {
     let dir = wal_dir("expired");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 0, 0, 3]);
 
     // Append a block that expired 5s ago (TTL=1s).
@@ -145,7 +145,7 @@ fn recovery_expired_before_restart() {
 #[test]
 fn recovery_cidr_block() {
     let dir = wal_dir("cidr");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let net = IpNetwork::new(IpAddr::from([10, 0, 0, 0]), 24).unwrap();
 
     wal.append(&WalEntry::BlockCidr {
@@ -157,7 +157,7 @@ fn recovery_cidr_block() {
     .unwrap();
     drop(wal);
 
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     let cidrs = replay_wal_cidrs_from(&wal2, 0).unwrap();
     drop(wal2);
 
@@ -176,7 +176,7 @@ fn recovery_cidr_block() {
 #[test]
 fn recovery_tail_replay() {
     let dir = wal_dir("tail");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip_a = IpAddr::from([10, 0, 1, 1]);
     let ip_b = IpAddr::from([10, 0, 1, 2]);
 
@@ -277,7 +277,7 @@ fn dir_of(wal: &Wal) -> String {
 #[test]
 fn checkpoint_permanent_ip() {
     let dir = wal_dir("ckpt_perm_ip");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 20, 0, 1]);
     let store = Arc::new(Store::new(16));
 
@@ -289,7 +289,7 @@ fn checkpoint_permanent_ip() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
     // Snapshot with no expirations (permanent).
@@ -311,7 +311,7 @@ fn checkpoint_permanent_ip() {
 #[test]
 fn checkpoint_temporary_ip_active() {
     let dir = wal_dir("ckpt_tmp_ip");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 20, 0, 2]);
     let store = Arc::new(Store::new(16));
 
@@ -323,7 +323,7 @@ fn checkpoint_temporary_ip_active() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
     let remaining_at_ckpt = ttls
         .iter()
@@ -363,7 +363,7 @@ fn checkpoint_temporary_ip_active() {
 #[test]
 fn checkpoint_temporary_ip_expires_during_downtime() {
     let dir = wal_dir("ckpt_expired_ip");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 20, 0, 3]);
     let store = Arc::new(Store::new(16));
 
@@ -375,7 +375,7 @@ fn checkpoint_temporary_ip_expires_during_downtime() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
     let mut ip_exp = std::collections::HashMap::new();
@@ -404,7 +404,7 @@ fn checkpoint_temporary_ip_expires_during_downtime() {
 #[test]
 fn checkpoint_cidr_only() {
     let dir = wal_dir("ckpt_cidr_only");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let net = IpNetwork::new(IpAddr::from([172, 20, 1, 0]), 24).unwrap();
     let store = Arc::new(Store::new(16));
 
@@ -417,7 +417,7 @@ fn checkpoint_cidr_only() {
     .unwrap();
     drop(wal);
     // Rebuild store.active_cidrs — replay_wal_into_store doesn't fold CIDRs.
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let cidrs = replay_wal_cidrs_from(&wal, 0).unwrap();
     for (n, _) in cidrs {
         store.active_cidrs.insert(n, ());
@@ -440,7 +440,7 @@ fn checkpoint_cidr_only() {
 #[test]
 fn checkpoint_mixed_snapshot_and_tail() {
     let dir = wal_dir("ckpt_mixed");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip_a = IpAddr::from([10, 20, 1, 1]);
     let ip_b = IpAddr::from([10, 20, 1, 2]);
     let net = IpNetwork::new(IpAddr::from([172, 20, 2, 0]), 24).unwrap();
@@ -455,7 +455,7 @@ fn checkpoint_mixed_snapshot_and_tail() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
     let lsn = checkpoint_now(&wal, &store, std::collections::HashMap::new());
@@ -503,7 +503,7 @@ fn checkpoint_mixed_snapshot_and_tail() {
 #[test]
 fn checkpoint_corrupt_snapshot_falls_back_to_wal() {
     let dir = wal_dir("ckpt_corrupt");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 20, 2, 1]);
     let store = Arc::new(Store::new(16));
 
@@ -515,7 +515,7 @@ fn checkpoint_corrupt_snapshot_falls_back_to_wal() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
 
     let lsn = checkpoint_now(&wal, &store, std::collections::HashMap::new());
@@ -541,7 +541,7 @@ fn checkpoint_corrupt_snapshot_falls_back_to_wal() {
 #[test]
 fn checkpoint_missing_snapshot_falls_back_to_wal() {
     let dir = wal_dir("ckpt_missing");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let ip = IpAddr::from([10, 20, 3, 1]);
     let store = Arc::new(Store::new(16));
 
@@ -553,7 +553,7 @@ fn checkpoint_missing_snapshot_falls_back_to_wal() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     replay_wal_into_store(&store, &wal, 0).unwrap();
     checkpoint_now(&wal, &store, std::collections::HashMap::new());
     drop(wal);
@@ -587,7 +587,7 @@ fn restart_from_snapshot(
         .traffic
         .ram_limit_mb
         .store(256, std::sync::atomic::Ordering::Relaxed);
-    let wal = Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(dir);
     let snap_lsn = wal.snapshot_lsn();
     let snap_path = snapshot_path(dir, snap_lsn);
     let snap = load_snapshot(&snap_path).unwrap().expect("snapshot file");
@@ -609,7 +609,7 @@ fn restart_from_snapshot(
             (*ip, ("manual_block".to_string(), now_ns, deadline_ns))
         })
         .collect();
-    let wal2 = Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(dir);
     let ttls =
         ramshield_enforcement::replay_wal_into_store_seeded(&store, &wal2, snap_lsn, seed).unwrap();
     // CIDR tail replay (engine does the same via replay_wal_cidrs_from).
@@ -630,7 +630,7 @@ fn restart_from_snapshot(
 #[test]
 fn checkpoint_temporary_cidr() {
     let dir = wal_dir("ckpt_tmp_cidr");
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let net = IpNetwork::new(IpAddr::from([10, 60, 0, 0]), 16).unwrap();
     let store = Arc::new(Store::new(16));
 
@@ -642,7 +642,7 @@ fn checkpoint_temporary_cidr() {
     })
     .unwrap();
     drop(wal);
-    let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal = open_wal(&dir);
     let cidrs = replay_wal_cidrs_from(&wal, 0).unwrap();
     for (n, _) in cidrs {
         store.active_cidrs.insert(n, ());
@@ -860,7 +860,7 @@ fn checkpoint_concurrency() {
         let _ = std::fs::remove_dir_all(&dir);
 
         // Helper: append entries then reopen for proper disk flush.
-        let open = || Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let open = || open_wal(&dir);
         let flush = |w| {
             drop(w);
             open()
@@ -965,7 +965,7 @@ fn checkpoint_equivalent_overlapping_cidrs() {
     let dir = wal_dir("ckpt_equiv_overlap");
 
     // Pre-checkpoint: overlapping CIDR blocks
-    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_pre = open_wal(&dir);
     let net1 = IpNetwork::new(IpAddr::from([10, 0, 0, 0]), 8).unwrap();
     let net2 = IpNetwork::new(IpAddr::from([10, 1, 0, 0]), 16).unwrap();
     let net3 = IpNetwork::new(IpAddr::from([10, 1, 2, 0]), 24).unwrap();
@@ -983,7 +983,7 @@ fn checkpoint_equivalent_overlapping_cidrs() {
 
     // Checkpoint boundary (snapshot)
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         let store = Arc::new(Store::new(16));
         let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
@@ -993,7 +993,7 @@ fn checkpoint_equivalent_overlapping_cidrs() {
     };
 
     // Tail: more overlapping CIDR
-    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_tail = open_wal(&dir);
     let net4 = IpNetwork::new(IpAddr::from([10, 1, 2, 128]), 25).unwrap();
     wal_tail
         .append(&WalEntry::BlockCidr {
@@ -1023,7 +1023,7 @@ fn checkpoint_equivalent_overlapping_cidrs() {
 fn checkpoint_equivalent_block_unblock() {
     let dir = wal_dir("ckpt_equiv_blkunblk");
 
-    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_pre = open_wal(&dir);
     let ip_a = IpAddr::from([192, 168, 0, 1]);
     for _ in 0..2 {
         wal_pre
@@ -1039,7 +1039,7 @@ fn checkpoint_equivalent_block_unblock() {
 
     // Checkpoint boundary
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         let store = Arc::new(Store::new(16));
         let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
@@ -1049,7 +1049,7 @@ fn checkpoint_equivalent_block_unblock() {
     };
 
     // Tail: unblock
-    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_tail = open_wal(&dir);
     wal_tail
         .append(&WalEntry::UnblockIp {
             ip: ip_a.to_string(),
@@ -1077,7 +1077,7 @@ fn checkpoint_equivalent_block_unblock() {
 fn checkpoint_equivalent_ttl() {
     let dir = wal_dir("ckpt_equiv_ttl");
 
-    let wal_pre = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_pre = open_wal(&dir);
     let ip = IpAddr::from([172, 16, 0, 1]);
     wal_pre
         .append(&WalEntry::BlockIp {
@@ -1091,7 +1091,7 @@ fn checkpoint_equivalent_ttl() {
 
     // Checkpoint with TTL tracking
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         let store = Arc::new(Store::new(16));
         let ttls = replay_wal_into_store(&store, &wal, 0).unwrap();
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
@@ -1109,7 +1109,7 @@ fn checkpoint_equivalent_ttl() {
 
     sleep_ms(100); // small downtime sim
     // Tail: re-block (update TTL)
-    let wal_tail = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal_tail = open_wal(&dir);
     wal_tail
         .append(&WalEntry::BlockIp {
             ip: ip.to_string(),
@@ -1139,7 +1139,7 @@ fn checkpoint_equivalent_multiple_ckpt() {
 
     // Round 1: block A, B, C → checkpoint #1
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         let nets = [
             IpNetwork::new(IpAddr::from([10, 0, 0, 0]), 8).unwrap(),
             IpNetwork::new(IpAddr::from([10, 1, 0, 0]), 16).unwrap(),
@@ -1159,7 +1159,7 @@ fn checkpoint_equivalent_multiple_ckpt() {
 
     // Round 2: unblock C, block D → checkpoint #2
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::UnblockCidr {
             cidr: IpNetwork::new(IpAddr::from([10, 2, 0, 0]), 16).unwrap(),
             ts_ns: now_ns(),
@@ -1173,7 +1173,7 @@ fn checkpoint_equivalent_multiple_ckpt() {
         })
         .unwrap();
         drop(wal);
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         let store = Arc::new(Store::new(16));
         let _ = replay_wal_into_store(&store, &wal, 0).unwrap();
         for (n, _) in &replay_wal_cidrs_from(&wal, 0).unwrap() {
@@ -1185,7 +1185,7 @@ fn checkpoint_equivalent_multiple_ckpt() {
 
     // Tail: block E, F
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         for i in [4, 5] {
             wal.append(&WalEntry::BlockCidr {
                 cidr: IpNetwork::new(IpAddr::from([10, i, 0, 0]), 16).unwrap(),
@@ -1236,6 +1236,40 @@ fn blocked(store: &Store, ip: &IpAddr) -> bool {
     store.get(ip).is_some_and(|v| v.is_blocked())
 }
 
+// ── Shared crash-suite helpers ────────────────────────────────────────
+// Every crash test uses the same WAL shape (buffered durability, one huge
+// segment so rotation never interferes with tail surgery) and the same
+// recover-by-full-replay step. Keep both in one place.
+
+/// WAL opened with the crash-suite defaults.
+fn open_wal(dir: &str) -> Wal {
+    Wal::open(dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap()
+}
+
+/// Newest `.rwl` segment in `dir` — the one a crash would tear.
+fn newest_segment(dir: &str) -> std::path::PathBuf {
+    let mut segs: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rwl"))
+        .collect();
+    segs.sort();
+    segs.pop().expect("segment")
+}
+
+/// Resize the newest segment's tail by `delta` bytes: negative truncates a
+/// torn record, positive appends garbage. Returns the resulting length.
+fn resize_newest_segment(dir: &str, delta: i64) -> u64 {
+    let seg = newest_segment(dir);
+    let new_len = (std::fs::metadata(&seg).unwrap().len() as i64 + delta).max(0) as u64;
+    let f = std::fs::OpenOptions::new().write(true).open(&seg).unwrap();
+    f.set_len(new_len).unwrap();
+    new_len
+}
+
+
+
 /// Crash point 1 — during WAL append.
 /// A partially-written trailing record (torn header/payload) is the last
 /// thing on disk. The record was never acknowledged, so recovery is allowed
@@ -1248,7 +1282,7 @@ fn crash_during_wal_append_torn_tail_dropped() {
     let torn = IpAddr::from([10, 91, 0, 3]);
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         for ip in [a, b] {
             wal.append(&WalEntry::BlockIp {
                 ip: ip.to_string(),
@@ -1270,24 +1304,11 @@ fn crash_during_wal_append_torn_tail_dropped() {
 
     // Truncate the final record mid-way: simulate the OS losing the tail
     // of an in-flight write. Chop the segment to just past `b`.
-    let seg = {
-        let mut segs: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rwl"))
-            .collect();
-        segs.sort();
-        segs.pop().expect("segment")
-    };
-    let full_len = std::fs::metadata(&seg).unwrap().len();
     // Chop 3 bytes — mid-record, guaranteed torn (not a clean boundary).
-    let f = std::fs::OpenOptions::new().write(true).open(&seg).unwrap();
-    f.set_len(full_len - 3).unwrap();
-    drop(f);
+    resize_newest_segment(&dir, -3);
 
     let store = Arc::new(Store::new(16));
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     replay_wal_into_store(&store, &wal2, 0).unwrap();
     drop(wal2);
 
@@ -1316,7 +1337,7 @@ fn crash_torn_tail_then_append_recovers_continues() {
     let after = IpAddr::from([10, 92, 0, 2]);
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: keep.to_string(),
             reason: "keep".into(),
@@ -1326,23 +1347,10 @@ fn crash_torn_tail_then_append_recovers_continues() {
         .unwrap();
         wal.sync().unwrap();
     }
-    let seg = {
-        let mut segs: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "rwl"))
-            .collect();
-        segs.sort();
-        segs.pop().expect("segment")
-    };
-    let len = std::fs::metadata(&seg).unwrap().len();
-    let f = std::fs::OpenOptions::new().write(true).open(&seg).unwrap();
-    f.set_len(len + 7).unwrap(); // garbage tail beyond valid records
-    drop(f);
+    resize_newest_segment(&dir, 7); // garbage tail beyond valid records
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: after.to_string(),
             reason: "post-recovery".into(),
@@ -1354,7 +1362,7 @@ fn crash_torn_tail_then_append_recovers_continues() {
     }
 
     let store = Arc::new(Store::new(16));
-    let wal3 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal3 = open_wal(&dir);
     replay_wal_into_store(&store, &wal3, 0).unwrap();
     drop(wal3);
     assert!(blocked(&store, &keep), "pre-corruption record survived");
@@ -1374,7 +1382,7 @@ fn crash_after_write_before_sync_is_legal_either_way() {
     let maybe = IpAddr::from([10, 93, 0, 2]);
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: committed.to_string(),
             reason: "synced".into(),
@@ -1396,7 +1404,7 @@ fn crash_after_write_before_sync_is_legal_either_way() {
     }
 
     let store = Arc::new(Store::new(16));
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     replay_wal_into_store(&store, &wal2, 0).unwrap();
     drop(wal2);
 
@@ -1425,7 +1433,7 @@ fn crash_after_wal_sync_everything_survives_in_lsn_order() {
     let ips: Vec<IpAddr> = (1..=5).map(|x| IpAddr::from([10, 94, 0, x])).collect();
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         for ip in &ips {
             wal.append(&WalEntry::BlockIp {
                 ip: ip.to_string(),
@@ -1444,7 +1452,7 @@ fn crash_after_wal_sync_everything_survives_in_lsn_order() {
     // Replay returns strictly increasing LSNs by construction — assert the
     // recovered block set instead of re-deriving LSNs the reader doesn't expose.
     let store = Arc::new(Store::new(16));
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     replay_wal_into_store(&store, &wal2, 0).unwrap();
     drop(wal2);
     for ip in &ips {
@@ -1462,7 +1470,7 @@ fn crash_during_snapshot_write_partial_tmp_ignored() {
     let ip = IpAddr::from([10, 95, 0, 1]);
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: ip.to_string(),
             reason: "keep".into(),
@@ -1482,7 +1490,7 @@ fn crash_during_snapshot_write_partial_tmp_ignored() {
 
     // No checkpoint marker + no final snapshot → recovery falls back to WAL.
     let store = Arc::new(Store::new(16));
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     assert_eq!(wal2.snapshot_lsn(), 0, "no checkpoint published");
     replay_wal_into_store(&store, &wal2, 0).unwrap();
     drop(wal2);
@@ -1500,7 +1508,7 @@ fn crash_after_snapshot_fsync_before_rename_previous_authoritative() {
     let ip = IpAddr::from([10, 96, 0, 1]);
 
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: ip.to_string(),
             reason: "keep".into(),
@@ -1516,7 +1524,7 @@ fn crash_after_snapshot_fsync_before_rename_previous_authoritative() {
     let tmp = format!("{seat}.tmp");
     let store_pre = Arc::new(Store::new(16));
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         replay_wal_into_store(&store_pre, &wal, 0).unwrap();
     }
     let snap = build_snapshot(
@@ -1536,14 +1544,14 @@ fn crash_after_snapshot_fsync_before_rename_previous_authoritative() {
     );
 
     // Reopen: no MANIFEST, so the tmp must not be treated as the snapshot.
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     assert_eq!(wal2.ckpt_lsn(), 0, "MANIFEST was never published");
     assert_eq!(wal2.snapshot_lsn(), 0, "snapshot LSN never published");
     drop(wal2);
 
     // Full replay is authoritative and recovers the block.
     let store = Arc::new(Store::new(16));
-    let wal3 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal3 = open_wal(&dir);
     replay_wal_into_store(&store, &wal3, 0).unwrap();
     drop(wal3);
     assert!(blocked(&store, &ip));
@@ -1562,7 +1570,7 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
 
     // First checkpoint: publish properly at boundary L2 with ip1 blocked.
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: ip1.to_string(),
             reason: "ckpt1".into(),
@@ -1581,7 +1589,7 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
     // Now attempt a second checkpoint: write snapshot + append marker, but
     // "crash" before finish_checkpoint rewrites MANIFEST.
     {
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = open_wal(&dir);
         wal.append(&WalEntry::BlockIp {
             ip: ip2.to_string(),
             reason: "ckpt2".into(),
@@ -1612,7 +1620,7 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
         "un-published checkpoint must not have touched MANIFEST"
     );
 
-    let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal2 = open_wal(&dir);
     let published_snap_lsn = wal2.snapshot_lsn();
     assert!(published_snap_lsn > 0, "first checkpoint is published");
     let ckpt1_lsn = wal2.ckpt_lsn();
@@ -1635,7 +1643,7 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
 
     // And full replay must agree.
     let store_f = Arc::new(Store::new(16));
-    let wal3 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+    let wal3 = open_wal(&dir);
     replay_wal_into_store(&store_f, &wal3, 0).unwrap();
     drop(wal3);
     for ip in [ip1, ip2] {
