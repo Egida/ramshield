@@ -28,7 +28,7 @@ jobs:
 
       # Must match rust-toolchain.toml (nightly). Installing components on
       # stable leaves rustfmt/clippy missing on the overridden toolchain.
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@nightly-2026-08-29
         with:
           components: rustfmt, clippy
 
