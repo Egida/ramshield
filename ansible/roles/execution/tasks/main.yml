@@ -1,21 +1,19 @@
 ---
-- name: EXECUTION — run cargo gates locally
-  block:
-    - name: Run all gates in order
-      ansible.builtin.command: "{{ gate.cmd }}"
-      environment:
-        CARGO_HOME: "/home/m/.cargo"
-      args:
-        chdir: "{{ project_dir }}"
-      register: gate_results
-      changed_when: false
-      loop: "{{ gates }}"
-      loop_control:
-        loop_var: gate
+- name: Run all gates in order
+  ansible.builtin.command: "{{ gate.cmd }}"
+  environment:
+    CARGO_HOME: "/home/m/.cargo"
+  args:
+    chdir: "{{ project_dir }}"
+  register: gate_results
+  changed_when: false
+  loop: "{{ gates }}"
+  loop_control:
+    loop_var: gate
 
-    - name: Summarize gate results
-      ansible.builtin.debug:
-        msg: "Gate '{{ item.gate.name }}' finished rc={{ item.rc }}"
-      loop: "{{ gate_results.results | default([]) }}"
-      loop_control:
-        loop_var: item
+- name: Summarize gate results
+  ansible.builtin.debug:
+    msg: "Gate '{{ item.gate.name }}' finished rc={{ item.rc }}"
+  loop: "{{ gate_results.results | default([]) }}"
+  loop_control:
+    loop_var: item
