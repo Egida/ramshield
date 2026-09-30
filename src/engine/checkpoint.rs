@@ -221,10 +221,9 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
             let ttl_secs = match verdict {
                 ExpiryVerdict::Live { remaining_ns } => {
                     let secs = remaining_ns.div_ceil(1_000_000_000);
-                    ip_expirations.push((
-                        snap_ip.ip,
-                        snap_ip.expires_at_ns.expect("live snapshot has deadline"),
-                    ));
+                    if let Some(deadline) = snap_ip.expires_at_ns {
+                        ip_expirations.push((snap_ip.ip, deadline));
+                    }
                     Some(secs)
                 }
                 _ => None,
@@ -238,10 +237,9 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
             verdict => {
                 store.active_cidrs.insert(c.network, ());
                 if let ExpiryVerdict::Live { remaining_ns: _ } = verdict {
-                    cidr_expirations.push((
-                        c.network,
-                        c.expires_at_ns.expect("live snapshot has deadline"),
-                    ));
+                    if let Some(deadline) = c.expires_at_ns {
+                        cidr_expirations.push((c.network, deadline));
+                    }
                 }
             }
         }

@@ -64,15 +64,15 @@ impl RecordHeader {
             return Some(Err(Corruption::InvalidMagic { offset: 0 }));
         }
 
-        let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        let version = u16::from_le_bytes([bytes[4], bytes[5]]);
         if version != FORMAT_VERSION {
             return Some(Err(Corruption::UnsupportedVersion { offset: 4, version }));
         }
 
-        let raw = u64::from_le_bytes(bytes[6..14].try_into().unwrap());
+        let raw = u64::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13]]);
         let lsn = Lsn::new(raw);
 
-        let plen = u32::from_le_bytes(bytes[14..18].try_into().unwrap());
+        let plen = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
         if plen > MAX_RECORD_SIZE {
             return Some(Err(Corruption::InvalidLength {
                 offset: 14,
@@ -80,7 +80,7 @@ impl RecordHeader {
             }));
         }
 
-        let crc32c = u32::from_le_bytes(bytes[18..22].try_into().unwrap());
+        let crc32c = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
 
         let flags = bytes[22];
         if flags & !FLAG_COMPRESSED != 0 {

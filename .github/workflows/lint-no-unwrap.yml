@@ -24,6 +24,7 @@ jobs:
           HITS=$(rg -n --type rust \
             --glob '!tests/**' \
             --glob '!**/tests/**' \
+            --glob '!**/benches/**' \
             --glob '!**/*.test.rs' \
             --glob '!**/test_*.rs' \
             --glob '!**/*_test.rs' \
