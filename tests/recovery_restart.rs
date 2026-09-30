@@ -171,8 +171,36 @@ fn recovery_cidr_block() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ── Scenario 5: Tail replay (checkpoint → append more → full replay) ──
+/// Expired CIDR must NOT be restored on restart (catches the
+/// `remaining == Some(0)` ambiguity in CIDR replay tail).
+#[test]
+fn recovery_expired_cidr_is_not_restored() {
+    let dir = wal_dir("expired_cidr");
+    let wal = open_wal(&dir);
+    let net = IpNetwork::new(IpAddr::from([10, 0, 1, 0]), 24).unwrap();
 
+    let past_ts = now_ns() - 5_000_000_000;
+    wal.append(&WalEntry::BlockCidr {
+        cidr: net,
+        reason: "test".into(),
+        ttl_secs: Some(1),
+        ts_ns: past_ts,
+    })
+    .unwrap();
+    drop(wal);
+
+    let wal2 = open_wal(&dir);
+    let cidrs = replay_wal_cidrs_from(&wal2, 0).unwrap();
+    drop(wal2);
+
+    assert!(
+        cidrs.is_empty(),
+        "expired CIDR must not be restored, got {cidrs:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Scenario 5: Tail replay (checkpoint → append more → full replay) ──
 #[test]
 fn recovery_tail_replay() {
     let dir = wal_dir("tail");
@@ -189,8 +217,7 @@ fn recovery_tail_replay() {
     })
     .unwrap();
 
-    // Checkpoint (writes manifest).
-    wal.sync().unwrap();
+    // Checkpoint (writes manifest; finish_checkpoint establishes durability).
     let boundary = wal.begin_checkpoint();
     wal.finish_checkpoint(boundary.lsn).unwrap();
 
@@ -597,18 +624,11 @@ fn restart_from_snapshot(
     let restored = restore_from_snapshot(&store, &snap);
     // Tail replay starts from snapshot block state (seed-fold), so snapshot
     // IPs untouched by the tail remain blocked; tail UnblockIp removes them.
-    let now_ns = now_ns();
     let seed: std::collections::HashMap<std::net::IpAddr, (String, u64, u64)> = restored
-        .snapshot_blocked_ips
+        .ip_states
         .iter()
-        .map(|ip| {
-            let deadline_ns = restored
-                .ip_expirations
-                .iter()
-                .find(|(sip, _)| sip == ip)
-                .map(|(_, ns)| now_ns.saturating_add(*ns))
-                .unwrap_or(0);
-            (*ip, ("manual_block".to_string(), now_ns, deadline_ns))
+        .map(|(ip, reason, since_ns, expires_at_ns)| {
+            (*ip, (reason.clone(), *since_ns, expires_at_ns.unwrap_or(0)))
         })
         .collect();
     let wal2 = open_wal(dir);

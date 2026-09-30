@@ -1165,12 +1165,14 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
     Ok(blocked
         .into_iter()
         .filter_map(|(cidr, (_ts_ns, deadline))| {
-            let remaining =
-                deadline.map(|deadline| deadline.saturating_sub(now_ns).div_ceil(1_000_000_000));
-            if remaining == Some(0) {
-                None
+            if let Some(deadline) = deadline {
+                if deadline <= now_ns {
+                    return None;
+                }
+                let remaining = deadline.saturating_sub(now_ns).div_ceil(1_000_000_000);
+                Some((cidr, remaining))
             } else {
-                Some((cidr, remaining.unwrap_or(0)))
+                Some((cidr, 0))
             }
         })
         .collect())
