@@ -5,22 +5,20 @@
       command: git -C "{{ project_dir }}" rev-parse HEAD
       register: pushed_sha
 
-    - name: Poll all CI workflows via gh CLI
+    - name: Check CI workflows via gh CLI
       shell: |
         set -e
         cd "{{ project_dir }}"
         pass=true
-        for wf in {{ ci_workflows | join(' ') }}; do
-          result=$(gh run list --branch "{{ branch }}" --limit 1 \
-            --json=name,conclusion 2>/dev/null | \
-            jq -r --arg name "$wf" '
-              .[] | select(.name == $name) | "\(.conclusion)"
-            ' 2>/dev/null || echo "no_runs")
+        for wf_name in {{ ci_workflows | join(' ') }}; do
+          status=$(gh run list --branch "{{ branch }}" --limit 1 \
+            --workflow "$wf_name" \
+            --json=conclusion 2>/dev/null | \
+            jq -r '.[0].conclusion // "no_runs"' 2>/dev/null || echo "no_runs")
           
-          if [ "$result" = "success" ]; then
-            echo "$wf → SUCCESS"
-          else
-            echo "$wf → $result (FAIL)"
+          echo "Workflow: $wf_name → $status"
+          
+          if [ "$status" != "success" ]; then
             pass=false
           fi
         done
@@ -36,11 +34,11 @@
       changed_when: false
 
     - name: Report CI status
-      debug:
+      ansible.builtin.debug:
         msg: "{{ ci_result.stdout_lines | default(['(no output)']) | join('\n') }}"
 
     - name: Abort if any workflow failed
-      fail:
+      ansible.builtin.fail:
         msg: "CI verification FAILED — one or more workflows are not green:\n{{ ci_result.stdout | default('(could not verify)') }}"
       when: >-
         (ci_result.stdout | default('')) is search('ALL_WORKFLOWS=FAIL') or
