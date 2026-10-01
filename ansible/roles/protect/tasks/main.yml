@@ -23,8 +23,9 @@
 - name: Guardrail — expected gauges present
   assert:
     that:
-      - "'cpu_usage' in metrics.content"
-      - "'memory_usage_mb' in metrics.content"
-    fail_msg: "Metrics missing cpu_usage or memory_usage_mb"
+      - "'uptime_seconds' in metrics.content"
+      - "'requests_total' in metrics.content"
+      - "'ingest_channel_depth' in metrics.content"
+    fail_msg: "Metrics missing expected gauges (uptime_seconds, requests_total, ingest_channel_depth)"
     success_msg: "Protection gate passed — service live and observable"
   when: metrics is defined and metrics.content is defined  # uri skips in --check (no .content); skip assert there
