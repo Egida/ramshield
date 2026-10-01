@@ -24,6 +24,41 @@ The correct fix is a **relative** signal: `inst_rps > N × baseline_rps`
 traffic sawtooth (mobile CGNAT, CDN bursts), so it needs its own soak before
 it becomes a block decision.
 
+## Empirical confirmation (Oct 2026)
+
+A probe drove the real `DetectionEngine` (observation, not theory):
+
+**Barrier 1 — cold-skip gate.** Default config, `promote_min_events=8`.
+5 ev/s IP flushed 20× (100 events total). Result: `promoted_ips: 0`,
+IP never stored, 0 blocks. Every flush of ≤5 events is cold-skipped before
+`merge_record` runs — EWMA/CUSUM never even instantiate.
+
+**Barrier 2 — absolute threshold.** Forced `promote_min_events=2`,
+kept `rps_threshold=1000`. The IP promoted and accumulated 21 samples:
+
+```
+ewma_rps:     6.25
+baseline_rps: 2.84
+cusum_s:      0.00      <- 21 samples of positive drift, all 0
+threat_score: 0.004
+block_state:  Clean
+blocks_emitted: 0
+```
+
+`cusum_allowance(1000)` = 200. Every sample's drift `(inst − baseline − 200)`
+is negative, so `cusum_s` is permanently 0 — it never starts. The CUSUM design
+test (`rate_tracker.rs:91`) confirms intent: it fires only for "600 rps from
+50 baseline," i.e. drift past allowance. A 5 ev/s anomaly is invisible to
+every block path.
+
+So two independent mechanisms each do their job:
+- **cold-skip** bounds memory under cardinality-swarm (the failure the
+  per-IP-tracker approach would reintroduce);
+- **absolute threshold + CUSUM allowance** bounds FP under organic sawtooth.
+
+Closing the gap means adding a *third* path — a relative signal bounded in
+ways both are not — not weakening either.
+
 ## Status
 
 `small_scale.rs` was written (Poisson-Gamma LLR, inter-arrival CV,
