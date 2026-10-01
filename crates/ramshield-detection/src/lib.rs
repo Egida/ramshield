@@ -4,7 +4,6 @@
 
 pub mod batch;
 pub mod rate_tracker;
-pub mod small_scale;
 
 use ahash::AHashMap as HashMap;
 use arc_swap::ArcSwap;
