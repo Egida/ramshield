@@ -91,8 +91,10 @@ HC_TESTS=$(grep -cE "crc_mismatch|corrupt_magic|golden_corrupt" "$ROOT"/crates/r
 
 # ── 10. Disk full ────────────────────────────────────────────────────────
 echo "--- #10 Disk full ---"
-# Strict: require an actual test exercising ENOSPC, not just source handling.
-if grep -rqE "ENOSPC|disk_full|no_space" "$ROOT"/crates/*/tests/ "$ROOT"/tests/ 2>/dev/null; then
+# Require an actual test exercising ENOSPC, not just source handling.
+if grep -rE "fail_next_diskfull|disk_full_append" "$ROOT"/crates/ramwal/tests/recovery_test.rs 2>/dev/null | grep -q "fn disk_full\|fail_next_diskfull"; then
+    pass "disk-full e2e test present (ENOSPC seam → DiskFull)"
+elif grep -rqE "ENOSPC|disk_full|no_space" "$ROOT"/crates/*/tests/ "$ROOT"/tests/ 2>/dev/null; then
     pass "disk-full e2e test present"
 elif grep -rqE "ENOSPC|StorageFull|OutOfSpace" "$ROOT"/crates/ramwal/src/ 2>/dev/null; then
     fail "disk-full: error type defined but NO e2e test exercises it"

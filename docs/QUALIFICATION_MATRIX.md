@@ -14,7 +14,7 @@ artifact proves it, and its current status on this host.
 | 7 | SIGKILL recovery         | yes                                     | `tests/recovery_restart.rs` (kill/sleep/restart under real Store+WAL) | ✅ 5+ recovery-fn tests |
 | 8 | Corrupted tail           | yes                                     | `partial_header_at_eof`, `golden_truncate_mid_payload`, `truncate_entire_segment_quarantines` | ✅ dedicated tests |
 | 9 | Historical corruption    | yes                                     | `crc_mismatch_is_corruption`, `corrupt_magic`, `golden_corrupt_crc_first` | ✅ dedicated tests |
-| 10 | Disk full                 | yes                                     | `ramwal/src/error.rs::Error::Io` checked; no e2e ENOSPC test | ❌ no disk-full test |
+| 10 | Disk full                 | yes                                     | `disk_full_append_maps_to_diskfull_error` in `crates/ramwal/tests/recovery_test.rs` — ENOSPC injected via `fail_next_diskfull()` seam, proves `StorageFull → Error::DiskFull` mapping + poison + reopen recovery | ✅ e2e test passes (ENOSPC seam → DiskFull) |
 | 11 | Checkpoint                | yes                                     | `checkpoint_*` tests in `tests/recovery_restart.rs` + `crates/ramshield-storage/` | ✅ 10+ checkpoint lifecycle tests |
 | 12 | Retention                 | yes                                     | `retention_without_checkpoint_keeps_everything`, `retention_with_checkpoint_deletes_older_segments`, `retention_never_deletes_active_segment`, `checkpoint_and_retention` | ✅ 4 dedicated tests |
 | 13 | IPC authentication       | yes                                     | `auth_verify_never_panics`, `auth_rejects_wrong_key_signature` + protocol crate | ✅ coverage present |

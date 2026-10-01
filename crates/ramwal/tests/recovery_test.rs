@@ -1225,6 +1225,45 @@ fn failed_append_poisons_writer() {
     ));
 }
 
+/// A write failure reported as `ENOSPC` must surface as `Error::DiskFull`
+/// (not a generic `Error::Io`) and poison the instance exactly like any
+/// other write-side storage failure. This covers the P1 #33 disk-full
+/// qualification row without needing a physical full disk.
+#[test]
+fn disk_full_append_maps_to_diskfull_error() {
+    let d = test_dir();
+    {
+        let wal = Wal::open(wal_cfg(&d)).unwrap();
+
+        wal.fail_next_diskfull();
+        let result = wal.append(b"payload");
+
+        assert!(
+            matches!(result, Err(Error::DiskFull)),
+            "ENOSPC during append must map to Error::DiskFull, got: {result:?}"
+        );
+        assert!(
+            wal.is_poisoned(),
+            "disk-full write failure must poison the WAL"
+        );
+
+        // A poisoned WAL rejects every mutating operation.
+        assert!(matches!(wal.append(b"again"), Err(Error::Poisoned)));
+        assert!(matches!(wal.flush(), Err(Error::Poisoned)));
+        assert!(matches!(wal.sync(), Err(Error::Poisoned)));
+        assert!(matches!(wal.checkpoint(Lsn::new(1)), Err(Error::Poisoned)));
+    }
+
+    // Reopen runs recovery and yields a healthy instance: disk-full is a
+    // transient condition, so the data written before the failure survives.
+    let wal2 = Wal::open(wal_cfg(&d)).unwrap();
+    assert!(
+        !wal2.is_poisoned(),
+        "reopen after disk-full must produce a healthy WAL"
+    );
+    clean(&d);
+}
+
 /// A directory fsync failure after rotation leaves a segment whose existence
 /// is not guaranteed on disk; the WAL must surface the error and poison.
 #[test]

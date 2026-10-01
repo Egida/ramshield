@@ -4,6 +4,34 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
+## [0.3.3] - 2026-10-01
+
+### Added
+- `docs/QUALIFICATION_MATRIX.md`: 17-dimension qualification matrix
+  (P1 #33) mapping each audit §33 row to a concrete test artifact and
+  live status.
+- `scripts/qualification_check.sh`: automated per-row verifier
+  (`--quick` / `--json`, exit code = fail count).
+- `disk_full_append_maps_to_diskfull_error` in `crates/ramwal/`
+  (P1 #32 gap #10): ENOSPC fault-injected via `fail_next_diskfull()`
+  test seam; proves `StorageFull → Error::DiskFull` mapping, poison
+  transition, and reopen recovery.
+- `docs/INVARIANTS.md`: WAL/Store/Checkpoint invariant contracts
+  (P1 #32), cross-referenced from ARCHITECTURE.md.
+- `wal_lsn_invariants` test: written ≥ durable, ckpt ≤ durable
+  assertion after every append/sync/checkpoint transition.
+- ansible `qualification` role: runs matrix checker, advisory by
+  default, wired into both playbooks.
+
+### Changed
+- ansible protect guardrail now asserts `ramshield_uptime_seconds`,
+  `ramshield_requests_total`, `ramshield_ingest_channel_depth`
+  (matches actual /metrics output; previous guard asserted
+  `cpu_usage`/`memory_usage_mb` which the daemon does not export).
+- Toolchain pinned to `nightly-2026-08-29` (P1 #21/#30).
+- `dtolnay/rust-toolchain` action pinned to `@v1` with `toolchain:`
+  input (P1 #30 CI reproducibility).
+
 ## [0.3.2] - 2026-09-29
 
 ### Fixed

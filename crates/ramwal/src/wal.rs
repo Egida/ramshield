@@ -77,6 +77,11 @@ struct Inner {
     /// injected and a real `write_all` error. Swap in a fault-injecting
     /// writer when a test needs to fail *mid-payload* specifically.
     fail_next_write: bool,
+    /// Test seam: makes the next `append` fail with `ENOSPC` (disk full)
+    /// instead of a generic write error. Proves the `Error::from_io`
+    /// mapping that routes `StorageFull` to `Error::DiskFull` is reachable
+    /// through the full append→sync→poison path.
+    fail_next_diskfull: bool,
     /// Test seam: makes the next rotation's `fsync_dir` fail. Same
     /// rationale as `fail_next_write` — a directory that cannot be
     /// fsynced leaves a new segment that may not survive a crash, so the
@@ -185,6 +190,7 @@ impl Wal {
                 closed_segments,
                 state: WalState::Open,
                 fail_next_write: false,
+                fail_next_diskfull: false,
                 fail_next_dir_fsync: false,
             })),
             compression: config.compression,
@@ -253,6 +259,12 @@ impl Wal {
             if g.fail_next_write {
                 g.fail_next_write = false;
                 let e = std::io::Error::other("injected write failure");
+                g.state = WalState::Poisoned;
+                return Err(Error::from_io(e));
+            }
+            if g.fail_next_diskfull {
+                g.fail_next_diskfull = false;
+                let e = std::io::Error::from_raw_os_error(28 /* ENOSPC */);
                 g.state = WalState::Poisoned;
                 return Err(Error::from_io(e));
             }
@@ -378,6 +390,19 @@ impl Wal {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .fail_next_dir_fsync = true;
+    }
+
+    /// Test seam: make the next `append` fail with an `ENOSPC` disk-full
+    /// error. This exercises `Error::from_io`'s mapping of `StorageFull`
+    /// to the public `Error::DiskFull` variant through the real append
+    /// path — the closest a unit test can come to a full disk without
+    /// one.
+    #[doc(hidden)]
+    pub fn fail_next_diskfull(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fail_next_diskfull = true;
     }
 
     /// True once a write-side storage failure has poisoned this instance.
