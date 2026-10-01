@@ -1405,3 +1405,105 @@ fn checkpoint_accepts_terminal_lsn_when_durable() {
     let wal2 = Wal::open(wal_cfg(&d)).unwrap();
     assert_eq!(wal2.ckpt_lsn().get(), u64::MAX);
 }
+
+// ── P1 #32 invariant assertions ─────────────────────────────────────────
+
+/// Assert the three WAL LSN invariants from docs/INVARIANTS.md:
+///
+///   1. current_lsn >= durable_lsn  (written >= durable)
+///   2. ckpt_lsn    <= durable_lsn  (checkpoint never past what's durable)
+///   3. After poison the instance stays failed — already asserted by
+///      `is_poisoned()`, not re-checked here.
+fn assert_wal_invariants(wal: &Wal) {
+    let current = wal.current_lsn().get();
+    let durable = wal.durable_lsn().get();
+    let ckpt = wal.ckpt_lsn().get();
+    assert!(
+        current >= durable,
+        "WAL invariant: current_lsn {current} >= durable_lsn {durable}"
+    );
+    assert!(
+        ckpt <= durable,
+        "WAL invariant: ckpt_lsn {ckpt} <= durable_lsn {durable}"
+    );
+}
+
+/// Audit §32: all LSN ordering constraints that every mutation path
+/// must maintain. Covers the invariants table in docs/INVARIANTS.md.
+#[test]
+fn wal_lsn_invariants() {
+    let d = test_dir();
+    // Explicit durability: `append` does not auto-sync, so durable_lsn
+    // can lag behind current_lsn between appends.
+    let mut cfg = ramwal::config::Config::new(&d);
+    cfg.durability = ramwal::config::Durability::Explicit;
+    let wal = Wal::open(cfg).unwrap();
+
+    // Fresh WAL: all at 0.
+    assert_eq!(wal.current_lsn().get(), 0, "fresh current_lsn == 0");
+    assert_eq!(wal.durable_lsn().get(), 0, "fresh durable_lsn == 0");
+    assert_eq!(wal.ckpt_lsn().get(), 0, "fresh ckpt_lsn == 0");
+    assert_wal_invariants(&wal);
+
+    // Append without sync: written advances, durable stays at 0.
+    let lsn1 = wal.append(b"first").unwrap();
+    assert_eq!(wal.current_lsn(), lsn1);
+    assert_eq!(wal.durable_lsn().get(), 0, "unsync'd durable stays at 0");
+    assert_wal_invariants(&wal);
+
+    // Checkpoint of unsync'd LSN must fail (CheckpointNotDurable).
+    let r = wal.checkpoint(lsn1);
+    assert!(
+        matches!(r, Err(ramwal::Error::CheckpointNotDurable { .. })),
+        "checkpoint of unsync'd LSN must be rejected: {r:?}"
+    );
+    assert_eq!(
+        wal.ckpt_lsn().get(),
+        0,
+        "ckpt_lsn unchanged after failed checkpoint"
+    );
+    assert_wal_invariants(&wal);
+
+    // Sync: durable catches up.
+    wal.sync().unwrap();
+    assert!(
+        wal.durable_lsn() >= lsn1,
+        "after sync durable >= last written"
+    );
+    assert_eq!(
+        wal.durable_lsn(),
+        wal.current_lsn(),
+        "after sync durable == written"
+    );
+    assert_wal_invariants(&wal);
+
+    // Checkpoint a durable LSN.
+    wal.checkpoint(lsn1).unwrap();
+    assert_eq!(wal.ckpt_lsn(), lsn1, "checkpoint == synced LSN");
+    assert_wal_invariants(&wal);
+
+    // Second append+sync: ckpt_lsn must NOT advance without explicit checkpoint.
+    let lsn2 = wal.append(b"second").unwrap();
+    wal.sync().unwrap();
+    assert_eq!(wal.ckpt_lsn(), lsn1, "ckpt_lsn must not auto-advance");
+    assert_wal_invariants(&wal);
+
+    wal.checkpoint(lsn2).unwrap();
+    assert_eq!(wal.ckpt_lsn(), lsn2);
+    assert_wal_invariants(&wal);
+
+    // Regression-depth path: checkpoint the past must fail (CheckpointRegression).
+    let r = wal.checkpoint(lsn1);
+    assert!(
+        matches!(r, Err(ramwal::Error::CheckpointRegression { .. })),
+        "regressive checkpoint must be rejected: {r:?}"
+    );
+    assert_eq!(
+        wal.ckpt_lsn(),
+        lsn2,
+        "ckpt_lsn unchanged after regressive attempt"
+    );
+    assert_wal_invariants(&wal);
+
+    clean(&d);
+}
