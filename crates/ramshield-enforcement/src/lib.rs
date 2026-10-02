@@ -767,72 +767,29 @@ impl EnforcementService {
         match cmd.action {
             EnforceAction::Block => {
                 let reason = reason_to_block_reason(&cmd.reason);
-                let rec = self
-                    .store
-                    .get(&cmd.ip)
-                    .and_then(|v| match v {
-                        Value::IpRecord(r) => Some(r),
-                        _ => None,
-                    })
-                    .unwrap_or(IpRecord {
-                        ip: cmd.ip,
-                        request_count: 0,
-                        ewma_rps: 0.0,
-                        cusum_s: 0.0,
-                        baseline_rps: 0.0,
-                        prev_sample_hot: false,
-                        sample_count: 0,
-                        pulse_samples_in_window: 0,
-                        pulse_window_start_ns: 0,
-                        first_seen_ns: now_ns,
-                        last_seen_ns: now_ns,
-                        bytes_in: 0,
-                        status_dist: [0; 5],
-                        proto_fingerprint: 0,
-                        threat_score: 0.0,
-                        block_state: BlockState::Clean,
-                    });
-                let mut updated = rec;
-                updated.block_state = BlockState::Blocked {
-                    reason,
-                    since_ns: now_ns,
-                };
 
-                // Do not let Store's passive expiry hide a still-blocked record.
-                self.store
-                    .insert(
-                        cmd.ip,
-                        Value::IpRecord(updated),
-                        None,
-                        self.store.traffic.ram_limit_mb.load(Ordering::Relaxed) * 1024 * 1024,
-                    )
-                    .map_err(|e| EnforcementError::Storage(e.to_string()))?;
-
-                self.blocked_ips.insert(cmd.ip);
-                // Re-block resets attribution — a new block is a new epoch.
-                self.drops_by_blocked.remove(&cmd.ip);
+                // Domain split: a CIDR command is a prefix detention and MUST
+                // NOT create/clear an IpRecord, IP TTL, or mesh/mirror state
+                // for the representative `cmd.ip`. IP and CIDR are independent
+                // detention domains released independently.
                 if let Some(network) = cmd.cidr {
+                    // CIDR detention is its own state domain.
                     self.store.active_cidrs.insert(network, ());
-                }
-                // Invariant: at most one expiration per IP. A re-block must not
-                // inherit a stale TTL from a previous block/unblock cycle.
-                // Ring schedule/detach are both O(1) — TTL refresh moves the
-                // card between buckets instead of appending a duplicate.
-                if cmd.ttl_seconds > 0 {
-                    // TTL is clamped at every entry point (IPC boundary,
-                    // config validate) — checked_add is the belt-and-suspenders
-                    // guard so a future path can never overflow into a panic
-                    // and kill the enforcement task (blocks silently die).
-                    let at = Instant::now()
-                        .checked_add(Duration::from_secs(cmd.ttl_seconds))
-                        .unwrap_or_else(|| {
-                            Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
-                        });
-                    let now_unix_ns = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u64)
-                        .unwrap_or(0);
-                    if let Some(network) = cmd.cidr {
+
+                    if cmd.ttl_seconds > 0 {
+                        // TTL is clamped at every entry point (IPC boundary,
+                        // config validate) — checked_add is the belt-and-suspenders
+                        // guard so a future path can never overflow into a panic
+                        // and kill the enforcement task (blocks silently die).
+                        let at = Instant::now()
+                            .checked_add(Duration::from_secs(cmd.ttl_seconds))
+                            .unwrap_or_else(|| {
+                                Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
+                            });
+                        let now_unix_ns = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
                         self.cidr_expirations.insert(network, at);
                         if let Some(shared) = &self.checkpoint_shared {
                             shared.set_cidr_expiration(
@@ -841,20 +798,83 @@ impl EnforcementService {
                             );
                         }
                     } else {
+                        self.cidr_expirations.remove(&network);
+                        if let Some(shared) = &self.checkpoint_shared {
+                            shared.remove_cidr_expiration(&network);
+                        }
+                    }
+                } else {
+                    // Explicit IP detention.
+                    let rec = self
+                        .store
+                        .get(&cmd.ip)
+                        .and_then(|v| match v {
+                            Value::IpRecord(r) => Some(r),
+                            _ => None,
+                        })
+                        .unwrap_or(IpRecord {
+                            ip: cmd.ip,
+                            request_count: 0,
+                            ewma_rps: 0.0,
+                            cusum_s: 0.0,
+                            baseline_rps: 0.0,
+                            prev_sample_hot: false,
+                            sample_count: 0,
+                            pulse_samples_in_window: 0,
+                            pulse_window_start_ns: 0,
+                            first_seen_ns: now_ns,
+                            last_seen_ns: now_ns,
+                            bytes_in: 0,
+                            status_dist: [0; 5],
+                            proto_fingerprint: 0,
+                            threat_score: 0.0,
+                            block_state: BlockState::Clean,
+                        });
+                    let mut updated = rec;
+                    updated.block_state = BlockState::Blocked {
+                        reason,
+                        since_ns: now_ns,
+                    };
+
+                    // Do not let Store's passive expiry hide a still-blocked record.
+                    self.store
+                        .insert(
+                            cmd.ip,
+                            Value::IpRecord(updated),
+                            None,
+                            self.store.traffic.ram_limit_mb.load(Ordering::Relaxed) * 1024 * 1024,
+                        )
+                        .map_err(|e| EnforcementError::Storage(e.to_string()))?;
+
+                    self.blocked_ips.insert(cmd.ip);
+                    // Re-block resets attribution — a new block is a new epoch.
+                    self.drops_by_blocked.remove(&cmd.ip);
+                    // Invariant: at most one expiration per IP. A re-block must not
+                    // inherit a stale TTL from a previous block/unblock cycle.
+                    // Ring schedule/detach are both O(1) — TTL refresh moves the
+                    // card between buckets instead of appending a duplicate.
+                    if cmd.ttl_seconds > 0 {
+                        // TTL is clamped at every entry point (IPC boundary,
+                        // config validate) — checked_add is the belt-and-suspenders
+                        // guard so a future path can never overflow into a panic
+                        // and kill the enforcement task (blocks silently die).
+                        let at = Instant::now()
+                            .checked_add(Duration::from_secs(cmd.ttl_seconds))
+                            .unwrap_or_else(|| {
+                                Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
+                            });
+                        let now_unix_ns = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
                         self.schedule_expiration(cmd.ip, at);
                         if let Some(shared) = &self.checkpoint_shared {
                             shared.set_ip_expiration(cmd.ip, unix_ns_from_instant(at, now_unix_ns));
                         }
-                    }
-                } else {
-                    self.detach_expiration(cmd.ip);
-                    if let Some(shared) = &self.checkpoint_shared {
-                        shared.remove_ip_expiration(&cmd.ip);
-                    }
-                    if let Some(network) = cmd.cidr {
-                        self.cidr_expirations.remove(&network);
+                    } else {
+                        self.detach_expiration(cmd.ip);
                         if let Some(shared) = &self.checkpoint_shared {
-                            shared.remove_cidr_expiration(&network);
+                            shared.remove_ip_expiration(&cmd.ip);
                         }
                     }
                 }
@@ -914,36 +934,42 @@ impl EnforcementService {
                 Ok(result)
             }
             EnforceAction::Unblock => {
-                if let Some(Value::IpRecord(mut rec)) = self.store.get(&cmd.ip) {
-                    rec.block_state = BlockState::Clean;
-                    self.store
-                        .insert(
-                            cmd.ip,
-                            Value::IpRecord(rec),
-                            None,
-                            self.store.traffic.ram_limit_mb.load(Ordering::Relaxed) * 1024 * 1024,
-                        )
-                        .map_err(|e| EnforcementError::Storage(e.to_string()))?;
-                }
-                self.blocked_ips.remove(&cmd.ip);
-                self.drops_by_blocked.remove(&cmd.ip);
-                // Ponytail: mesh CRDT unbans — publish so dashboard reflects
-                // live unblock activity.
-                if let Some(mesh) = &self.mesh_blocklist {
-                    mesh.record_unban(cmd.ip);
-                    self.metrics.inc_mesh_record_unban();
-                }
-                // Purge any pending TTL so a later re-block starts clean.
-                self.detach_expiration(cmd.ip);
-                if let Some(shared) = &self.checkpoint_shared {
-                    shared.remove_ip_expiration(&cmd.ip);
-                }
+                // Domain split: a CIDR unblock is a prefix release and MUST NOT
+                // clear IpRecord/blocked_ips/drops/IP-TTL/mesh state for
+                // cmd.ip. Only the explicit-IP path touches IP state.
                 if let Some(network) = cmd.cidr {
                     self.cidr_expirations.remove(&network);
                     if let Some(shared) = &self.checkpoint_shared {
                         shared.remove_cidr_expiration(&network);
                     }
                     self.store.active_cidrs.remove(&network);
+                } else {
+                    if let Some(Value::IpRecord(mut rec)) = self.store.get(&cmd.ip) {
+                        rec.block_state = BlockState::Clean;
+                        self.store
+                            .insert(
+                                cmd.ip,
+                                Value::IpRecord(rec),
+                                None,
+                                self.store.traffic.ram_limit_mb.load(Ordering::Relaxed)
+                                    * 1024
+                                    * 1024,
+                            )
+                            .map_err(|e| EnforcementError::Storage(e.to_string()))?;
+                    }
+                    self.blocked_ips.remove(&cmd.ip);
+                    self.drops_by_blocked.remove(&cmd.ip);
+                    // Ponytail: mesh CRDT unbans — publish so dashboard reflects
+                    // live unblock activity. A CIDR unblock is NOT an IP unban.
+                    if let Some(mesh) = &self.mesh_blocklist {
+                        mesh.record_unban(cmd.ip);
+                        self.metrics.inc_mesh_record_unban();
+                    }
+                    // Purge any pending TTL so a later re-block starts clean.
+                    self.detach_expiration(cmd.ip);
+                    if let Some(shared) = &self.checkpoint_shared {
+                        shared.remove_ip_expiration(&cmd.ip);
+                    }
                 }
                 let xdp_applied = match cmd.cidr {
                     Some(network) => self.xdp.apply_cidr_unblock(network, cmd.decision_id),
@@ -1498,6 +1524,183 @@ mod tests {
         IpAddr::from(a)
     }
 
+    fn block_cidr_command(network: IpNetwork, ttl: u64) -> EnforceCommand {
+        EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "test".into(),
+            actor: "test".into(),
+            timestamp_utc: 0,
+            ttl_seconds: ttl,
+            reason: "high_rps".into(),
+            ip: network.addr,
+            cidr: Some(network),
+            action: EnforceAction::Block,
+        }
+    }
+
+    fn unblock_cidr_command(network: IpNetwork) -> EnforceCommand {
+        EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "test".into(),
+            actor: "test".into(),
+            timestamp_utc: 0,
+            ttl_seconds: 0,
+            reason: "manual".into(),
+            ip: network.addr,
+            cidr: Some(network),
+            action: EnforceAction::Unblock,
+        }
+    }
+
+    /// D0 regression: a CIDR block must NOT create an IP detention on the
+    /// prefix's representative address (`192.0.2.0` for `192.0.2.0/24`).
+    /// The two detention domains are independent.
+    #[tokio::test]
+    async fn cidr_block_does_not_block_representative_ip() {
+        let net = IpNetwork::new("192.0.2.0".parse().unwrap(), 24).unwrap();
+        let representative = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+
+        // No IpRecord with a Blocked state may exist for the representative —
+        // CIDR detention lives ONLY in active_cidrs, not the IP store.
+        assert!(
+            !s.store
+                .get(&representative)
+                .and_then(|v| match v {
+                    Value::IpRecord(r) => Some(r),
+                    _ => None,
+                })
+                .map(|r| matches!(r.block_state, BlockState::Blocked { .. }))
+                .unwrap_or(false),
+            "CIDR block created an explicit IP block on {}",
+            representative
+        );
+        assert!(
+            !s.blocked_ips.contains(&representative),
+            "CIDR block inserted the representative into the explicit block set"
+        );
+        assert!(s.store.active_cidrs.contains_key(&net));
+    }
+
+    /// D1 regression: a CIDR unblock must NOT destroy an independent
+    /// explicit IP detention on the prefix's representative address.
+    #[tokio::test]
+    async fn cidr_unblock_does_not_remove_explicit_ip_block() {
+        let net = IpNetwork::new("192.0.2.0".parse().unwrap(), 24).unwrap();
+        let ip0 = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cmd(ip0, 0)).await.unwrap();
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+
+        assert!(
+            s.blocked_ips.contains(&ip0),
+            "CIDR unblock cleared an unrelated explicit IP block on {}",
+            ip0
+        );
+        match s.store.get(&ip0).unwrap() {
+            Value::IpRecord(r) => assert!(
+                matches!(r.block_state, BlockState::Blocked { .. }),
+                "explicit IP block_state was cleared by a CIDR unblock"
+            ),
+            _ => panic!("expected IP record"),
+        }
+        assert!(!s.store.active_cidrs.contains_key(&net));
+    }
+
+    /// D1 regression: a CIDR unblock must NOT purge the IP TTL of an
+    /// unrelated explicit detention.
+    #[tokio::test]
+    async fn cidr_unblock_does_not_purge_explicit_ip_ttl() {
+        let net = IpNetwork::new("198.51.100.0".parse().unwrap(), 24).unwrap();
+        let ip0 = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cmd(ip0, 3600)).await.unwrap();
+        s.enforce(block_cidr_command(net, 3600)).await.unwrap();
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+
+        assert!(
+            s.expirations.contains_key(&ip0),
+            "CIDR unblock detached the explicit IP TTL for {}",
+            ip0
+        );
+        assert!(!s.cidr_expirations.contains_key(&net));
+    }
+
+    /// D3/D4 semantic matrix: explicit IP and CIDR detention are independent
+    /// and each survives removal of the other.
+    #[tokio::test]
+    async fn detention_domain_independence_matrix() {
+        let net = IpNetwork::new("203.0.113.0".parse().unwrap(), 24).unwrap();
+        let ip0 = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        // none → not detained
+        assert!(!s.blocked_ips.contains(&ip0));
+        assert!(s.store.is_blocked_by_cidr(&ip0).is_none());
+
+        // IP only
+        s.enforce(block_cmd(ip0, 0)).await.unwrap();
+        assert!(s.blocked_ips.contains(&ip0));
+        assert!(s.store.is_blocked_by_cidr(&ip0).is_none());
+
+        // IP + CIDR → both domains hold
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+        assert!(s.blocked_ips.contains(&ip0));
+        assert_eq!(s.store.is_blocked_by_cidr(&ip0), Some(net));
+
+        // IP unblock → still detained by CIDR
+        s.enforce(unblock_cmd(ip0)).await.unwrap();
+        assert!(!s.blocked_ips.contains(&ip0));
+        assert_eq!(s.store.is_blocked_by_cidr(&ip0), Some(net));
+
+        // CIDR unblock → clean
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+        assert!(!s.blocked_ips.contains(&ip0));
+        assert!(s.store.is_blocked_by_cidr(&ip0).is_none());
+    }
+
+    /// D4 mirror: CIDR first, then explicit IP, then CIDR unblock — the
+    /// explicit IP must remain.
+    #[tokio::test]
+    async fn explicit_ip_survives_cidr_unblock_when_cidr_was_first() {
+        let net = IpNetwork::new("203.0.113.0".parse().unwrap(), 24).unwrap();
+        let ip0 = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+        s.enforce(block_cmd(ip0, 0)).await.unwrap();
+        assert!(s.blocked_ips.contains(&ip0));
+        assert_eq!(s.store.is_blocked_by_cidr(&ip0), Some(net));
+
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+        assert!(
+            s.blocked_ips.contains(&ip0),
+            "CIDR unblock must not disturb an explicit IP detention"
+        );
+        assert!(s.store.is_blocked_by_cidr(&ip0).is_none());
+    }
+
+    /// D4 mirror the other way: CIDR only, then CIDR unblock → clean.
+    #[tokio::test]
+    async fn cidr_only_unblock_clears_detention() {
+        let net = IpNetwork::new("203.0.113.0".parse().unwrap(), 24).unwrap();
+        let ip0 = net.addr;
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+        assert_eq!(s.store.is_blocked_by_cidr(&ip0), Some(net));
+
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+        assert!(s.store.is_blocked_by_cidr(&ip0).is_none());
+    }
+
     #[tokio::test]
     async fn block_then_unblock_reaches_dataplane_once() {
         let mut s = svc(Box::new(RecordingApplier::new()));
@@ -1917,6 +2120,13 @@ mod tests {
             "block must register in the shared set the query reads"
         );
         assert!(store.get(&member).is_none(), "no per-member IpRecord");
+        // CIDR block must modify CIDR state only — the representative IP is
+        // not an independent target: no IpRecord, no explicit block entry, no
+        // IP TTL card for net.addr.
+        assert!(store.get(&net.addr).is_none());
+        assert!(!s.blocked_ips.contains(&net.addr));
+        assert!(!s.expirations.contains_key(&net.addr));
+        assert!(s.cidr_expirations.contains_key(&net));
 
         let mut unblock = unblock_cmd(net.addr);
         unblock.cidr = Some(net);
@@ -1925,6 +2135,42 @@ mod tests {
         assert!(
             store.is_blocked_by_cidr(&member).is_none(),
             "unblock must clear the shared set"
+        );
+        // CIDR unblock clears the CIDR domain only; the representative IP
+        // state stays exactly as it was (untouched).
+        assert!(store.get(&net.addr).is_none());
+        assert!(!s.blocked_ips.contains(&net.addr));
+        assert!(!s.expirations.contains_key(&net.addr));
+        assert!(!s.cidr_expirations.contains_key(&net));
+    }
+
+    /// Interaction regression: an explicit IP block inside a CIDR prefix must
+    /// survive a CIDR unblock. The CIDR unblock releases the prefix domain
+    /// only — it is NOT an unblock of `net.addr` as an independent IP.
+    #[tokio::test]
+    async fn explicit_ip_block_survives_cidr_unblock() {
+        let net = IpNetwork::new("198.51.100.0".parse().unwrap(), 24).unwrap();
+        let ip0: IpAddr = "198.51.100.42".parse().unwrap();
+        let mut s = svc(Box::new(RecordingApplier::new()));
+
+        s.enforce(block_cmd(ip0, 0)).await.unwrap();
+        s.enforce(block_cidr_command(net, 0)).await.unwrap();
+        s.enforce(unblock_cidr_command(net)).await.unwrap();
+
+        assert!(
+            s.blocked_ips.contains(&ip0),
+            "explicit IP block must survive a CIDR unblock"
+        );
+        match s.store.get(&ip0).unwrap() {
+            Value::IpRecord(r) => assert!(
+                matches!(r.block_state, BlockState::Blocked { .. }),
+                "explicit IP block_state must survive a CIDR unblock"
+            ),
+            _ => panic!("expected IP record"),
+        }
+        assert!(
+            !s.store.active_cidrs.contains_key(&net),
+            "CIDR unblock must clear the prefix"
         );
     }
 
