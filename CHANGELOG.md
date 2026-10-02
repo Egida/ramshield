@@ -32,6 +32,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - `dtolnay/rust-toolchain` action pinned to `@v1` with `toolchain:`
   input (P1 #30 CI reproducibility).
 
+### Fixed
+- CIDR detention no longer mutates per-IP state. A prefix command carries
+  its network address as the representative IP (`198.51.100.0/24` arrives
+  as `ip = 198.51.100.0`), and the old code ran the explicit-IP path
+  unconditionally. Consequences now gone:
+  - blocking a `/24` no longer creates a phantom explicit IP block on the
+    network address;
+  - unblocking a `/24` no longer destroys a real explicit IP block on that
+    address;
+  - unblocking a `/24` no longer publishes a spurious mesh CRDT unban for
+    the network address to every peer.
+  Per-IP and prefix detention are now independent state domains: a prefix
+  unblock releases only the prefix (its expiration, its checkpoint mirror,
+  and its `active_cidrs` entry), leaving every member's own block intact.
+
 ## [0.3.2] - 2026-09-29
 
 ### Fixed
