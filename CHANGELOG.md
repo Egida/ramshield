@@ -4,7 +4,17 @@ Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
 
-## [0.3.3] - 2026-10-01
+## [0.3.4] - 2026-10-01
+
+### Production hardening closure
+- Seed CIDR checkpoint recovery from the snapshot and replay the WAL tail symmetrically with IP state, including tail `UnblockCidr` equivalence.
+- Make stale XDP reconciliation a protection-health failure/degradation signal rather than treating attachment alone as healthy.
+- Honor `xdp.mode = native` as native/driver XDP instead of silently downgrading to SKB.
+- Refuse readiness when required detection workers cannot start; bound worker fan-out and IPC connections.
+- Reject duplicate IPC key IDs and public plaintext dashboard binds.
+- Make checkpoint snapshots private (`0600`) and align active release artifacts on the 0.3.4 version.
+- Separate Kubernetes server and node-guard selectors/configuration; keep control-plane sockets loopback-only.
+
 
 ### Production hardening closure
 - Seed CIDR checkpoint recovery from the snapshot and replay the WAL tail symmetrically with IP state, including tail `UnblockCidr` equivalence.

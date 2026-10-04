@@ -1165,32 +1165,6 @@ pub fn replay_wal_into_store_seeded(
     Ok(restored)
 }
 
-/// Convert a monotonic `Instant` to an absolute Unix-ns timestamp.
-/// `now_unix_ns` = wall clock captured at the same moment `Instant::now()`
-/// would be taken. Derivation: wall_target = wall_now - (monotonic_now - at).
-/// Monotonic clocks can never go backwards, so `monotonic_now >= at` when
-/// `at` is in the past; for future deadlines the subtraction underflows and
-/// saturates — the sign is recovered below.
-fn unix_ns_from_instant(at: Instant, now_unix_ns: u64) -> u64 {
-    let now_mono = Instant::now();
-    if at >= now_mono {
-        // Future deadline: add the remaining monotonic duration to wall now.
-        let ahead_ns = at.duration_since(now_mono).as_nanos() as u64;
-        now_unix_ns.saturating_add(ahead_ns)
-    } else {
-        // Past deadline (rare here): subtract elapsed.
-        let behind_ns = now_mono.duration_since(at).as_nanos() as u64;
-        now_unix_ns.saturating_sub(behind_ns)
-    }
-}
-
-fn epoch_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
     replay_wal_cidrs_seeded(wal, 0, std::collections::HashMap::new()).map(|r| r.0)
 }
