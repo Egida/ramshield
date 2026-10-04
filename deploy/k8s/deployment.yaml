@@ -5,6 +5,7 @@ metadata:
   namespace: ramshield
   labels:
     app.kubernetes.io/name: ramshield
+    app.kubernetes.io/component: server
 spec:
   replicas: 1   # see deploy/k8s/README.md — single-replica until WAL supports a shared backend
   strategy:
@@ -12,10 +13,12 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: ramshield
+      app.kubernetes.io/component: server
   template:
     metadata:
       labels:
         app.kubernetes.io/name: ramshield
+        app.kubernetes.io/component: server
     spec:
       serviceAccountName: ramshield
       securityContext:
@@ -27,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ramshield
-          image: ghcr.io/grep999/ramshield:0.3.2
+          image: ghcr.io/grep999/ramshield:0.3.3
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/ramshield/config.toml"]
           ports:
@@ -45,7 +48,7 @@ spec:
                 secretKeyRef:
                   name: ramshield-admin
                   key: argon2-hash
-                  optional: true
+                  optional: false
             # Required when ipc.tcp_addr is public; Config validation fails closed
             # if this key is absent. Format: key-id:hex-secret[,key-id:hex-secret]
             - name: RAMSHIELD_IPC__AUTH_KEYS

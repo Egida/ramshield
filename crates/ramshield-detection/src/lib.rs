@@ -384,15 +384,19 @@ impl DetectionEngine {
     ///
     /// ponytail: if `n == 0`, fall back to available_parallelism. Add a config knob
     /// when worker_threads tuning becomes a real SLO target.
-    pub fn spawn_workers(self: Arc<Self>, n: usize) {
+    pub fn spawn_workers(self: Arc<Self>, n: usize) -> bool {
         let det = self.config.load().detection.clone();
-        let n_workers = if n == 0 {
+        let requested_workers = if n == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
         } else {
             n
         };
+        // Hard bound the runtime fan-out as well as configuration validation.
+        // This protects callers that construct DetectionEngine directly and
+        // prevents a pathological worker count from multiplying local maps.
+        let n_workers = requested_workers.min(256);
         info!(
             "Detection: spawning {} batch processors (max {} events / {} ms window), 1 subnet loop",
             n_workers, det.batch_max_events, det.batch_window_ms
@@ -403,6 +407,8 @@ impl DetectionEngine {
         // ponytail: a bare lock unwrap here is poison-panic risk — one panicked
         // worker poisons the shared mutex and every later spawn/join panics too.
         // unwrap_or_else(PoisonError::into_inner) recovers the guard instead.
+        let mut started_workers = 0usize;
+        let mut subnet_started = false;
         let mut handles = self
             .worker_handles
             .lock()
@@ -417,7 +423,10 @@ impl DetectionEngine {
                 .name(format!("rs-batch-{i}"))
                 .spawn(move || eng.batch_processor_loop_from(rx));
             match spawned {
-                Ok(h) => handles.push(h),
+                Ok(h) => {
+                    handles.push(h);
+                    started_workers += 1;
+                },
                 Err(e) => error!(
                     "Detection: batch worker rs-batch-{i} did not spawn: {e} — \
                      running with fewer workers (ingest capacity reduced)"
@@ -430,13 +439,17 @@ impl DetectionEngine {
             .name("rs-subnet".into())
             .spawn(move || eng.subnet_batch_loop());
         match spawned {
-            Ok(h) => handles.push(h),
+            Ok(h) => {
+                handles.push(h);
+                subnet_started = true;
+            },
             Err(e) => error!(
                 "Detection: subnet batch loop did not spawn: {e} — \
                  CIDR/subnet batch-block is DISABLED until restart"
             ),
         }
         drop(handles);
+        started_workers > 0 && subnet_started
     }
 
     /// F9: block until batch/subnet threads exit (each final-flushes on the

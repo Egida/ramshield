@@ -36,7 +36,7 @@ pulse_threshold_samples = 3
 
 [ipc]
 tcp_addr = "127.0.0.1:7890"
-max_connections = 1_000_000
+max_connections = 8192
 max_line_length = 33_554_432
 max_connection_bytes = 1_048_576
 read_timeout_ms = 5000

@@ -16,7 +16,7 @@ max_line_length = 1048576
 enabled = false
 http_addr = "127.0.0.1:9999"
 max_login_attempts = 5
-max_password_length = 256
+max_password_length = 1024
 
 [wal]
 enabled = false

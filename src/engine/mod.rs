@@ -18,7 +18,7 @@ use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };
 use crate::storage::Store;
-use ramshield_enforcement::{replay_wal_cidrs_from, replay_wal_into_store_seeded};
+use ramshield_enforcement::{replay_wal_cidrs_seeded, replay_wal_into_store_seeded};
 use ramshield_storage::{
     checkpoint_shared::{CheckpointShared, CheckpointState, CidrSnapshot},
     wal::Wal,
@@ -206,6 +206,12 @@ impl Engine {
         let allow_fb = self.config.load().xdp.allow_inband_fallback;
         let pipeline_ok = self.pipeline_ready.load(Ordering::Acquire)
             && !self.pipeline_failed.load(Ordering::Acquire);
+        const XDP_RECONCILE_STALE_SECS: u64 = 60;
+        let xdp_reconcile_successes = metrics.reconcile_successes_total.load(Ordering::Acquire);
+        let xdp_reconcile_age = metrics.reconcile_age_seconds.load(Ordering::Acquire);
+        let xdp_projection_stale = xdp_configured
+            && xdp_active
+            && (xdp_reconcile_successes == 0 || xdp_reconcile_age > XDP_RECONCILE_STALE_SECS);
         let protection_state = if self.is_shutting_down() {
             crate::metrics::ProtectionState::Stopping
         } else if self.pipeline_failed.load(Ordering::Acquire) {
@@ -215,6 +221,10 @@ impl Engine {
         } else if xdp_configured && !xdp_active && !allow_fb {
             crate::metrics::ProtectionState::Failed
         } else if xdp_configured && !xdp_active && allow_fb {
+            crate::metrics::ProtectionState::Degraded
+        } else if xdp_projection_stale && !allow_fb {
+            crate::metrics::ProtectionState::Failed
+        } else if xdp_projection_stale && allow_fb {
             crate::metrics::ProtectionState::Degraded
         } else if xdp_configured && xdp_active && pipeline_ok && ram_pct < 95.0 {
             crate::metrics::ProtectionState::Protected
@@ -226,7 +236,8 @@ impl Engine {
         let is_healthy = !self.is_shutting_down()
             && ram_pct < 95.0
             && pipeline_ok
-            && !(xdp_configured && !xdp_active && !allow_fb);
+            && !(xdp_configured && !xdp_active && !allow_fb)
+            && !xdp_projection_stale;
 
         DashboardSnapshot {
             ts_ms: crate::metrics::now_ms(),
@@ -271,6 +282,8 @@ impl Engine {
                 "xdp inactive".into()
             } else if xdp_configured && !xdp_active && allow_fb {
                 "xdp degraded".into()
+            } else if xdp_projection_stale {
+                "xdp reconciliation stale".into()
             } else if ram_pct >= 95.0 {
                 "ram pressure".into()
             } else {
@@ -615,10 +628,15 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                             vec![]
                         }
                     };
-                // PATCH 6: CIDR replay obeys hard-WAL semantics — a replay
-                // failure under allow_volatile_fallback=false fails startup,
-                // same as IP replay. No silent empty-state degradation.
-                let restored_cidrs = match replay_wal_cidrs_from(&wal, min_lsn) {
+                // CIDR recovery is seeded from the snapshot exactly like IP
+                // recovery. This is required for the invariant:
+                // full WAL replay == snapshot + WAL tail replay. In particular,
+                // a tail UnblockCidr must remove a CIDR that existed in the
+                // checkpoint image.
+                let cidr_seed = snapshot_seed.as_ref().map(|seed| {
+                    seed.cidr_states.iter().copied().collect::<std::collections::HashMap<_, _>>()
+                }).unwrap_or_default();
+                let (restored_cidrs, final_cidrs) = match replay_wal_cidrs_seeded(&wal, min_lsn, cidr_seed) {
                     Ok(r) => r,
                     Err(e) => {
                         tracing::error!("WAL CIDR replay: {}", e);
@@ -627,9 +645,15 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                                 "WAL CIDR replay failed (allow_volatile_fallback=false): {e}"
                             )));
                         }
-                        vec![]
+                        (vec![], std::collections::HashSet::new())
                     }
                 };
+                if snapshot_used {
+                    let snapshot_cidrs = snapshot_seed.as_ref().map(|s| s.cidr_states.iter().map(|(n, _)| *n).collect::<std::collections::HashSet<_>>()).unwrap_or_default();
+                    for network in snapshot_cidrs.difference(&final_cidrs) {
+                        enforcement.remove_restored_cidr(*network);
+                    }
+                }
                 if !restored_cidrs.is_empty() {
                     info!("WAL replay: restored {} CIDR blocks", restored_cidrs.len());
                 }
@@ -650,12 +674,16 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     }
                     if !seed.cidr_expirations.is_empty() {
                         let now_ns = crate::engine::checkpoint::now_unix_ns();
-                        let pairs = seed.cidr_expirations.iter().map(|(net, deadline)| {
-                            (
-                                *net,
-                                deadline.saturating_sub(now_ns).div_ceil(1_000_000_000),
-                            )
-                        });
+                        let pairs = seed
+                            .cidr_expirations
+                            .iter()
+                            .filter(|(net, _)| final_cidrs.contains(net))
+                            .map(|(net, deadline)| {
+                                (
+                                    *net,
+                                    deadline.saturating_sub(now_ns).div_ceil(1_000_000_000),
+                                )
+                            });
                         enforcement.restore_cidr_blocks(pairs);
                     }
                 }
@@ -696,9 +724,15 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         engine.shutdown.clone(),
     )?);
     let event_tx = detection.event_sender();
-    detection
+    let detection_started = detection
         .clone()
         .spawn_workers(cfg_snapshot.engine.worker_threads);
+    if !detection_started {
+        engine.pipeline_failed.store(true, Ordering::Release);
+        return Err(std::io::Error::other(
+            "detection workers failed to start; refusing ready state",
+        ));
+    }
     *engine.detection.lock().unwrap_or_else(|e| e.into_inner()) = Some(detection.clone());
 
     let mut forecaster = if cfg_snapshot.forecasting.enabled {

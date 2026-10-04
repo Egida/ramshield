@@ -5,7 +5,7 @@
 set -euo pipefail
 
 PREFIX="${1:-/tmp/ramshield_upgrade_test}"
-OLD_TAG="${2:-v0.3.0}"
+OLD_TAG="${2:-v0.3.3}"
 NEW_TAG="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 NEW_DIR="$PREFIX/new"
 OLD_DIR="$PREFIX/old"

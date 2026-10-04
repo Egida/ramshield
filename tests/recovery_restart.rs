@@ -1675,3 +1675,41 @@ fn crash_after_rename_before_publication_uses_old_checkpoint() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Snapshot + tail CIDR equivalence: a CIDR present at the checkpoint and
+/// removed by a later UnblockCidr must be absent after seeded replay.
+#[test]
+fn recovery_snapshot_tail_unblock_cidr_equivalence() {
+    use ramshield_enforcement::replay_wal_cidrs_seeded;
+    use std::collections::HashMap;
+
+    let dir = wal_dir("cidr_tail_unblock");
+    let wal = open_wal(&dir);
+    let net = IpNetwork::new(IpAddr::from([10, 42, 7, 0]), 24).unwrap();
+    let ts = now_ns();
+
+    wal.append(&WalEntry::BlockCidr {
+        cidr: net,
+        reason: "checkpoint-seed".into(),
+        ttl_secs: None,
+        ts_ns: ts,
+    }).unwrap();
+    let boundary = wal.begin_checkpoint();
+    wal.finish_checkpoint(boundary.lsn).unwrap();
+    wal.append(&WalEntry::UnblockCidr {
+        cidr: net,
+        reason: "tail-unblock".into(),
+        ts_ns: now_ns(),
+    }).unwrap();
+
+    let mut seed = HashMap::new();
+    seed.insert(net, None);
+    let (seeded, final_set) = replay_wal_cidrs_seeded(&wal, boundary.lsn, seed).unwrap();
+    let full = ramshield_enforcement::replay_wal_cidrs_from(&wal, 0).unwrap();
+
+    assert!(seeded.is_empty(), "tail unblock must remove snapshot CIDR: {seeded:?}");
+    assert!(!final_set.contains(&net), "final seeded state must not contain unblocked CIDR");
+    assert!(full.is_empty(), "full replay must agree with snapshot+tail replay: {full:?}");
+    drop(wal);
+    let _ = std::fs::remove_dir_all(&dir);
+}

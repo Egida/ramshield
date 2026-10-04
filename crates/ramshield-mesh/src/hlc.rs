@@ -4,56 +4,47 @@
 //! 32-bit counter avoids the 3.6-year wrap that a 16-bit counter would hit
 //! under sustained burst traffic.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Hlc {
-    physical_ms: AtomicU64,
-    logical_seq: AtomicU32,
+    state: Mutex<(u64, u32)>,
     tick_count: AtomicU64,
 }
 
 impl Hlc {
     pub fn new() -> Self {
         Self {
-            physical_ms: AtomicU64::new(0),
-            logical_seq: AtomicU32::new(0),
+            state: Mutex::new((0, 0)),
             tick_count: AtomicU64::new(0),
         }
     }
 
     /// Merge-and-tick: advance past local wall clock and received remote
     /// timestamp, bump the logical counter when physical time is tied.
-    /// CAS loop guarantees monotonicity under concurrent callers.
+    /// The mutex makes the physical/logical pair one atomic state transition
+    /// under concurrent callers.
     pub fn tick(&self, remote_ms: u64, remote_seq: u32) -> (u64, u32) {
         let wall_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-
-        loop {
-            let cur_phys = self.physical_ms.load(Ordering::Relaxed);
-            let cur_seq = self.logical_seq.load(Ordering::Relaxed);
-
-            let next_phys = wall_ms.max(remote_ms).max(cur_phys);
-            let next_seq = if next_phys == cur_phys && next_phys == remote_ms {
-                cur_seq.max(remote_seq) + 1
-            } else if next_phys == cur_phys {
-                cur_seq + 1
-            } else {
-                0
-            };
-
-            if self
-                .physical_ms
-                .compare_exchange(cur_phys, next_phys, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.logical_seq.store(next_seq, Ordering::Relaxed);
-                self.tick_count.fetch_add(1, Ordering::Relaxed);
-                return (next_phys, next_seq);
-            }
-        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (cur_phys, cur_seq) = *state;
+        let next_phys = wall_ms.max(remote_ms).max(cur_phys);
+        let next_seq = if next_phys == cur_phys && next_phys == remote_ms {
+            cur_seq.max(remote_seq).saturating_add(1)
+        } else if next_phys == cur_phys {
+            cur_seq.saturating_add(1)
+        } else {
+            0
+        };
+        *state = (next_phys, next_seq);
+        self.tick_count.fetch_add(1, Ordering::Relaxed);
+        (next_phys, next_seq)
     }
 
     pub fn tick_count(&self) -> u64 {

@@ -81,7 +81,7 @@ ram_limit_mb = 14512
 
 [ipc]
 tcp_addr = "127.0.0.1:7890"
-max_connections = 1000000
+max_connections = 8192
 max_line_length = 33554432
 # auth_keys = ["k1:<hex>"]  # required for production
 # key_roles = [{ key_id = "k1", role = "Admin" }]
@@ -127,7 +127,7 @@ pre_aggs_flush_interval_ms = 250
 promote_min_events = 4
 subnet_window_threshold = 12
 emergency_burst_threshold = 500
-pre_aggs_max_size = 1000000
+pre_aggs_max_size = 8192
 
 [xdp]
 enabled = true

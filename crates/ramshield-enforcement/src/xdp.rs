@@ -234,7 +234,9 @@ pub struct AyaXdpApplier {
 impl AyaXdpApplier {
     /// Build the applier without loading. `load_and_attach` does the syscall work.
     pub fn new(interface: &str, mode: &str) -> Self {
-        let flags = if mode.eq_ignore_ascii_case("drv") {
+        // `native` is the user-facing alias for the driver's/native XDP mode.
+        // Never silently downgrade an explicitly requested native mode to SKB.
+        let flags = if mode.eq_ignore_ascii_case("drv") || mode.eq_ignore_ascii_case("native") {
             XdpMode::Driver
         } else {
             XdpMode::Skb
@@ -511,6 +513,13 @@ mod tests {
 
     /// P0: ttl=0 must encode PERMANENT — a zero expiry would be instantly
     /// expired in-kernel (now < 0 never) and silently unblock everything.
+    #[test]
+    fn native_xdp_mode_is_not_silently_downgraded() {
+        assert_eq!(AyaXdpApplier::new("eth0", "native").flags, XdpMode::Driver);
+        assert_eq!(AyaXdpApplier::new("eth0", "drv").flags, XdpMode::Driver);
+        assert_eq!(AyaXdpApplier::new("eth0", "skb").flags, XdpMode::Skb);
+    }
+
     #[test]
     fn blocklist_value_ttl_zero_is_permanent() {
         assert_eq!(blocklist_value(1_000, 0), PERMANENT);

@@ -625,9 +625,9 @@ impl Config {
         if self.engine.shard_count == 0 || !self.engine.shard_count.is_power_of_two() {
             anyhow::bail!("engine.shard_count must be a power of 2");
         }
-        if self.engine.worker_threads > 4096 {
+        if self.engine.worker_threads > 256 {
             anyhow::bail!(
-                "engine.worker_threads must be <= 4096 (got {})",
+                "engine.worker_threads must be <= 256 (got {})",
                 self.engine.worker_threads
             );
         }
@@ -667,8 +667,8 @@ impl Config {
         if self.ipc.max_connections == 0 {
             anyhow::bail!("ipc.max_connections must be > 0");
         }
-        if self.ipc.max_connections > 1_000_000 {
-            anyhow::bail!("ipc.max_connections should not exceed 1,000,000");
+        if self.ipc.max_connections > 8_192 {
+            anyhow::bail!("ipc.max_connections should not exceed 8,192");
         }
         if let Some(mll) = self.ipc.max_line_length
             && mll < 256
@@ -709,6 +709,12 @@ impl Config {
                 self.dashboard.http_addr
             );
         }
+        if is_public_bind(&self.dashboard.http_addr) && !self.dashboard.tls_enabled {
+            anyhow::bail!(
+                "dashboard.http_addr binds a public interface ({}) without dashboard.tls_enabled=true — bind 127.0.0.1 or place a TLS-terminating proxy in front and set the assertion",
+                self.dashboard.http_addr
+            );
+        }
         if is_public_bind(&self.ipc.tcp_addr) && self.ipc.auth_keys.is_empty() {
             anyhow::bail!(
                 "ipc.tcp_addr binds a public interface ({}) but auth_keys is empty — set HMAC keys or bind 127.0.0.1",
@@ -731,6 +737,7 @@ impl Config {
 
         // P1e: validate auth_keys shape (key_id:hex) + PHC hash format,
         // before any IPC server binds with them. No new deps — std hex check.
+        let mut auth_key_ids = std::collections::HashSet::new();
         for entry in &self.ipc.auth_keys {
             let (id, hex_str) = match entry.split_once(':') {
                 Some((k, v)) => (k, v),
@@ -745,6 +752,9 @@ impl Config {
                 anyhow::bail!(
                     "ipc.auth_keys entries must be `key_id:hex_key` — empty or missing key_id"
                 );
+            }
+            if !auth_key_ids.insert(id.to_string()) {
+                anyhow::bail!("ipc.auth_keys contains duplicate key_id '{id}'");
             }
             if hex_str.is_empty() {
                 anyhow::bail!("ipc.auth_keys entries must be `key_id:hex_key`");
@@ -997,6 +1007,27 @@ retention_max_bytes = 1
         );
     }
 
+    #[test]
+    fn duplicate_ipc_key_ids_are_rejected() {
+        let mut cfg = Config::default();
+        cfg.ipc.auth_keys = vec![
+            "k1:0102030405060708090a0b0c0d0e0f10".into(),
+            "k1:1112131415161718191a1b1c1d1e1f20".into(),
+        ];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate key_id"), "{err}");
+    }
+
+    #[test]
+    fn resource_limits_are_bounded() {
+        let mut cfg = Config::default();
+        cfg.engine.worker_threads = 257;
+        assert!(cfg.validate().is_err());
+        cfg.engine.worker_threads = 1;
+        cfg.ipc.max_connections = 8193;
+        assert!(cfg.validate().is_err());
+    }
+
     #[cfg(test)]
     fn clear_env_vars() {
         let keys = [
@@ -1040,7 +1071,9 @@ retention_max_bytes = 1
         cfg.ipc.auth_keys =
             vec!["k1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021".into()];
         cfg.ipc.behind_tls_proxy = true;
-        // validate() still permits (operator asserted TLS-front); warnings must flag it.
+        cfg.dashboard.tls_enabled = true;
+        // validate() permits public binds only with explicit TLS/auth assertions;
+        // warnings still make the deployment boundary visible.
         cfg.validate().unwrap();
         let w = cfg.exposure_warnings();
         assert!(

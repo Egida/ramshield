@@ -622,6 +622,17 @@ impl EnforcementService {
             .collect()
     }
 
+    pub fn remove_restored_cidr(&mut self, network: IpNetwork) {
+        self.store.active_cidrs.remove(&network);
+        self.cidr_expirations.remove(&network);
+        if let Some(shared) = &self.checkpoint_shared {
+            shared.remove_cidr_expiration(&network);
+        }
+        if let Err(e) = self.xdp.apply_cidr_unblock(network, Uuid::new_v4()) {
+            warn!(cidr=?network, "WAL CIDR restore: userspace removed, XDP unblock failed: {}", e);
+        }
+    }
+
     pub fn restore_cidr_blocks(&mut self, pairs: impl IntoIterator<Item = (IpNetwork, u64)>) {
         for (network, remaining_secs) in pairs {
             // Authoritative state lives in userspace (active_cidrs) regardless
@@ -1154,56 +1165,6 @@ pub fn replay_wal_into_store_seeded(
     Ok(restored)
 }
 
-pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
-    replay_wal_cidrs_from(wal, 0)
-}
-
-pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mut blocked: std::collections::HashMap<IpNetwork, (u64, Option<u64>)> =
-        std::collections::HashMap::new();
-    let entries = if min_lsn > 0 {
-        wal.replay_from(min_lsn)?
-    } else {
-        wal.replay()?
-    };
-    for entry in entries {
-        match entry {
-            WalEntry::BlockCidr {
-                cidr,
-                ttl_secs,
-                ts_ns,
-                ..
-            } => {
-                let deadline =
-                    ttl_secs.map(|secs| ts_ns.saturating_add(secs.saturating_mul(1_000_000_000)));
-                blocked.insert(cidr, (ts_ns, deadline));
-            }
-            WalEntry::UnblockCidr { cidr, .. } => {
-                blocked.remove(&cidr);
-            }
-            _ => {}
-        }
-    }
-    Ok(blocked
-        .into_iter()
-        .filter_map(|(cidr, (_ts_ns, deadline))| {
-            if let Some(deadline) = deadline {
-                if deadline <= now_ns {
-                    return None;
-                }
-                let remaining = deadline.saturating_sub(now_ns).div_ceil(1_000_000_000);
-                Some((cidr, remaining))
-            } else {
-                Some((cidr, 0))
-            }
-        })
-        .collect())
-}
-
 /// Convert a monotonic `Instant` to an absolute Unix-ns timestamp.
 /// `now_unix_ns` = wall clock captured at the same moment `Instant::now()`
 /// would be taken. Derivation: wall_target = wall_now - (monotonic_now - at).
@@ -1228,6 +1189,75 @@ fn epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
+    replay_wal_cidrs_seeded(wal, 0, std::collections::HashMap::new()).map(|r| r.0)
+}
+
+pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
+    replay_wal_cidrs_seeded(wal, min_lsn, std::collections::HashMap::new()).map(|r| r.0)
+}
+
+/// Replay CIDR state from a checkpoint seed plus the WAL tail. The returned
+/// second value is the final authoritative CIDR set; callers restoring a
+/// snapshot must remove seeded CIDRs absent from this set before re-arming
+/// the XDP projection. Deadlines remain absolute until the final scheduler
+/// hand-off, matching the IP recovery path.
+pub fn replay_wal_cidrs_seeded(
+    wal: &Wal,
+    min_lsn: u64,
+    seed: std::collections::HashMap<IpNetwork, Option<u64>>,
+) -> anyhow::Result<(Vec<(IpNetwork, u64)>, std::collections::HashSet<IpNetwork>)> {
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut blocked: std::collections::HashMap<IpNetwork, (u64, Option<u64>)> = seed
+        .into_iter()
+        .filter(|(_, deadline)| deadline.map(|d| d > now_ns).unwrap_or(true))
+        .map(|(network, deadline)| (network, (0, deadline)))
+        .collect();
+    let entries = if min_lsn > 0 {
+        wal.replay_from(min_lsn)?
+    } else {
+        wal.replay()?
+    };
+    for entry in entries {
+        match entry {
+            WalEntry::BlockCidr {
+                cidr,
+                ttl_secs,
+                ts_ns,
+                ..
+            } => {
+                let deadline =
+                    ttl_secs.map(|secs| ts_ns.saturating_add(secs.saturating_mul(1_000_000_000)));
+                blocked.insert(cidr, (ts_ns, deadline));
+            }
+            WalEntry::UnblockCidr { cidr, .. } => {
+                blocked.remove(&cidr);
+            }
+            _ => {}
+        }
+    }
+
+    let mut final_cidrs = std::collections::HashSet::new();
+    let mut restored = Vec::new();
+    for (cidr, (_ts_ns, deadline)) in blocked {
+        if let Some(deadline) = deadline {
+            if deadline <= now_ns {
+                continue;
+            }
+            final_cidrs.insert(cidr);
+            let remaining = deadline.saturating_sub(now_ns).div_ceil(1_000_000_000);
+            restored.push((cidr, remaining));
+        } else {
+            final_cidrs.insert(cidr);
+            restored.push((cidr, 0));
+        }
+    }
+    Ok((restored, final_cidrs))
 }
 
 #[cfg(test)]

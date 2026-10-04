@@ -35,6 +35,14 @@ pub struct ClusterBlockDelta {
     pub tier: u8,
 }
 
+/// Observed-remove tombstone propagated to peers. A peer must discard any
+/// block dot for the same (ip,node) whose counter is <= this counter.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClusterUnblockDelta {
+    pub ip: IpAddr,
+    pub dot: ClusterDot,
+}
+
 /// Thread-safe AWORSet implementation using DashSet for lock-free concurrent access.
 pub struct Aworset {
     /// Internal storage: element key -> set of dots (add operations)
@@ -97,6 +105,7 @@ pub struct AworsetBlocklist {
     node_id: u32,
     hlc: Hlc,
     entries: DashMap<(IpAddr, u32), (u32, u64)>,
+    tombstones: DashMap<(IpAddr, u32), u32>,
 }
 
 impl AworsetBlocklist {
@@ -105,6 +114,7 @@ impl AworsetBlocklist {
             node_id,
             hlc: Hlc::new(),
             entries: DashMap::new(),
+            tombstones: DashMap::new(),
         }
     }
 
@@ -132,6 +142,14 @@ impl AworsetBlocklist {
     pub fn merge_delta(&self, delta: &ClusterBlockDelta) -> bool {
         self.hlc.tick(delta.expires_at_ms, delta.dot.counter);
         let key = (delta.ip, delta.dot.node_id);
+        if self
+            .tombstones
+            .get(&key)
+            .map(|t| delta.dot.counter <= *t)
+            .unwrap_or(false)
+        {
+            return false;
+        }
 
         let mut inserted = false;
         self.entries
@@ -183,12 +201,56 @@ impl AworsetBlocklist {
             .retain(|_, (_, exp)| now_ms.saturating_sub(*exp) < TOMBSTONE_HORIZON_MS);
     }
 
-    /// Local unblock: remove this node's dot for the IP so the unban
-    /// gossips out and peer merges converge on removal.
-    pub fn record_unban(&self, ip: IpAddr) {
-        let (_, seq) = self.hlc.tick(0, 0);
-        self.entries.remove(&(ip, self.node_id));
-        let _ = seq; // dot counter consumed only for HLC monotonicity
+    /// Local unblock: create a tombstone delta for the observed local dot.
+    /// Callers must gossip the returned delta; removing the local entry alone
+    /// cannot make an AWORSet converge across peers.
+    pub fn record_unban(&self, ip: IpAddr) -> Vec<ClusterUnblockDelta> {
+        let observed: Vec<(u32, u32)> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.key().0 == ip)
+            .map(|entry| (entry.key().1, entry.value().0))
+            .collect();
+        let mut deltas = Vec::with_capacity(observed.len());
+        for (node_id, counter) in observed {
+            let key = (ip, node_id);
+            self.entries.remove(&key);
+            self.tombstones
+                .entry(key)
+                .and_modify(|existing| *existing = (*existing).max(counter))
+                .or_insert(counter);
+            deltas.push(ClusterUnblockDelta {
+                ip,
+                dot: ClusterDot { node_id, counter },
+            });
+        }
+        deltas
+    }
+
+    /// Merge an observed-remove tombstone.
+    pub fn merge_unblock_delta(&self, delta: &ClusterUnblockDelta) -> bool {
+        self.hlc.tick(0, delta.dot.counter);
+        let key = (delta.ip, delta.dot.node_id);
+        let mut changed = false;
+        self.tombstones
+            .entry(key)
+            .and_modify(|existing| {
+                if delta.dot.counter > *existing {
+                    *existing = delta.dot.counter;
+                    changed = true;
+                }
+            })
+            .or_insert_with(|| {
+                changed = true;
+                delta.dot.counter
+            });
+        if let Some(entry) = self.entries.get(&key) {
+            if entry.value().0 <= delta.dot.counter {
+                drop(entry);
+                changed |= self.entries.remove(&key).is_some();
+            }
+        }
+        changed
     }
 }
 
@@ -254,4 +316,18 @@ mod tests {
         d3.dot.counter -= 1;
         assert!(!a.merge_delta(&d3), "lower counter must be rejected");
     }
+    #[test]
+    fn unban_tombstone_rejects_delayed_old_ban() {
+        let peer = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 42]);
+        let ban = peer.record_ban(ip, 60_000, 1);
+        let local = AworsetBlocklist::new(1);
+        assert!(local.merge_delta(&ban));
+        let unbans = local.record_unban(ip);
+        assert_eq!(unbans.len(), 1);
+        assert!(peer.merge_unblock_delta(&unbans[0]));
+        assert!(!peer.is_blocked(&ip, 1));
+        assert!(!peer.merge_delta(&ban), "pre-unblock ban must not resurrect");
+    }
+
 }

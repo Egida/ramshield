@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: ramshield-config
+  name: ramshield-node-config
   namespace: ramshield
   labels:
     app.kubernetes.io/name: ramshield
 data:
   config.toml: |
-    # Ordinary server deployment: control surfaces stay loopback-only.
-    # Use kubectl port-forward or an explicitly configured TLS/mTLS proxy.
-    # The node-guard DaemonSet uses ramshield-node-config instead.
+    # Host-network node guard: XDP is the kernel dataplane.
+    # Control surfaces remain loopback-only; manage through host-local tooling
+    # or an explicitly configured TLS/mTLS proxy.
     [engine]
     shard_count = 256
     worker_threads = 0
@@ -40,7 +40,8 @@ data:
     seg_max_bytes = 67108864
     retention_max_bytes = 536870912
 
-    # XDP stays off in-cluster (pod mode). Hosts: use a config with
-    # xdp.enabled=true.
     [xdp]
-    enabled = false
+    enabled = true
+    interface = "eth0"
+    mode = "drv"
+    allow_inband_fallback = false

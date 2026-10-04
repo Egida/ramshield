@@ -13,10 +13,12 @@ use ramshield_storage::{
 };
 use ramshield_types::{BlockReason, IpNetwork, Result, RsError};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Per-IP block state carried in a checkpoint.
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,7 +54,12 @@ pub fn write_snapshot(dir: &str, snap: &CheckpointSnapshot, lsn: u64) -> Result<
     let tmp = format!("{path}.tmp");
     let json = serde_json::to_vec(snap).map_err(|e| RsError::Serde(e.to_string()))?;
     {
-        let mut f = File::create(&tmp)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
         f.write_all(&json)?;
         f.sync_all()?;
     }
@@ -180,6 +187,7 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
     let mut ip_states = Vec::new();
     let mut ip_expirations = Vec::new();
     let mut cidr_expirations = Vec::new();
+    let mut cidr_states = Vec::new();
     for snap_ip in snap.blocked_ips.iter() {
         let verdict = classify(snap_ip.expires_at_ns, now_ns);
         if let ExpiryVerdict::Expired = verdict {
@@ -240,12 +248,16 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
         if let (ExpiryVerdict::Live { .. }, Some(deadline)) = (&verdict, c.expires_at_ns) {
             cidr_expirations.push((c.network, deadline));
         }
+        if !matches!(verdict, ExpiryVerdict::Expired) {
+            cidr_states.push((c.network, c.expires_at_ns));
+        }
     }
     SnapshotRestore {
         snapshot_blocked_ips,
         ip_states,
         ip_expirations,
         cidr_expirations,
+        cidr_states,
         lsn: snap.lsn,
     }
 }
@@ -267,6 +279,9 @@ pub struct SnapshotRestore {
     /// (network, absolute Unix-ns deadline) — enforcement converts to
     /// remaining seconds only when re-arming the CIDR TTL index.
     pub cidr_expirations: Vec<(IpNetwork, u64)>,
+    /// Exact semantic CIDR snapshot state: (network, absolute deadline).
+    /// None means permanent. Used to seed WAL tail replay.
+    pub cidr_states: Vec<(IpNetwork, Option<u64>)>,
     /// Snapshot LSN — WAL tail replay starts after it.
     pub lsn: u64,
 }
