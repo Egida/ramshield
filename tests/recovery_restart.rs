@@ -1693,23 +1693,33 @@ fn recovery_snapshot_tail_unblock_cidr_equivalence() {
         reason: "checkpoint-seed".into(),
         ttl_secs: None,
         ts_ns: ts,
-    }).unwrap();
+    })
+    .unwrap();
     let boundary = wal.begin_checkpoint();
     wal.finish_checkpoint(boundary.lsn).unwrap();
     wal.append(&WalEntry::UnblockCidr {
         cidr: net,
-        reason: "tail-unblock".into(),
         ts_ns: now_ns(),
-    }).unwrap();
+    })
+    .unwrap();
 
     let mut seed = HashMap::new();
     seed.insert(net, None);
     let (seeded, final_set) = replay_wal_cidrs_seeded(&wal, boundary.lsn, seed).unwrap();
     let full = ramshield_enforcement::replay_wal_cidrs_from(&wal, 0).unwrap();
 
-    assert!(seeded.is_empty(), "tail unblock must remove snapshot CIDR: {seeded:?}");
-    assert!(!final_set.contains(&net), "final seeded state must not contain unblocked CIDR");
-    assert!(full.is_empty(), "full replay must agree with snapshot+tail replay: {full:?}");
+    assert!(
+        seeded.is_empty(),
+        "tail unblock must remove snapshot CIDR: {seeded:?}"
+    );
+    assert!(
+        !final_set.contains(&net),
+        "final seeded state must not contain unblocked CIDR"
+    );
+    assert!(
+        full.is_empty(),
+        "full replay must agree with snapshot+tail replay: {full:?}"
+    );
     drop(wal);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -327,7 +327,9 @@ mod tests {
         assert_eq!(unbans.len(), 1);
         assert!(peer.merge_unblock_delta(&unbans[0]));
         assert!(!peer.is_blocked(&ip, 1));
-        assert!(!peer.merge_delta(&ban), "pre-unblock ban must not resurrect");
+        assert!(
+            !peer.merge_delta(&ban),
+            "pre-unblock ban must not resurrect"
+        );
     }
-
 }

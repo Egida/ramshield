@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::IpAddr;
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 
 /// Per-IP block state carried in a checkpoint.
 #[derive(Debug, Serialize, Deserialize)]

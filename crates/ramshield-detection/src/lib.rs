@@ -426,7 +426,7 @@ impl DetectionEngine {
                 Ok(h) => {
                     handles.push(h);
                     started_workers += 1;
-                },
+                }
                 Err(e) => error!(
                     "Detection: batch worker rs-batch-{i} did not spawn: {e} — \
                      running with fewer workers (ingest capacity reduced)"
@@ -442,7 +442,7 @@ impl DetectionEngine {
             Ok(h) => {
                 handles.push(h);
                 subnet_started = true;
-            },
+            }
             Err(e) => error!(
                 "Detection: subnet batch loop did not spawn: {e} — \
                  CIDR/subnet batch-block is DISABLED until restart"

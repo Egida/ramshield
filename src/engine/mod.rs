@@ -633,23 +633,38 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 // full WAL replay == snapshot + WAL tail replay. In particular,
                 // a tail UnblockCidr must remove a CIDR that existed in the
                 // checkpoint image.
-                let cidr_seed = snapshot_seed.as_ref().map(|seed| {
-                    seed.cidr_states.iter().copied().collect::<std::collections::HashMap<_, _>>()
-                }).unwrap_or_default();
-                let (restored_cidrs, final_cidrs) = match replay_wal_cidrs_seeded(&wal, min_lsn, cidr_seed) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!("WAL CIDR replay: {}", e);
-                        if hard_wal {
-                            return Err(std::io::Error::other(format!(
-                                "WAL CIDR replay failed (allow_volatile_fallback=false): {e}"
-                            )));
+                let cidr_seed = snapshot_seed
+                    .as_ref()
+                    .map(|seed| {
+                        seed.cidr_states
+                            .iter()
+                            .copied()
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let (restored_cidrs, final_cidrs) =
+                    match replay_wal_cidrs_seeded(&wal, min_lsn, cidr_seed) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!("WAL CIDR replay: {}", e);
+                            if hard_wal {
+                                return Err(std::io::Error::other(format!(
+                                    "WAL CIDR replay failed (allow_volatile_fallback=false): {e}"
+                                )));
+                            }
+                            (vec![], std::collections::HashSet::new())
                         }
-                        (vec![], std::collections::HashSet::new())
-                    }
-                };
+                    };
                 if snapshot_used {
-                    let snapshot_cidrs = snapshot_seed.as_ref().map(|s| s.cidr_states.iter().map(|(n, _)| *n).collect::<std::collections::HashSet<_>>()).unwrap_or_default();
+                    let snapshot_cidrs = snapshot_seed
+                        .as_ref()
+                        .map(|s| {
+                            s.cidr_states
+                                .iter()
+                                .map(|(n, _)| *n)
+                                .collect::<std::collections::HashSet<_>>()
+                        })
+                        .unwrap_or_default();
                     for network in snapshot_cidrs.difference(&final_cidrs) {
                         enforcement.remove_restored_cidr(*network);
                     }
