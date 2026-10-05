@@ -244,11 +244,13 @@ impl AworsetBlocklist {
                 changed = true;
                 delta.dot.counter
             });
-        if let Some(entry) = self.entries.get(&key) {
-            if entry.value().0 <= delta.dot.counter {
-                drop(entry);
-                changed |= self.entries.remove(&key).is_some();
-            }
+        // ponytail: avoid let-chains; drop the DashMap guard before remove.
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.value().0 <= delta.dot.counter)
+        {
+            changed |= self.entries.remove(&key).is_some();
         }
         changed
     }

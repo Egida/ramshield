@@ -25,6 +25,10 @@ The baseline file intentionally contains explicit values for development/testing
 | `rps_threshold` | `500` | `1000` |
 | `rate_window_secs` | `10` | `10` |
 | `promote_min_events` | `4` | `8` |
+| `relative_enabled` | `false` | `false` |
+| `relative_factor` | `5.0` | `5.0` |
+| `relative_floor_rps` | `3.0` | `3.0` |
+| `relative_min_samples` | `8` | `8` |
 | `emergency_burst_threshold` | `500` | `500` |
 | `batch_window_ms` | `25` | `50` |
 | `batch_max_events` | `4096` | `4096` |

@@ -23,6 +23,11 @@ shard_count = 256
 rps_threshold = 500
 rate_window_secs = 10
 promote_min_events = 4
+# Relative / small-scale gate (default off). Enable after soak.
+relative_enabled = false
+relative_factor = 5.0
+relative_floor_rps = 3.0
+relative_min_samples = 8
 emergency_burst_threshold = 500
 # ── decision cadence (detection-first tuning, 4c18c78) ──────────────────
 # 25ms = decision-sample quantum per worker: halves block-decision latency.

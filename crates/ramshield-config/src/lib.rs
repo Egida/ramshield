@@ -96,6 +96,20 @@ pub struct DetectionConfig {
     /// Max unique IPs in the pre-aggregation buffer before flushing to main store.
     #[serde(default = "default_pre_aggs_max_size")]
     pub pre_aggs_max_size: usize,
+    /// Relative / small-scale gate (default off). When enabled, a promoted IP
+    /// can block when inst_rps >= max(relative_floor_rps, relative_factor * baseline)
+    /// after relative_min_samples — without a per-IP side map on the hot path.
+    #[serde(default)]
+    pub relative_enabled: bool,
+    /// Multiplier over slow baseline (must be >= 1.0).
+    #[serde(default = "default_relative_factor")]
+    pub relative_factor: f64,
+    /// Floor so relative gate does not fire on near-zero baselines.
+    #[serde(default = "default_relative_floor_rps")]
+    pub relative_floor_rps: f64,
+    /// Samples after promotion before relative gate may fire.
+    #[serde(default = "default_relative_min_samples")]
+    pub relative_min_samples: u32,
 }
 
 fn default_batch_max_events() -> usize {
@@ -131,6 +145,15 @@ fn default_pre_aggs_flush_interval_ms() -> u64 {
 fn default_emergency_burst_threshold() -> u32 {
     500
 }
+fn default_relative_factor() -> f64 {
+    5.0
+}
+fn default_relative_floor_rps() -> f64 {
+    3.0
+}
+fn default_relative_min_samples() -> u32 {
+    8
+}
 
 impl Default for DetectionConfig {
     fn default() -> Self {
@@ -152,6 +175,10 @@ impl Default for DetectionConfig {
             emergency_burst_threshold: default_emergency_burst_threshold(),
             pre_aggs_max_size: default_pre_aggs_max_size(),
             pre_aggs_flush_interval_ms: default_pre_aggs_flush_interval_ms(),
+            relative_enabled: false,
+            relative_factor: default_relative_factor(),
+            relative_floor_rps: default_relative_floor_rps(),
+            relative_min_samples: default_relative_min_samples(),
         }
     }
 }
@@ -645,6 +672,15 @@ impl Config {
         if self.detection.promote_min_events == 0 {
             anyhow::bail!("detection.promote_min_events must be > 0");
         }
+        if self.detection.relative_factor < 1.0 {
+            anyhow::bail!("detection.relative_factor must be >= 1.0");
+        }
+        if self.detection.relative_floor_rps <= 0.0 {
+            anyhow::bail!("detection.relative_floor_rps must be > 0");
+        }
+        if self.detection.relative_min_samples == 0 {
+            anyhow::bail!("detection.relative_min_samples must be > 0");
+        }
         if self.detection.bloom_bits < 100_000 {
             anyhow::bail!(
                 "detection.bloom_bits should be at least 100,000 for low false positive rate"
@@ -1026,6 +1062,19 @@ retention_max_bytes = 1
         cfg.engine.worker_threads = 1;
         cfg.ipc.max_connections = 8193;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn relative_detection_defaults_off_and_validates() {
+        let cfg = Config::default();
+        assert!(!cfg.detection.relative_enabled);
+        cfg.validate().unwrap();
+        let mut bad = Config::default();
+        bad.detection.relative_factor = 0.5;
+        assert!(bad.validate().is_err());
+        bad.detection.relative_factor = 5.0;
+        bad.detection.relative_floor_rps = 0.0;
+        assert!(bad.validate().is_err());
     }
 
     #[cfg(test)]

@@ -1204,6 +1204,7 @@ pub fn replay_wal_cidrs_from(wal: &Wal, min_lsn: u64) -> anyhow::Result<Vec<(IpN
 /// snapshot must remove seeded CIDRs absent from this set before re-arming
 /// the XDP projection. Deadlines remain absolute until the final scheduler
 /// hand-off, matching the IP recovery path.
+#[allow(clippy::type_complexity)] // ponytail: two parallel collections stay local; alias if callers grow.
 pub fn replay_wal_cidrs_seeded(
     wal: &Wal,
     min_lsn: u64,

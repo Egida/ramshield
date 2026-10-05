@@ -1,34 +1,19 @@
-name: Dependency Audit Agent
-
+name: Dependency Audit
 on:
-  schedule:
-    - cron: '0 * * * *'  # Every hour
+  push:
+    branches: [main, develop, master]
+  pull_request:
+    branches: [main, develop, master]
+  schedule: [{cron: '17 3 * * *'}]
   workflow_dispatch:
-
 jobs:
   audit:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/feature/ramshield-advanced'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Run Dependency Audit
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python .github/scripts/dependency_audit.py
-
-      - name: Commit and Push Changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add -A
-          git diff --quiet --cached || git commit -m "agent: dependency audit report [skip ci]"
-          git push origin HEAD:${{ github.ref }}
+      - uses: dtolnay/rust-toolchain@v1
+        with: {toolchain: nightly-2026-08-29}
+      - uses: taiki-e/install-action@v2
+        with: {tool: cargo-audit}
+      - run: cargo audit --locked

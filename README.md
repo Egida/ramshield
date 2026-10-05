@@ -21,6 +21,7 @@ Run it:
 git clone https://github.com/grep999/ramshield.git
 cd ramshield
 cargo build --release --locked --features full
+```
 
 Start locally:
 

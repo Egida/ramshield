@@ -81,3 +81,9 @@ work when it is properly scoped:
 
 Composite (reference): `score = 3.0·LLR̂ + 0.8·CV + 3.0·MK`, fire ≥ 3.0.
 LLR and MK each independently sufficient; CV is a booster.
+
+## Closure path (0.3.4+)
+
+An opt-in relative gate is implemented on the promoted `merge_record` path
+(`detection.relative_enabled`, default false). It does not reintroduce a
+per-IP side map. Enable only after soak; see `docs/THREAT_CLASSES.md`.

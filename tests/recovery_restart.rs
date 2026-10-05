@@ -1702,6 +1702,10 @@ fn recovery_snapshot_tail_unblock_cidr_equivalence() {
         ts_ns: now_ns(),
     })
     .unwrap();
+    // Drop/reopen before tail replay so the disk reader sees the tail
+    // under Durability::None (the same pattern as the other checkpoint tests).
+    drop(wal);
+    let wal = open_wal(&dir);
 
     let mut seed = HashMap::new();
     seed.insert(net, None);

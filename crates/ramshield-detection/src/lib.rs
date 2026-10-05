@@ -1073,7 +1073,18 @@ impl DetectionEngine {
                 );
                 rec.pulse_samples_in_window = pulse_count;
                 rec.pulse_window_start_ns = pulse_start;
-                let block = hot || cusum_fired(rec.cusum_s, det_thr) || pulse_fired;
+                // Relative / small-scale gate: uses existing baseline on the
+                // promoted record only (no per-IP side map). Default off.
+                let relative_fired = if det.relative_enabled
+                    && (rec.sample_count as u32) >= det.relative_min_samples
+                {
+                    let need = (det.relative_factor * baseline).max(det.relative_floor_rps);
+                    inst_rps >= need
+                } else {
+                    false
+                };
+                let block =
+                    hot || cusum_fired(rec.cusum_s, det_thr) || pulse_fired || relative_fired;
                 (was_blocked, (ewma_rps, threat, block))
             },
         );
@@ -2411,6 +2422,94 @@ mod tests {
             store.traffic.promoted_ips.load(Ordering::Relaxed),
             0,
             "abgelehnte IP darf nicht als promoted gezählt werden"
+        );
+    }
+
+    /// Absolute paths alone miss low-and-slow: relative gate off → no block.
+    #[test]
+    fn relative_disabled_preserves_absolute_only_gap() {
+        let mut cfg = Config::default();
+        cfg.detection.rps_threshold = 1_000;
+        cfg.detection.promote_min_events = 2;
+        cfg.detection.relative_enabled = false;
+        let handle = cfg.into_handle();
+        let store = Arc::new(Store::new(16));
+        let metrics = Arc::new(Metrics::new());
+        let (etx, mut erx) = mpsc::channel(64);
+        let eng = Arc::new(DetectionEngine::new(
+            store.clone(),
+            handle,
+            etx,
+            metrics,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 1, 1));
+        // ~12 rps sustained across several flushes — far below absolute 1000.
+        for round in 0..12u64 {
+            let base = round * 1_000_000_000;
+            let events: Vec<_> = (0..12)
+                .map(|i| ConnectionEvent {
+                    ip,
+                    timestamp_ns: base + i * 80_000_000,
+                    bytes: 64,
+                    status_code: 200,
+                    proto_fingerprint: 0,
+                })
+                .collect();
+            eng.flush_events(&events);
+        }
+        let mut blocked = 0;
+        while erx.try_recv().is_ok() {
+            blocked += 1;
+        }
+        assert_eq!(
+            blocked, 0,
+            "with relative_enabled=false, sub-threshold relative abuse must not block"
+        );
+    }
+
+    /// Relative gate on: same traffic pattern should emit at least one block.
+    #[test]
+    fn relative_enabled_catches_low_and_slow() {
+        let mut cfg = Config::default();
+        cfg.detection.rps_threshold = 1_000;
+        cfg.detection.promote_min_events = 2;
+        cfg.detection.relative_enabled = true;
+        cfg.detection.relative_factor = 3.0;
+        cfg.detection.relative_floor_rps = 2.0;
+        cfg.detection.relative_min_samples = 4;
+        let handle = cfg.into_handle();
+        let store = Arc::new(Store::new(16));
+        let metrics = Arc::new(Metrics::new());
+        let (etx, mut erx) = mpsc::channel(64);
+        let eng = Arc::new(DetectionEngine::new(
+            store.clone(),
+            handle,
+            etx,
+            metrics,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 2, 2));
+        for round in 0..16u64 {
+            let base = round * 1_000_000_000;
+            let events: Vec<_> = (0..20)
+                .map(|i| ConnectionEvent {
+                    ip,
+                    timestamp_ns: base + i * 50_000_000,
+                    bytes: 64,
+                    status_code: 200,
+                    proto_fingerprint: 0,
+                })
+                .collect();
+            eng.flush_events(&events);
+        }
+        let mut blocked = 0;
+        while erx.try_recv().is_ok() {
+            blocked += 1;
+        }
+        assert!(
+            blocked >= 1,
+            "relative_enabled must block elevated-over-baseline traffic below absolute threshold; got {blocked}"
         );
     }
 }

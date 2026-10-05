@@ -11,10 +11,11 @@
 # Run:
 #   docker run -d --name ramshield \
 #     --cap-add NET_ADMIN --cap-add BPF --cap-add PERFMON \
-#       grep999/ramshield:0.3.3
+#       grep999/ramshield:${RAMSHIELD_VERSION}
 # XDP attach needs the caps above (skb mode). Without them the daemon
 # still serves IPC + dashboard; XDP reports inactive.
 FROM debian:bookworm-slim
+ARG RAMSHIELD_VERSION
 ARG XDP_ENABLED=true
 ENV XDP_ENABLED=$XDP_ENABLED
 
@@ -47,6 +48,6 @@ CMD ["--config", "/etc/ramshield/config.toml"]
 
 LABEL org.opencontainers.image.title="RamShield" \
       org.opencontainers.image.description="Autonomous ingress defense daemon" \
-      org.opencontainers.image.version="0.3.3" \
+      org.opencontainers.image.version="${RAMSHIELD_VERSION}" \
       org.opencontainers.image.source="https://github.com/grep999/ramshield" \
       org.opencontainers.image.licenses="MIT"
