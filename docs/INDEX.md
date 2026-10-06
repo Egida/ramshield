@@ -5,11 +5,9 @@ This is the canonical documentation map for RamShield 0.4.0. The repository is a
 ## Operators
 
 1. [Quickstart](QUICKSTART.md) — first installation and smoke test.
-2. [User guide](USER_GUIDE.md) — day-to-day operation, CLI, health, metrics, blocks, restart, upgrade and rollback.
+2. [Operations](OPERATIONS.md) — routine production procedures.
 3. [Configuration](CONFIGURATION.md) — configuration reference and environment overrides.
-4. [Tuning](TUNING.md) — how to detect without destroying stability.
-5. [Operations](OPERATIONS.md) — routine production procedures.
-6. [Troubleshooting](TROUBLESHOOTING.md) — failure-oriented diagnosis.
+4. [Troubleshooting](TROUBLESHOOTING.md) — failure-oriented diagnosis.
 
 ## Engineers
 
@@ -35,6 +33,20 @@ This is the canonical documentation map for RamShield 0.4.0. The repository is a
 - [Benchmarks](BENCHMARKS.md) — benchmark methodology and results.
 - [Qualification matrix](QUALIFICATION_MATRIX.md) — feature-by-feature evidence.
 
-## Documentation Rule
+The documentation index follows the RFC 9411 perspective: A feature is only a supported product claim when its implementation, tests, qualification evidence and documentation agree. Experimental code must remain explicitly labelled experimental. Benchmark numbers are workload-specific measurements, not universal guarantees.
 
-A feature is only a supported product claim when its implementation, tests, qualification evidence and documentation agree. Experimental code must remain explicitly labelled experimental. Benchmark numbers are workload-specific measurements, not universal guarantees.
+## Professional Compliance
+
+All documented features undergo a structured validation:
+1. **Implementation** - Code completeness and correctness verified
+2. **Testing** - Comprehensive unit/integration tests with edge cases
+3. **Qualification Evidence** - Production-grade qualification procedures and results
+4. **Documentation** - Complete technical and operational documentation
+5. **Review** - Security audit, code review, and quality gate validation
+
+## Enforcement Boundary
+
+**Authoritative state:** WAL + userspace state
+**Projection state:** XDP + SHM kernel projections
+
+Never infer kernel qualification from a userspace unit test.
