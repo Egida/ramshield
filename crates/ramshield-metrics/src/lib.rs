@@ -575,6 +575,13 @@ impl Metrics {
             self.xdp_projection_stale.store(0, Ordering::Release);
         }
     }
+    /// Mark the XDP projection stale immediately (called on mutation failure
+    /// so kernel/userspace divergence is visible NOW, not at next reconcile).
+    pub fn mark_xdp_projection_stale(&self) {
+        if self.xdp_projection_active.load(Ordering::Acquire) {
+            self.xdp_projection_stale.store(1, Ordering::Release);
+        }
+    }
     /// Record a failed XDP reconciliation attempt. Age keeps growing until
     /// the next success (the gauge drifts upward — that drift is the alert).
     pub fn record_reconcile_failure(&self, now_unix: u64, last_success_unix: u64) {

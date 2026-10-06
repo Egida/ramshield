@@ -905,6 +905,9 @@ impl EnforcementService {
                 }
                 .map(|()| true)
                 .unwrap_or_else(|e| {
+                    // Kernel/userspace divergence is real NOW: surface it
+                    // immediately, not at the next reconcile tick.
+                    self.metrics.mark_xdp_projection_stale();
                     // Userspace + WAL hold this block; the kernel does not, so
                     // the wire keeps passing the target. Counter is the only
                     // scrapeable signal. CIDR LPM tries have a hard cap and no
@@ -989,6 +992,7 @@ impl EnforcementService {
                 }
                 .map(|()| true)
                 .unwrap_or_else(|e| {
+                    self.metrics.mark_xdp_projection_stale();
                     warn!(ip=%cmd.ip, cidr=?cmd.cidr, "XDP unblock failed: {}", e);
                     false
                 });

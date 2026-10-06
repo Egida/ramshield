@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 
 ## [0.4.0] - 2026-10-05
 
+## [0.3.4] - 2026-10-05
+
 ### Enterprise release closure
 - Add a single release identity, pinned signed installer, SPDX SBOM, provenance attestation, and hard dependency-audit gating.
 - Make upgrade and rollback qualification fail closed on enforcement-state loss.
