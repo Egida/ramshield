@@ -1,0 +1,40 @@
+# RamShield Documentation Index
+
+This is the canonical documentation map for RamShield 0.4.0. The repository is a Linux-native, single-node ingress-defense system. The userspace state and WAL are authoritative; XDP is a kernel projection.
+
+## Operators
+
+1. [Quickstart](QUICKSTART.md) — first installation and smoke test.
+2. [User guide](USER_GUIDE.md) — day-to-day operation, CLI, health, metrics, blocks, restart, upgrade and rollback.
+3. [Configuration](CONFIGURATION.md) — configuration reference and environment overrides.
+4. [Tuning](TUNING.md) — how to detect without destroying stability.
+5. [Operations](OPERATIONS.md) — routine production procedures.
+6. [Troubleshooting](TROUBLESHOOTING.md) — failure-oriented diagnosis.
+
+## Engineers
+
+- [Architecture](ARCHITECTURE.md) — runtime topology and data flow.
+- [Code bible](CODE_BIBLE.md) — crate responsibilities, ownership, invariants, concurrency and safe-change rules.
+- [IPC](IPC.md) — wire/authentication contract.
+- [INVARIANTS](INVARIANTS.md) — security and correctness invariants.
+- [Threat classes](THREAT_CLASSES.md) — detection claims and coverage.
+- [Small-scale detection](SMALL_SCALE_DETECTION.md) — opt-in relative detector scope.
+- [Development](DEVELOPMENT.md) — build/test workflow.
+
+## Security and Release
+
+- [Security model](SECURITY_MODEL.md) — trust boundaries, secrets, capabilities and failure policy.
+- [Production qualification](PRODUCTION_QUALIFICATION.md) — qualification matrix and evidence requirements.
+- [Release runbook](RELEASE_RUNBOOK.md) — exact release procedure.
+- [Enterprise release](ENTERPRISE_RELEASE.md) — packaging/install contract.
+- [Release contract](RELEASE_CONTRACT_1.0.md) — long-term product promises.
+- [Production 0.4.0](PRODUCTION_0.4.0.md) — current release contract.
+
+## Performance and Evidence
+
+- [Benchmarks](BENCHMARKS.md) — benchmark methodology and results.
+- [Qualification matrix](QUALIFICATION_MATRIX.md) — feature-by-feature evidence.
+
+## Documentation Rule
+
+A feature is only a supported product claim when its implementation, tests, qualification evidence and documentation agree. Experimental code must remain explicitly labelled experimental. Benchmark numbers are workload-specific measurements, not universal guarantees.
