@@ -994,6 +994,7 @@ impl DetectionEngine {
                 baseline_rps: 0.0,
                 prev_sample_hot: false,
                 sample_count: 0,
+                relative_breach_streak: 0,
                 pulse_samples_in_window: 0,
                 pulse_window_start_ns: 0,
                 first_seen_ns: ip_agg.first_ts_ns,
@@ -1026,22 +1027,39 @@ impl DetectionEngine {
                 };
                 rec.ewma_rps = ewma(rec.ewma_rps, inst_rps);
 
-                // P1: CUSUM companion (Page 1954) — catches sustained sub-threshold
-                // drift that absolute-EWMA can't see by construction.
-                let baseline = if rec.baseline_rps == 0.0 {
-                    rec.baseline_rps = rec.ewma_rps;
-                    rec.ewma_rps
+                // CUSUM baseline is evaluated from the PREVIOUS slow baseline,
+                // then updated. Relative detection uses exactly the same prior
+                // baseline, so the current sample cannot move its own threshold.
+                let prior_baseline = rec.baseline_rps;
+                let baseline_for_cusum = if prior_baseline > 0.0 && prior_baseline.is_finite() {
+                    prior_baseline
                 } else {
-                    rec.baseline_rps = ewma_alpha_slow() * rec.ewma_rps
-                        + (1.0 - ewma_alpha_slow()) * rec.baseline_rps;
-                    rec.baseline_rps
+                    rec.ewma_rps
                 };
+
                 rec.sample_count = rec.sample_count.saturating_add(1);
                 if rec.sample_count >= CUSUM_WARMUP_SAMPLES {
                     let k = cusum_allowance(det_thr);
-                    rec.cusum_s =
-                        cusum_step_capped(rec.cusum_s, inst_rps, baseline + k, det_thr as f64);
+                    rec.cusum_s = cusum_step_capped(
+                        rec.cusum_s,
+                        inst_rps,
+                        baseline_for_cusum + k,
+                        det_thr as f64,
+                    );
                 }
+
+                // Update the slow baseline AFTER evaluating the current sample.
+                // The first sample seeds the baseline but cannot satisfy the
+                // relative maturity gate because there is no prior baseline.
+                rec.baseline_rps = if prior_baseline > 0.0 && prior_baseline.is_finite() {
+                    ewma_alpha_slow() * rec.ewma_rps + (1.0 - ewma_alpha_slow()) * prior_baseline
+                } else {
+                    // Seed from the observed batch rate, not the cold-start fast
+                    // EWMA. Otherwise the first few samples can create an
+                    // artificially low baseline and trip the relative detector
+                    // during perfectly steady startup traffic.
+                    inst_rps
+                };
 
                 let rps_score = (rec.ewma_rps / det_thr as f64).min(1.0);
                 let total: u32 = rec.status_dist.iter().sum();
@@ -1073,16 +1091,25 @@ impl DetectionEngine {
                 );
                 rec.pulse_samples_in_window = pulse_count;
                 rec.pulse_window_start_ns = pulse_start;
-                // Relative / small-scale gate: uses existing baseline on the
-                // promoted record only (no per-IP side map). Default off.
-                let relative_fired = if det.relative_enabled
-                    && (rec.sample_count as u32) >= det.relative_min_samples
+                let relative_breach = if det.relative_enabled
+                    && prior_baseline.is_finite()
+                    && prior_baseline > 0.0
+                    && u32::from(rec.sample_count) >= det.relative_min_samples
                 {
-                    let need = (det.relative_factor * baseline).max(det.relative_floor_rps);
-                    inst_rps >= need
+                    let need = (det.relative_factor * prior_baseline).max(det.relative_floor_rps);
+                    need.is_finite() && inst_rps.is_finite() && inst_rps >= need
                 } else {
                     false
                 };
+                if relative_breach {
+                    rec.relative_breach_streak = rec.relative_breach_streak.saturating_add(1);
+                } else {
+                    rec.relative_breach_streak = 0;
+                }
+                let relative_fired = det.relative_enabled
+                    && relative_breach
+                    && rec.relative_breach_streak >= det.relative_min_breaches;
+
                 let block =
                     hot || cusum_fired(rec.cusum_s, det_thr) || pulse_fired || relative_fired;
                 (was_blocked, (ewma_rps, threat, block))
@@ -2425,13 +2452,16 @@ mod tests {
         );
     }
 
-    /// Absolute paths alone miss low-and-slow: relative gate off → no block.
     #[test]
-    fn relative_disabled_preserves_absolute_only_gap() {
+    fn relative_gate_uses_prior_baseline_and_requires_streak() {
         let mut cfg = Config::default();
-        cfg.detection.rps_threshold = 1_000;
-        cfg.detection.promote_min_events = 2;
-        cfg.detection.relative_enabled = false;
+        cfg.detection.rps_threshold = 1_000_000;
+        cfg.detection.promote_min_events = 1;
+        cfg.detection.relative_enabled = true;
+        cfg.detection.relative_factor = 2.0;
+        cfg.detection.relative_floor_rps = 1.0;
+        cfg.detection.relative_min_samples = 3;
+        cfg.detection.relative_min_breaches = 2;
         let handle = cfg.into_handle();
         let store = Arc::new(Store::new(16));
         let metrics = Arc::new(Metrics::new());
@@ -2443,14 +2473,16 @@ mod tests {
             metrics,
             Arc::new(AtomicBool::new(false)),
         ));
-        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 1, 1));
-        // ~12 rps sustained across several flushes — far below absolute 1000.
-        for round in 0..12u64 {
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 3, 3));
+
+        // Warm baseline at ~12 rps without crossing any absolute detector.
+        // The first observation seeds the slow baseline from inst_rps, not the cold-start fast EWMA.
+        for round in 0..8u64 {
             let base = round * 1_000_000_000;
-            let events: Vec<_> = (0..12)
+            let events: Vec<_> = (0..10)
                 .map(|i| ConnectionEvent {
                     ip,
-                    timestamp_ns: base + i * 80_000_000,
+                    timestamp_ns: base + i * 90_000_000,
                     bytes: 64,
                     status_code: 200,
                     proto_fingerprint: 0,
@@ -2458,26 +2490,59 @@ mod tests {
                 .collect();
             eng.flush_events(&events);
         }
-        let mut blocked = 0;
+        let mut n = 0;
         while erx.try_recv().is_ok() {
-            blocked += 1;
+            n += 1;
         }
-        assert_eq!(
-            blocked, 0,
-            "with relative_enabled=false, sub-threshold relative abuse must not block"
-        );
+        assert_eq!(n, 0);
+
+        // One breach must not fire: hysteresis requires two consecutive breaches.
+        let base = 8_000_000_000;
+        let events: Vec<_> = (0..25)
+            .map(|i| ConnectionEvent {
+                ip,
+                timestamp_ns: base + i * 40_000_000,
+                bytes: 64,
+                status_code: 200,
+                proto_fingerprint: 0,
+            })
+            .collect();
+        eng.flush_events(&events);
+        let mut n = 0;
+        while erx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 0);
+
+        // Second consecutive breach fires. Absolute threshold remains unreachable.
+        let base = 9_000_000_000;
+        let events: Vec<_> = (0..25)
+            .map(|i| ConnectionEvent {
+                ip,
+                timestamp_ns: base + i * 40_000_000,
+                bytes: 64,
+                status_code: 200,
+                proto_fingerprint: 0,
+            })
+            .collect();
+        eng.flush_events(&events);
+        let mut n = 0;
+        while erx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert!(n >= 1);
     }
 
-    /// Relative gate on: same traffic pattern should emit at least one block.
     #[test]
-    fn relative_enabled_catches_low_and_slow() {
+    fn relative_gate_resets_streak_on_non_breach() {
         let mut cfg = Config::default();
-        cfg.detection.rps_threshold = 1_000;
-        cfg.detection.promote_min_events = 2;
+        cfg.detection.rps_threshold = 1_000_000;
+        cfg.detection.promote_min_events = 1;
         cfg.detection.relative_enabled = true;
-        cfg.detection.relative_factor = 3.0;
-        cfg.detection.relative_floor_rps = 2.0;
-        cfg.detection.relative_min_samples = 4;
+        cfg.detection.relative_factor = 2.0;
+        cfg.detection.relative_floor_rps = 1.0;
+        cfg.detection.relative_min_samples = 2;
+        cfg.detection.relative_min_breaches = 2;
         let handle = cfg.into_handle();
         let store = Arc::new(Store::new(16));
         let metrics = Arc::new(Metrics::new());
@@ -2489,13 +2554,14 @@ mod tests {
             metrics,
             Arc::new(AtomicBool::new(false)),
         ));
-        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 2, 2));
-        for round in 0..16u64 {
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 55, 4, 4));
+
+        for round in 0..6u64 {
             let base = round * 1_000_000_000;
-            let events: Vec<_> = (0..20)
+            let events: Vec<_> = (0..10)
                 .map(|i| ConnectionEvent {
                     ip,
-                    timestamp_ns: base + i * 50_000_000,
+                    timestamp_ns: base + i * 90_000_000,
                     bytes: 64,
                     status_code: 200,
                     proto_fingerprint: 0,
@@ -2503,13 +2569,33 @@ mod tests {
                 .collect();
             eng.flush_events(&events);
         }
-        let mut blocked = 0;
+        let mut n = 0;
         while erx.try_recv().is_ok() {
-            blocked += 1;
+            n += 1;
         }
-        assert!(
-            blocked >= 1,
-            "relative_enabled must block elevated-over-baseline traffic below absolute threshold; got {blocked}"
-        );
+        assert_eq!(n, 0);
+
+        // breach / clear / breach: no fire because the streak must be consecutive.
+        for (base, n) in [
+            (6_000_000_000u64, 25usize),
+            (7_000_000_000, 10),
+            (8_000_000_000, 25),
+        ] {
+            let events: Vec<_> = (0..n)
+                .map(|i| ConnectionEvent {
+                    ip,
+                    timestamp_ns: base + i as u64 * (1_000_000_000 / n as u64),
+                    bytes: 64,
+                    status_code: 200,
+                    proto_fingerprint: 0,
+                })
+                .collect();
+            eng.flush_events(&events);
+        }
+        let mut n = 0;
+        while erx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 0);
     }
 }

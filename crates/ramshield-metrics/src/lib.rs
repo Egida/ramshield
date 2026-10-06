@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+
+pub const XDP_PROJECTION_STALE_SECS: u64 = 60;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::System;
@@ -153,6 +155,9 @@ pub struct DashboardSnapshot {
     /// dashboard level so operators can see kernel-side enforcement trouble
     /// without scraping Prometheus.
     pub xdp_apply_failures: u64,
+    /// True when configured active XDP has not been successfully reconciled
+    /// within the engine's protection freshness window.
+    pub xdp_projection_stale: bool,
     pub xdp_configured: bool,
     pub protection_state: ProtectionState,
 }
@@ -194,6 +199,7 @@ impl Default for DashboardSnapshot {
             wal_lsn: 0,
             pending_expirations: 0,
             xdp_apply_failures: 0,
+            xdp_projection_stale: false,
             xdp_configured: false,
             protection_state: ProtectionState::Starting,
         }
@@ -338,6 +344,10 @@ pub struct Metrics {
     pub bloom_saturation_clears_total: Arc<AtomicU64>,
     /// Seconds since the last successful XDP reconciliation. 0 if never reconciled.
     pub reconcile_age_seconds: Arc<AtomicU64>,
+    /// Metric gauge indicating whether the active XDP projection is stale relative to userspace.
+    pub xdp_projection_stale: Arc<AtomicU64>,
+    /// True while an active XDP dataplane requires a fresh userspace→kernel projection.
+    pub xdp_projection_active: Arc<AtomicBool>,
     /// Unix timestamp of the last successful reconciliation.
     pub reconcile_last_success_unix: Arc<AtomicU64>,
     /// Total reconciliation failures.
@@ -438,6 +448,8 @@ impl Metrics {
             bloom_clears_total: Arc::new(AtomicU64::new(0)),
             bloom_saturation_clears_total: Arc::new(AtomicU64::new(0)),
             reconcile_age_seconds: Arc::new(AtomicU64::new(0)),
+            xdp_projection_stale: Arc::new(AtomicU64::new(0)),
+            xdp_projection_active: Arc::new(AtomicBool::new(false)),
             reconcile_last_success_unix: Arc::new(AtomicU64::new(0)),
             reconcile_failures_total: Arc::new(AtomicU64::new(0)),
             reconcile_successes_total: Arc::new(AtomicU64::new(0)),
@@ -559,6 +571,9 @@ impl Metrics {
         self.reconcile_last_success_unix
             .store(now_unix, Ordering::Relaxed);
         self.reconcile_age_seconds.store(0, Ordering::Relaxed);
+        if self.xdp_projection_active.load(Ordering::Acquire) {
+            self.xdp_projection_stale.store(0, Ordering::Release);
+        }
     }
     /// Record a failed XDP reconciliation attempt. Age keeps growing until
     /// the next success (the gauge drifts upward — that drift is the alert).
@@ -566,10 +581,14 @@ impl Metrics {
         self.reconcile_failures_total
             .fetch_add(1, Ordering::Relaxed);
         if last_success_unix > 0 {
-            self.reconcile_age_seconds.store(
-                now_unix.saturating_sub(last_success_unix),
-                Ordering::Relaxed,
-            );
+            let age = now_unix.saturating_sub(last_success_unix);
+            self.reconcile_age_seconds.store(age, Ordering::Relaxed);
+            if self.xdp_projection_active.load(Ordering::Acquire) {
+                self.xdp_projection_stale
+                    .store((age > XDP_PROJECTION_STALE_SECS) as u64, Ordering::Release);
+            }
+        } else if self.xdp_projection_active.load(Ordering::Acquire) {
+            self.xdp_projection_stale.store(1, Ordering::Release);
         }
     }
     /// Refresh the age gauge on every tick (successful or not) so it tracks
@@ -627,11 +646,39 @@ impl Metrics {
     pub fn set_auth_verification_wait_ms(&self, val: u64) {
         self.auth_verification_wait_ms.store(val, Ordering::Relaxed);
     }
+    /// Publish whether the current XDP projection is outside the engine's
+    /// freshness contract. The engine is the authority for the threshold.
+    pub fn set_xdp_projection_active(&self, active: bool) {
+        self.xdp_projection_active.store(active, Ordering::Release);
+        if !active {
+            self.xdp_projection_stale.store(0, Ordering::Release);
+            return;
+        }
+        let last = self.reconcile_last_success_unix.load(Ordering::Acquire);
+        let age = if last == 0 {
+            u64::MAX
+        } else {
+            self.reconcile_age_seconds.load(Ordering::Acquire)
+        };
+        self.xdp_projection_stale.store(
+            (last == 0 || age > XDP_PROJECTION_STALE_SECS) as u64,
+            Ordering::Release,
+        );
+    }
+
     pub fn tick_reconcile_age(&self, now_unix: u64) {
-        let last = self.reconcile_last_success_unix.load(Ordering::Relaxed);
-        if last > 0 {
-            self.reconcile_age_seconds
-                .store(now_unix.saturating_sub(last), Ordering::Relaxed);
+        let last = self.reconcile_last_success_unix.load(Ordering::Acquire);
+        let age = if last > 0 {
+            now_unix.saturating_sub(last)
+        } else {
+            0
+        };
+        self.reconcile_age_seconds.store(age, Ordering::Relaxed);
+        if self.xdp_projection_active.load(Ordering::Acquire) {
+            self.xdp_projection_stale.store(
+                (last == 0 || age > XDP_PROJECTION_STALE_SECS) as u64,
+                Ordering::Release,
+            );
         }
     }
     // ponytail: P2/P3 module counters — writer methods so the dashboard reads
@@ -1301,6 +1348,12 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_xdp_projection_stale",
+            self.xdp_projection_stale.load(Ordering::Relaxed),
+            "Whether the active configured XDP projection is stale according to the engine freshness contract (1=true, 0=false).",
+            "gauge"
+        ));
+        out.push_str(&emit!(
             "ramshield_xdp_reconcile_age_seconds",
             self.reconcile_age_seconds.load(Ordering::Relaxed),
             "Seconds since the last successful store→XDP reconciliation (grows when reconcile is failing).",
@@ -1608,6 +1661,21 @@ mod cache_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xdp_projection_stale_gauge_is_exported() {
+        let m = Metrics::new();
+        m.set_xdp_projection_active(true);
+        assert!(
+            m.render_prometheus()
+                .contains("ramshield_xdp_projection_stale 1")
+        );
+        m.set_xdp_projection_active(false);
+        assert!(
+            m.render_prometheus()
+                .contains("ramshield_xdp_projection_stale 0")
+        );
+    }
 
     #[test]
     fn enforcement_drops_counter_is_exported() {

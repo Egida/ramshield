@@ -16,8 +16,9 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --version) [[ $# -ge 2 ]] || die '--version requires a value'; VERSION="$2"; shift 2;;
     --prefix) [[ $# -ge 2 ]] || die '--prefix requires a value'; PREFIX="$2"; shift 2;;
-    -h|--help) echo "VERSION=x.y.z $0 [--prefix PATH]"; exit 0;;
+    -h|--help) echo "$0 --version X.Y.Z [--prefix PATH]"; exit 0;;
     *) die "unknown argument: $1";;
   esac
 done

@@ -206,12 +206,7 @@ impl Engine {
         let allow_fb = self.config.load().xdp.allow_inband_fallback;
         let pipeline_ok = self.pipeline_ready.load(Ordering::Acquire)
             && !self.pipeline_failed.load(Ordering::Acquire);
-        const XDP_RECONCILE_STALE_SECS: u64 = 60;
-        let xdp_reconcile_successes = metrics.reconcile_successes_total.load(Ordering::Acquire);
-        let xdp_reconcile_age = metrics.reconcile_age_seconds.load(Ordering::Acquire);
-        let xdp_projection_stale = xdp_configured
-            && xdp_active
-            && (xdp_reconcile_successes == 0 || xdp_reconcile_age > XDP_RECONCILE_STALE_SECS);
+        let xdp_projection_stale = metrics.xdp_projection_stale.load(Ordering::Acquire) != 0;
         let protection_state = if self.is_shutting_down() {
             crate::metrics::ProtectionState::Stopping
         } else if self.pipeline_failed.load(Ordering::Acquire) {
@@ -271,6 +266,7 @@ impl Engine {
             wal_lsn: self.metrics.wal_lsn.load(Ordering::Relaxed),
             pending_expirations: self.metrics.pending_expirations.load(Ordering::Relaxed),
             xdp_apply_failures: self.metrics.xdp_apply_failures.load(Ordering::Relaxed),
+            xdp_projection_stale,
             is_healthy,
             health_reason: if self.is_shutting_down() {
                 "shutting down".into()
@@ -484,6 +480,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 Ok(()) => {
                     tracing::info!(iface = %cfg_snapshot.xdp.interface, mode = %cfg_snapshot.xdp.mode, "XDP dataplane active");
                     engine.xdp_active.store(true, Ordering::Release);
+                    metrics.set_xdp_projection_active(true);
                     Box::new(applier)
                 }
                 Err(e) => {
@@ -497,6 +494,7 @@ async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         remediation = %xdp_capability_hint(),
                         "XDP load/attach failed — falling back to in-band enforcement"
                     );
+                    metrics.set_xdp_projection_active(false);
                     if hard_xdp {
                         return Err(std::io::Error::other(
                             "XDP configured and allow_inband_fallback=false — attach failed",
@@ -986,6 +984,31 @@ mod startup_tests {
     }
 
     #[test]
+    fn engine_snapshot_marks_stale_active_xdp_projection_unhealthy() {
+        let mut cfg = Config::default();
+        cfg.xdp.enabled = true;
+        cfg.xdp.allow_inband_fallback = true;
+        let engine = Engine::new(cfg, Arc::new(Store::new(16)), Arc::new(Metrics::new()));
+        engine.mark_pipeline_ready_for_test();
+        engine.xdp_active.store(true, Ordering::Release);
+        engine.metrics.set_xdp_projection_active(true);
+
+        // No successful reconciliation has occurred: active configured XDP
+        // therefore has an unknown/stale userspace→kernel projection.
+        let snap = engine.dashboard_snapshot();
+        assert!(snap.xdp_projection_stale);
+        assert!(!snap.is_healthy);
+        assert_eq!(
+            snap.protection_state,
+            crate::metrics::ProtectionState::Degraded
+        );
+        assert_eq!(snap.health_reason, "xdp reconciliation stale");
+
+        let prom = engine.metrics.render_prometheus();
+        assert!(prom.contains("ramshield_xdp_projection_stale 1"));
+    }
+
+    #[test]
     fn engine_snapshot_unhealthy_when_ram_pressure() {
         // RED: set ram_limit_mb=1 MB and ram_bytes = 1.5 MB → ram_pct > 95%.
         // Broken code (8c159cc): is_healthy stays true. Fixed code: flips to false.
@@ -1013,6 +1036,7 @@ mod startup_tests {
             baseline_rps: 0.0,
             prev_sample_hot: false,
             sample_count: 0,
+            relative_breach_streak: 0,
             pulse_samples_in_window: 0,
             pulse_window_start_ns: 0,
             first_seen_ns: 0,

@@ -185,6 +185,10 @@ pub struct IpRecord {
     /// 6 samples to arm, saturates long before overflow matters.
     #[serde(default)]
     pub sample_count: u8,
+    /// Consecutive samples breaching the opt-in relative detector.
+    /// Persisted with the record so detector state does not live in a side map.
+    #[serde(default)]
+    pub relative_breach_streak: u8,
     /// Sliding-window count of distinct over-threshold batch samples.
     /// Resets on window expiry or block. ponytail: u8 caps at 255.
     #[serde(default)]
@@ -1035,6 +1039,7 @@ mod tests {
             baseline_rps: 0.0,
             prev_sample_hot: false,
             sample_count: 0,
+            relative_breach_streak: 0,
             pulse_samples_in_window: 0,
             pulse_window_start_ns: 0,
             first_seen_ns: 0,
@@ -1319,6 +1324,7 @@ mod tests {
                     baseline_rps: 0.0,
                     prev_sample_hot: false,
                     sample_count: 0,
+                    relative_breach_streak: 0,
                     pulse_samples_in_window: 0,
                     pulse_window_start_ns: 0,
                     first_seen_ns: 0,
@@ -1756,6 +1762,7 @@ mod tests {
             baseline_rps: 0.0,
             prev_sample_hot: false,
             sample_count: 0,
+            relative_breach_streak: 0,
             pulse_samples_in_window: 0,
             pulse_window_start_ns: 0,
             first_seen_ns: 0,

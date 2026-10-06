@@ -96,20 +96,23 @@ pub struct DetectionConfig {
     /// Max unique IPs in the pre-aggregation buffer before flushing to main store.
     #[serde(default = "default_pre_aggs_max_size")]
     pub pre_aggs_max_size: usize,
-    /// Relative / small-scale gate (default off). When enabled, a promoted IP
-    /// can block when inst_rps >= max(relative_floor_rps, relative_factor * baseline)
-    /// after relative_min_samples — without a per-IP side map on the hot path.
+    /// Opt-in relative-baseline detector. Default off until qualified in the
+    /// target environment. Runs only for promoted IP records.
     #[serde(default)]
     pub relative_enabled: bool,
-    /// Multiplier over slow baseline (must be >= 1.0).
+    /// Relative multiplier over the prior slow baseline. Must be finite and >= 1.
     #[serde(default = "default_relative_factor")]
     pub relative_factor: f64,
-    /// Floor so relative gate does not fire on near-zero baselines.
+    /// Absolute floor for the relative detector. Must be finite and > 0.
     #[serde(default = "default_relative_floor_rps")]
     pub relative_floor_rps: f64,
-    /// Samples after promotion before relative gate may fire.
+    /// Number of observed samples required before relative detection can fire.
+    /// IpRecord::sample_count is u8, so this is intentionally capped at 255.
     #[serde(default = "default_relative_min_samples")]
     pub relative_min_samples: u32,
+    /// Consecutive relative breaches required to fire. Must be > 0.
+    #[serde(default = "default_relative_min_breaches")]
+    pub relative_min_breaches: u8,
 }
 
 fn default_batch_max_events() -> usize {
@@ -154,6 +157,9 @@ fn default_relative_floor_rps() -> f64 {
 fn default_relative_min_samples() -> u32 {
     8
 }
+fn default_relative_min_breaches() -> u8 {
+    3
+}
 
 impl Default for DetectionConfig {
     fn default() -> Self {
@@ -170,15 +176,16 @@ impl Default for DetectionConfig {
             bloom_bits: 8_000_000,
             batch_max_events: default_batch_max_events(),
             batch_window_ms: default_batch_window_ms(),
+            pre_aggs_flush_interval_ms: default_pre_aggs_flush_interval_ms(),
             promote_min_events: default_promote_min(),
             subnet_window_threshold: default_subnet_window_threshold(),
             emergency_burst_threshold: default_emergency_burst_threshold(),
             pre_aggs_max_size: default_pre_aggs_max_size(),
-            pre_aggs_flush_interval_ms: default_pre_aggs_flush_interval_ms(),
             relative_enabled: false,
             relative_factor: default_relative_factor(),
             relative_floor_rps: default_relative_floor_rps(),
             relative_min_samples: default_relative_min_samples(),
+            relative_min_breaches: default_relative_min_breaches(),
         }
     }
 }
@@ -672,14 +679,19 @@ impl Config {
         if self.detection.promote_min_events == 0 {
             anyhow::bail!("detection.promote_min_events must be > 0");
         }
-        if self.detection.relative_factor < 1.0 {
-            anyhow::bail!("detection.relative_factor must be >= 1.0");
+        if !self.detection.relative_factor.is_finite() || self.detection.relative_factor < 1.0 {
+            anyhow::bail!("detection.relative_factor must be finite and >= 1.0");
         }
-        if self.detection.relative_floor_rps <= 0.0 {
-            anyhow::bail!("detection.relative_floor_rps must be > 0");
+        if !self.detection.relative_floor_rps.is_finite()
+            || self.detection.relative_floor_rps <= 0.0
+        {
+            anyhow::bail!("detection.relative_floor_rps must be finite and > 0");
         }
-        if self.detection.relative_min_samples == 0 {
-            anyhow::bail!("detection.relative_min_samples must be > 0");
+        if !(1..=u8::MAX as u32).contains(&self.detection.relative_min_samples) {
+            anyhow::bail!("detection.relative_min_samples must be in 1..=255");
+        }
+        if self.detection.relative_min_breaches == 0 {
+            anyhow::bail!("detection.relative_min_breaches must be > 0");
         }
         if self.detection.bloom_bits < 100_000 {
             anyhow::bail!(
@@ -805,10 +817,10 @@ impl Config {
                 anyhow::bail!("ipc.auth_keys[{id}] hex key must be >= 32 chars (16 bytes)");
             }
         }
-        if let Some(ref p) = self.dashboard.admin_password_hash
-            && argon2::PasswordHash::new(p).is_err()
+        if let Some(mll) = self.ipc.max_line_length
+            && mll < 256
         {
-            anyhow::bail!("dashboard.admin_password_hash is not a valid PHC string");
+            anyhow::bail!("ipc.max_line_length must be >= 256 bytes or None (default 32MB)");
         }
 
         Ok(())
@@ -1065,15 +1077,28 @@ retention_max_bytes = 1
     }
 
     #[test]
-    fn relative_detection_defaults_off_and_validates() {
+    fn relative_detection_validation_is_finite_and_representable() {
         let cfg = Config::default();
         assert!(!cfg.detection.relative_enabled);
+        assert_eq!(cfg.detection.relative_min_samples, 8);
+        assert_eq!(cfg.detection.relative_min_breaches, 3);
         cfg.validate().unwrap();
+
         let mut bad = Config::default();
-        bad.detection.relative_factor = 0.5;
+        bad.detection.relative_factor = f64::NAN;
         assert!(bad.validate().is_err());
-        bad.detection.relative_factor = 5.0;
-        bad.detection.relative_floor_rps = 0.0;
+        bad.detection.relative_factor = f64::INFINITY;
+        assert!(bad.validate().is_err());
+        bad.detection.relative_factor = 1.0;
+        bad.detection.relative_floor_rps = f64::NAN;
+        assert!(bad.validate().is_err());
+        bad.detection.relative_floor_rps = 1.0;
+        bad.detection.relative_min_samples = 0;
+        assert!(bad.validate().is_err());
+        bad.detection.relative_min_samples = 256;
+        assert!(bad.validate().is_err());
+        bad.detection.relative_min_samples = 8;
+        bad.detection.relative_min_breaches = 0;
         assert!(bad.validate().is_err());
     }
 

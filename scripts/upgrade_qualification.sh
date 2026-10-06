@@ -2,7 +2,7 @@
 # Fail-closed upgrade and rollback qualification.
 set -euo pipefail
 PREFIX="${1:-/tmp/ramshield_upgrade_test}"
-OLD_TAG="${2:-v0.3.3}"
+OLD_TAG="${2:-v0.3.4}"
 NEW_TAG="$(scripts/release_version.sh)"
 [[ "$OLD_TAG" != "v$NEW_TAG" ]] || { echo 'old and new release are identical' >&2; exit 1; }
 NEW="$PREFIX/new"; OLD="$PREFIX/old"; WAL="$PREFIX/wal"; CFG="$PREFIX/config.toml"
@@ -53,9 +53,6 @@ promote_min_events=1000
 [xdp]
 enabled=false
 CFG
-start(){
-  "$1" --config "$CFG" & echo $!
-}
 wait_ready(){
   local i
   for i in {1..50}; do
@@ -65,18 +62,26 @@ wait_ready(){
   return 1
 }
 stop(){ kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
-OLD_PID=$(start "$OLD/target/release/ramshield"); wait_ready
+"$OLD/target/release/ramshield" --config "$CFG" >/dev/null 2>&1 &
+OLD_PID=$!
+wait_ready
 CLI_ADDR=(--addr 127.0.0.1:17890)
 export RAMSHIELD_IPC_KEY=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
 "$OLD/target/release/ramshield-cli" "${CLI_ADDR[@]}" block 203.0.113.7 --reason upgrade-test --ttl 120
 stop "$OLD_PID"
-NEW_PID=$(start "$NEW/ramshield"); wait_ready
+"$NEW/ramshield" --config "$CFG" >/dev/null 2>&1 &
+NEW_PID=$!
+wait_ready
 "$NEW/ramshield-cli" "${CLI_ADDR[@]}" check 203.0.113.7 | grep -q '"blocked": true'
 stop "$NEW_PID"
-NEW_PID=$(start "$NEW/ramshield"); wait_ready
+"$NEW/ramshield" --config "$CFG" >/dev/null 2>&1 &
+NEW_PID=$!
+wait_ready
 "$NEW/ramshield-cli" "${CLI_ADDR[@]}" block 198.51.100.1 --reason rollback-test --ttl 120
 stop "$NEW_PID"
-OLD_PID=$(start "$OLD/target/release/ramshield"); wait_ready
+"$OLD/target/release/ramshield" --config "$CFG" >/dev/null 2>&1 &
+OLD_PID=$!
+wait_ready
 "$OLD/target/release/ramshield-cli" "${CLI_ADDR[@]}" check 198.51.100.1 | grep -q '"blocked": true'
 stop "$OLD_PID"
 printf 'PASS: upgrade and rollback preserve enforcement state (%s -> %s)\n' "$OLD_TAG" "v$NEW_TAG"

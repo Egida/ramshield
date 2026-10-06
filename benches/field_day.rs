@@ -389,6 +389,7 @@ fn storage_get_all_blocked_ips_10k(n: usize) -> f64 {
             baseline_rps: 0.0,
             prev_sample_hot: false,
             sample_count: 0,
+            relative_breach_streak: 0,
             pulse_samples_in_window: 0,
             pulse_window_start_ns: 0,
             first_seen_ns: 0,

@@ -131,3 +131,19 @@ Existing:
 has no cheap O(1) assertion — the reconciliation tick is the proof, and it runs
 continuously. If the schedule → map synchronisation ever fails it is caught by
 integration/diagnostic tests, not by a unit‑level assertion.
+
+### Relative detection
+
+- The relative detector is opt-in and default-off.
+- Relative thresholds use the prior slow baseline; the current sample cannot
+  move its own threshold.
+- Relative breach state lives on `IpRecord` and is serialized with it; no
+  second per-IP detector map is authoritative.
+- A relative block requires both maturity and consecutive breach criteria.
+
+### XDP projection freshness
+
+- The engine owns the projection freshness threshold.
+- Dashboard and Prometheus expose the same engine-derived stale value.
+- A configured active XDP dataplane with stale projection cannot report fully
+  healthy; fallback policy determines Degraded versus Failed.
