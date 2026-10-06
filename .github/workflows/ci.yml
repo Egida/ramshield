@@ -90,3 +90,5 @@ jobs:
       # CI run 35391325896 for >10 min on bench_batch_aggregate.
       # Match review_pipeline.sh: unit/integration tests only.
       - run: cargo test --workspace --locked --features full
+      - name: Verify C SHM ABI
+        run: scripts/verify_shm_header.sh

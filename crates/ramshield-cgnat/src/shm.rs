@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 pub const SHM_TABLE_CAPACITY: usize = 65_536; // 64K rule slots
+pub const SHM_PROBE_LIMIT: usize = 4;
 
 /// Stable Rust/C slot key for an IPv4 network prefix.
 pub fn subnet_key(network: u32, prefix_len: u8) -> u64 {
@@ -58,12 +59,19 @@ impl ShmTableManager {
 
     pub fn open_or_create(path: &Path) -> std::io::Result<Self> {
         let total_size = SHM_TABLE_CAPACITY * std::mem::size_of::<ShmRuleEntry>();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let file = opts.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
 
         // Grow-only initialization. Never shrink or truncate an active mapping:
         // readers that still hold the old mapping cannot receive SIGBUS from a
@@ -90,6 +98,9 @@ impl ShmTableManager {
         unsafe { &*(self.mmap.as_ptr().add(offset) as *const ShmRuleEntry) }
     }
 
+    /// Publish into the first matching, empty, or expired slot in the bounded
+    /// probe window. Returning false means the window is saturated; callers
+    /// must not pretend the SHM projection succeeded.
     pub fn publish_rule(
         &self,
         client_hash: u64,
@@ -97,13 +108,39 @@ impl ShmTableManager {
         tier: u8,
         max_rps: u16,
         is_shared: bool,
-    ) {
+    ) -> bool {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let slot = self.get_slot(client_hash as usize);
+        let primary = client_hash as usize & (SHM_TABLE_CAPACITY - 1);
+        let mut selected = None;
+
+        // Prefer an existing rule before considering reusable slots. This keeps
+        // the probe sequence canonical and prevents an expired earlier slot
+        // from creating a duplicate of a still-live later slot.
+        for probe in 0..SHM_PROBE_LIMIT {
+            let slot = self.get_slot(primary.wrapping_add(probe));
+            if slot.client_hash.load(Ordering::Acquire) == client_hash {
+                selected = Some(slot);
+                break;
+            }
+        }
+        if selected.is_none() {
+            for probe in 0..SHM_PROBE_LIMIT {
+                let slot = self.get_slot(primary.wrapping_add(probe));
+                let existing = slot.client_hash.load(Ordering::Acquire);
+                let expires = slot.expires_at_ms.load(Ordering::Acquire);
+                if existing == 0 || expires <= now_ms {
+                    selected = Some(slot);
+                    break;
+                }
+            }
+        }
+        let Some(slot) = selected else {
+            return false;
+        };
         let flags = if is_shared { FLAG_SHARED_INFRA } else { 0 };
 
         // Seqlock publication: odd means a reader must retry; the final even
@@ -117,15 +154,23 @@ impl ShmTableManager {
         slot.tier.store(tier, Ordering::Relaxed);
         slot.max_rps.store(max_rps, Ordering::Relaxed);
         slot.flags.store(flags, Ordering::Relaxed);
-        slot.expires_at_ms.store(now_ms + ttl_ms, Ordering::Relaxed);
+        slot.expires_at_ms
+            .store(now_ms.saturating_add(ttl_ms), Ordering::Relaxed);
         slot.client_hash.store(client_hash, Ordering::Relaxed);
         slot.seq.fetch_add(1, Ordering::Release);
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abi_is_fixed_and_cache_aligned() {
+        assert_eq!(std::mem::size_of::<ShmRuleEntry>(), 128);
+        assert_eq!(std::mem::align_of::<ShmRuleEntry>(), 64);
+    }
 
     #[test]
     fn publish_ends_with_even_seqlock_and_open_never_shrinks_file() {
@@ -140,7 +185,7 @@ mod tests {
         let total = SHM_TABLE_CAPACITY * std::mem::size_of::<ShmRuleEntry>();
         {
             let manager = ShmTableManager::open_or_create(&path).unwrap();
-            manager.publish_rule(7, 60_000, 3, 0, false);
+            assert!(manager.publish_rule(7, 60_000, 3, 0, false));
             assert_eq!(manager.get_slot(7).seq.load(Ordering::Acquire) % 2, 0);
         }
         std::fs::OpenOptions::new()
@@ -153,6 +198,77 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             (total + 4096) as u64
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bounded_probe_preserves_colliding_rules() {
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manager = ShmTableManager::open_or_create(&path).unwrap();
+        let a = 7u64;
+        let b = a + SHM_TABLE_CAPACITY as u64;
+        assert!(manager.publish_rule(a, 60_000, 2, 0, false));
+        assert!(manager.publish_rule(b, 60_000, 3, 0, false));
+        assert_eq!(
+            manager
+                .get_slot(a as usize)
+                .client_hash
+                .load(Ordering::Acquire),
+            a
+        );
+        assert_eq!(
+            manager
+                .get_slot(a as usize + 1)
+                .client_hash
+                .load(Ordering::Acquire),
+            b
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ttl_saturates_instead_of_wrapping() {
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-ttl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manager = ShmTableManager::open_or_create(&path).unwrap();
+        assert!(manager.publish_rule(17, u64::MAX, 3, 0, false));
+        assert_eq!(
+            manager.get_slot(17).expires_at_ms.load(Ordering::Acquire),
+            u64::MAX
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shm_file_is_owner_only_on_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _manager = ShmTableManager::open_or_create(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
         let _ = std::fs::remove_file(path);
     }

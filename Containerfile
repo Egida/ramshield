@@ -1,5 +1,5 @@
 # Containerfile for RamShield.
-# Two-stage build; final image is a static binary on distroless.
+# Two-stage build; final image contains the glibc-linked release binary on a minimal distroless runtime.
 #
 #   docker build -t ghcr.io/grep999/ramshield:${RAMSHIELD_VERSION} .
 #   docker push ghcr.io/grep999/ramshield:${RAMSHIELD_VERSION}
@@ -45,7 +45,7 @@ EXPOSE 7890 9999
 ENTRYPOINT ["/usr/local/bin/ramshield"]
 
 LABEL org.opencontainers.image.title="RamShield" \
-      org.opencontainers.image.description="Autonomous ingress defense daemon" \
+      org.opencontainers.image.description="Self-hosted Linux ingress defense daemon" \
       org.opencontainers.image.version="${RAMSHIELD_VERSION}" \
       org.opencontainers.image.source="https://github.com/grep999/ramshield" \
       org.opencontainers.image.licenses="MIT"

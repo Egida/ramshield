@@ -23,15 +23,23 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: {tool: cargo-deny}
       - uses: sigstore/cosign-installer@v3.8.1
+      - name: Install bpf-linker
+        run: |
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       - name: Verify release identity
         run: test "${GITHUB_REF_NAME}" = "v$(scripts/release_version.sh)"
       - name: Rust release gates
         run: |
+          scripts/verify_shm_header.sh
           cargo fmt --all -- --check
           cargo check --workspace --locked --all-targets --features full
           cargo clippy --workspace --locked --all-targets --features full -- -D warnings
           cargo test --workspace --locked --features full
-          cargo audit --locked
+          cargo audit --no-yanked
           cargo deny check
       - name: Build release binaries
         shell: bash

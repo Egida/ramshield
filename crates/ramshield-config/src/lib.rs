@@ -726,14 +726,30 @@ impl Config {
 
         // Forecasting config validation
         if self.forecasting.enabled {
-            if !(0.0..=1.0).contains(&self.forecasting.ewma_alpha) {
-                anyhow::bail!("forecasting.ewma_alpha must be in range [0.0, 1.0]");
+            if !self.forecasting.ewma_alpha.is_finite()
+                || !(0.0..=1.0).contains(&self.forecasting.ewma_alpha)
+            {
+                anyhow::bail!("forecasting.ewma_alpha must be finite and in range [0.0, 1.0]");
+            }
+            if !self.forecasting.hw_beta.is_finite()
+                || !(0.0..=1.0).contains(&self.forecasting.hw_beta)
+            {
+                anyhow::bail!("forecasting.hw_beta must be finite and in range [0.0, 1.0]");
+            }
+            if !self.forecasting.hw_gamma.is_finite()
+                || !(0.0..=1.0).contains(&self.forecasting.hw_gamma)
+            {
+                anyhow::bail!("forecasting.hw_gamma must be finite and in range [0.0, 1.0]");
             }
             if self.forecasting.seasonality_period == 0 {
                 anyhow::bail!("forecasting.seasonality_period must be > 0");
             }
-            if self.forecasting.anomaly_zscore < 1.0 {
-                anyhow::bail!("forecasting.anomaly_zscore should be at least 1.0");
+            if !self.forecasting.anomaly_zscore.is_finite() || self.forecasting.anomaly_zscore < 1.0
+            {
+                anyhow::bail!("forecasting.anomaly_zscore must be finite and at least 1.0");
+            }
+            if !self.forecasting.min_entropy.is_finite() || self.forecasting.min_entropy < 0.0 {
+                anyhow::bail!("forecasting.min_entropy must be finite and >= 0");
             }
         }
 
@@ -1100,6 +1116,34 @@ retention_max_bytes = 1
         bad.detection.relative_min_samples = 8;
         bad.detection.relative_min_breaches = 0;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn forecasting_validation_rejects_non_finite_and_out_of_range_values() {
+        let mut cfg = Config::default();
+        cfg.forecasting.enabled = true;
+
+        cfg.forecasting.hw_beta = f64::NAN;
+        assert!(cfg.validate().is_err());
+        cfg.forecasting.hw_beta = 0.1;
+
+        cfg.forecasting.hw_gamma = f64::INFINITY;
+        assert!(cfg.validate().is_err());
+        cfg.forecasting.hw_gamma = 0.1;
+
+        cfg.forecasting.anomaly_zscore = f64::NAN;
+        assert!(cfg.validate().is_err());
+        cfg.forecasting.anomaly_zscore = 2.5;
+
+        cfg.forecasting.min_entropy = f64::NEG_INFINITY;
+        assert!(cfg.validate().is_err());
+        cfg.forecasting.min_entropy = 2.0;
+
+        cfg.forecasting.hw_beta = 1.1;
+        assert!(cfg.validate().is_err());
+        cfg.forecasting.hw_beta = 0.1;
+        cfg.forecasting.hw_gamma = -0.1;
+        assert!(cfg.validate().is_err());
     }
 
     #[cfg(test)]

@@ -6,23 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 
 ## [0.4.0] - 2026-10-05
 
+### Release hardening
+- Close the v0.4.0 release spine: version identity, signed archives, SPDX SBOM, provenance attestation, dependency audit gates, upgrade/rollback qualification, and pinned Kubernetes image references.
+- Surface XDP projection mutation failures immediately as stale protection health while preserving the existing reconciliation recovery path.
+- Harden the experimental relative detector with finite configuration validation, prior-baseline evaluation, maturity gating, consecutive-breach hysteresis, and a frozen reference baseline during an active breach streak.
+- Harden the shared-memory projection with bounded collision probing, explicit owner-only file creation, TTL saturation, and explicit saturation reporting.
+
+### Verification contract
+- The v0.4.0 tag must point at the same commit as the release candidate branch.
+- Release qualification requires fmt, check, Clippy, workspace tests, dependency audit, cargo-deny, release identity, artifact verification, and platform-specific XDP qualification where XDP is enabled.
+
 ## [0.3.4] - 2026-10-05
-
-### Enterprise release closure
-- Add a single release identity, pinned signed installer, SPDX SBOM, provenance attestation, and hard dependency-audit gating.
-- Make upgrade and rollback qualification fail closed on enforcement-state loss.
-- Pin production Kubernetes images to the release version and document the enterprise qualification contract.
-
-### Production hardening closure
-- Hardened the experimental relative detector with finite configuration validation, prior-baseline evaluation, maturity gating, and consecutive-breach hysteresis.
-- Exposed XDP projection staleness consistently through the dashboard snapshot and Prometheus.
-- Seed CIDR checkpoint recovery from the snapshot and replay the WAL tail symmetrically with IP state, including tail `UnblockCidr` equivalence.
-- Make stale XDP reconciliation a protection-health failure/degradation signal rather than treating attachment alone as healthy.
-- Honor `xdp.mode = native` as native/driver XDP instead of silently downgrading to SKB.
-- Refuse readiness when required detection workers cannot start; bound worker fan-out and IPC connections.
-- Reject duplicate IPC key IDs and public plaintext dashboard binds.
-- Make checkpoint snapshots private (`0600`) and align active release artifacts on the 0.4.0 version.
-- Separate Kubernetes server and node-guard selectors/configuration; keep control-plane sockets loopback-only.
 
 ### Enterprise release closure
 - Add a single release identity, pinned signed installer, SPDX SBOM, provenance attestation, and hard dependency-audit gating.
@@ -42,45 +36,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) and releases 
 - Relative / small-scale gate config + decision path (`relative_enabled`, default **false**): promoted IPs may block when `inst_rps >= max(floor, factor × baseline)` after `relative_min_samples`. No per-IP side map on the hot path.
 
 ### Added
-- `docs/QUALIFICATION_MATRIX.md`: 17-dimension qualification matrix
-  (P1 #33) mapping each audit §33 row to a concrete test artifact and
-  live status.
-- `scripts/qualification_check.sh`: automated per-row verifier
-  (`--quick` / `--json`, exit code = fail count).
-- `disk_full_append_maps_to_diskfull_error` in `crates/ramwal/`
-  (P1 #32 gap #10): ENOSPC fault-injected via `fail_next_diskfull()`
-  test seam; proves `StorageFull → Error::DiskFull` mapping, poison
-  transition, and reopen recovery.
-- `docs/INVARIANTS.md`: WAL/Store/Checkpoint invariant contracts
-  (P1 #32), cross-referenced from ARCHITECTURE.md.
-- `wal_lsn_invariants` test: written ≥ durable, ckpt ≤ durable
-  assertion after every append/sync/checkpoint transition.
-- ansible `qualification` role: runs matrix checker, advisory by
-  default, wired into both playbooks.
-
-### Changed
-- ansible protect guardrail now asserts `ramshield_uptime_seconds`,
-  `ramshield_requests_total`, `ramshield_ingest_channel_depth`
-  (matches actual /metrics output; previous guard asserted
-  `cpu_usage`/`memory_usage_mb` which the daemon does not export).
-- Toolchain pinned to `nightly-2026-08-29` (P1 #21/#30).
-- `dtolnay/rust-toolchain` action pinned to `@v1` with `toolchain:`
-  input (P1 #30 CI reproducibility).
-
-### Fixed
-- CIDR detention no longer mutates per-IP state. A prefix command carries
-  its network address as the representative IP (`198.51.100.0/24` arrives
-  as `ip = 198.51.100.0`), and the old code ran the explicit-IP path
-  unconditionally. Consequences now gone:
-  - blocking a `/24` no longer creates a phantom explicit IP block on the
-    network address;
-  - unblocking a `/24` no longer destroys a real explicit IP block on that
-    address;
-  - unblocking a `/24` no longer publishes a spurious mesh CRDT unban for
-    the network address to every peer.
-  Per-IP and prefix detention are now independent state domains: a prefix
-  unblock releases only the prefix (its expiration, its checkpoint mirror,
-  and its `active_cidrs` entry), leaving every member's own block intact.
+- `docs/QUALIFICATION_MATRIX.md`: 17-dimension qualification matrix mapping each audit row to a concrete test artifact and live status.
+- `scripts/qualification_check.sh`: automated per-row verifier (`--quick` / `--json`, exit code = fail count).
+- `disk_full_append_maps_to_diskfull_error` in `crates/ramwal/`: ENOSPC fault-injected via `fail_next_diskfull()` test seam; proves `StorageFull → Error::DiskFull` mapping, poison transition, and reopen recovery.
+- `docs/INVARIANTS.md`: WAL/Store/Checkpoint invariant contracts, cross-referenced from ARCHITECTURE.md.
+- `wal_lsn_invariants` test: written ≥ durable, checkpoint ≤ durable assertion after every append/sync/checkpoint transition.
+- Ansible `qualification` role: runs matrix checker, advisory by default, wired into both playbooks.
 
 ## [0.3.2] - 2026-09-29
 

@@ -1,79 +1,70 @@
 # RamShield on Kubernetes
 
-Minimal, opinion-free manifests to run RamShield as a sidecar-style daemon
-next to your reverse proxy. **No operator yet** — these are the
-`Deployment`/`Service`/`ConfigMap` basics. A real operator (rolling config
-updates, WAL PVC orchestration, XDP-aware scheduling) is on the roadmap.
+RamShield has two intentionally different Kubernetes profiles. The ordinary
+server Deployment keeps control surfaces on loopback and runs without XDP.
+The node-guard DaemonSet uses host networking and the host BPF filesystem when
+XDP enforcement is required.
 
-## Files
+## Manifests
 
 | File | Purpose |
-|------|---------|
-| `namespace.yaml` | `ramshield` namespace |
-| `configmap.yaml` | Default `config.toml` (IPC + dashboard bound to `0.0.0.0`) |
-| `deployment.yaml` | 1-replica Deployment; mount ConfigMap, WAL on `emptyDir` |
-| `service.yaml`    | ClusterIP for IPC (7890) and dashboard (9999) |
-| `rbac.yaml`       | ServiceAccount + minimal role for `ConfigMap` read |
-| `networkpolicy.yaml` | Default-deny ingress + dashboard/IPC carve-outs |
-| `poddisruptionbudget.yaml` | PDB: minAvailable=1 (single replica) |
+| --- | --- |
+| `namespace.yaml` | Namespace |
+| `configmap.yaml` | Loopback-only server configuration; XDP disabled |
+| `deployment.yaml` | Single-replica server; local WAL on `emptyDir` |
+| `node-configmap.yaml` | Node-guard configuration |
+| `daemonset.yaml` | Host-network XDP node guard |
+| `rbac.yaml` | Service account / minimal RBAC |
+| `networkpolicy.yaml` | Network restrictions |
+| `poddisruptionbudget.yaml` | Single-replica availability policy |
 
-## Why no `StatefulSet`?
+There is deliberately **no ClusterIP service for IPC or the dashboard**. Use
+`kubectl port-forward` or an explicitly configured authenticated TLS/mTLS
+proxy.
 
-The WAL currently uses local disk. In a multi-replica deployment each pod
-would have its own WAL — fine for in-memory state (DashMap is per-process)
-but not for cross-replica durability. Until WAL ships a shared-backend
-mode, **run RamShield as a single replica**, possibly with
-`PodDisruptionBudget: maxUnavailable=0`.
+## Server profile
 
-## Why no operator?
-
-Operators are real engineering work. Until we have:
-
-- a reason to run more than one replica with shared state, **or**
-- a frequent need for safe config reload without restart,
-
-a static Deployment is the right tool. Adding a CRD before it's needed is
-the kind of scaffolding `ponytail:` notes are for.
-
-## Apply
+The ordinary Deployment uses loopback-only IPC/dashboard, XDP disabled, one
+replica because the WAL is local to the pod, a read-only root filesystem, and
+no Linux capabilities.
 
 ```bash
-# 1) Build & push the image (one-time per release)
-docker build -t ghcr.io/grep999/ramshield:0.4.0 .
+kubectl -n ramshield port-forward pod/<ramshield-pod> 9999:9999
+```
+
+The dashboard password hash and IPC authentication key come from the
+`ramshield-admin` Secret.
+
+## Node-guard / XDP profile
+
+The DaemonSet uses `hostNetwork: true`, the host `/sys/fs/bpf`, memory-backed
+`/dev/shm`, a host WAL directory, non-root UID/GID 65532, RuntimeDefault
+seccomp, privilege escalation disabled, and only `NET_ADMIN`, `BPF`, and
+`PERFMON` capabilities. `BPF` is the Kubernetes capability name corresponding
+to Linux `CAP_BPF`.
+
+XDP remains kernel/driver/NIC dependent and must be qualified on target nodes.
+
+## Build and deploy
+
+```bash
+docker build --build-arg RAMSHIELD_VERSION=0.4.0 -t ghcr.io/grep999/ramshield:0.4.0 .
 docker push ghcr.io/grep999/ramshield:0.4.0
-
-# 2) Apply manifests
 kubectl apply -f deploy/k8s/
-
-# 3) Reach the dashboard
-kubectl -n ramshield port-forward svc/ramshield-dashboard 9999:9999
-# Open http://localhost:9999
 ```
 
-**The container image is not pre-built.** The `Containerfile` at the repo
-root produces a `distroless/cc-debian12:nonroot` image (glibc runtime;
-static-debian12 is too minimal for the glibc-linked binary); the
-`ghcr.io/grep999/ramshield:0.4.0` reference in `deployment.yaml` will
-fail with `ImagePullBackOff` until you build and push it. CI builds are
-tracked under issue #128 (to be filed at PR merge).
+Do not deploy `latest`; release identity comes from the tagged release.
 
-## Admin password (mandatory when binding public interfaces)
+## Storage model
 
-The dashboard binds `0.0.0.0:9999` (all interfaces) in the default configmap.
-`daemonset.yaml` sets `optional: false` on the `argon2-hash` Secret — the pod
-**refuses to start** without it. Create the secret before deploying:
+The server Deployment is intentionally single-replica. Each process owns its
+WAL and in-memory enforcement state. Multiple replicas without a shared WAL
+and coordinated authoritative state would create independent enforcement
+truths.
 
-```bash
-echo -n 'your-admin-password' | \
-  argon2 "$(head -c16 /dev/urandom | xxd -p)" -id -e | \
-  kubectl -n ramshield create secret generic ramshield-admin \
-    --from-literal=argon2-hash="$(cat)" \
-    --from-literal=ipc-auth-key="k1:$(openssl rand -hex 32)"
-```
+## Health
 
-## XDP
-
-The Deployment runs **without** XDP (`[xdp] enabled = false`) because K8s
-pods don't own host network devices. To enable XDP, run RamShield on a
-`hostNetwork: true` node with the `CAP_SYS_ADMIN` + `CAP_NET_ADMIN`
-capabilities and a dedicated NIC.
+`/healthz` is the liveness/readiness contract. With XDP configured and no
+allowed fallback, attach failure or a stale projection affects health according
+to the enforcement configuration. `/metrics` is Prometheus text exposition,
+not JSON.

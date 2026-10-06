@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 
 #define RAMSHIELD_SHM_TABLE_CAPACITY 65536
+#define RAMSHIELD_SHM_PROBE_LIMIT 4
 #define RAMSHIELD_FLAG_SHARED_INFRA 0x01
 
 static inline uint64_t
@@ -40,6 +41,9 @@ typedef struct __attribute__((aligned(64))) {
     uint8_t          _padding[26];
 } RamshieldShmRuleEntry;
 
+_Static_assert(sizeof(RamshieldShmRuleEntry) == 128,
+               "RamshieldShmRuleEntry ABI must remain 128 bytes");
+
 typedef struct {
     uint64_t client_hash;
     uint64_t expires_at_ms;
@@ -65,39 +69,47 @@ ramshield_shm_read(const RamshieldShmRuleEntry *table,
                    uint64_t now_ms,
                    RamshieldShmRuleSnapshot *out)
 {
-    uint32_t idx = (uint32_t)(hash & (RAMSHIELD_SHM_TABLE_CAPACITY - 1));
-    const RamshieldShmRuleEntry *entry = &table[idx];
+    uint32_t primary = (uint32_t)(hash & (RAMSHIELD_SHM_TABLE_CAPACITY - 1));
 
-    for (unsigned attempt = 0; attempt < 64; ++attempt) {
-        uint32_t before = atomic_load_explicit(&entry->seq, memory_order_acquire);
-        if (before & 1u) continue;
+    for (unsigned probe = 0; probe < RAMSHIELD_SHM_PROBE_LIMIT; ++probe) {
+        const RamshieldShmRuleEntry *entry =
+            &table[(primary + probe) & (RAMSHIELD_SHM_TABLE_CAPACITY - 1)];
 
-        uint64_t client_hash = atomic_load_explicit(&entry->client_hash, memory_order_relaxed);
-        uint64_t expires_at_ms = atomic_load_explicit(&entry->expires_at_ms, memory_order_relaxed);
-        uint16_t max_rps = atomic_load_explicit(&entry->max_rps, memory_order_relaxed);
-        uint8_t tier = atomic_load_explicit(&entry->tier, memory_order_relaxed);
-        uint8_t flags = atomic_load_explicit(&entry->flags, memory_order_relaxed);
-        uint8_t challenge_seed[16];
-        for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
-            challenge_seed[i] = entry->challenge_seed[i];
+        for (unsigned attempt = 0; attempt < 64; ++attempt) {
+            uint32_t before = atomic_load_explicit(&entry->seq, memory_order_acquire);
+            if (before & 1u) continue;
 
-        /* Fence: the payload reads (and the plain challenge_seed bytes) must
-         * complete before the seq re-read, or the re-read can pass while the
-         * values were observed mid-write. Canonical C11 seqlock reader: the
-         * re-read itself may then be relaxed. */
-        atomic_thread_fence(memory_order_acquire);
-        uint32_t after = atomic_load_explicit(&entry->seq, memory_order_relaxed);
-        if (before != after || (after & 1u)) continue;
-        if (client_hash != hash || expires_at_ms <= now_ms) return false;
+            uint64_t client_hash = atomic_load_explicit(&entry->client_hash, memory_order_relaxed);
+            uint64_t expires_at_ms = atomic_load_explicit(&entry->expires_at_ms, memory_order_relaxed);
+            uint16_t max_rps = atomic_load_explicit(&entry->max_rps, memory_order_relaxed);
+            uint8_t tier = atomic_load_explicit(&entry->tier, memory_order_relaxed);
+            uint8_t flags = atomic_load_explicit(&entry->flags, memory_order_relaxed);
+            uint8_t challenge_seed[16];
+            for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
+                challenge_seed[i] = entry->challenge_seed[i];
 
-        out->client_hash = client_hash;
-        out->expires_at_ms = expires_at_ms;
-        out->max_rps = max_rps;
-        out->tier = tier;
-        out->flags = flags;
-        for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
-            out->challenge_seed[i] = challenge_seed[i];
-        return true;
+            atomic_thread_fence(memory_order_acquire);
+            uint32_t after = atomic_load_explicit(&entry->seq, memory_order_relaxed);
+            if (before != after || (after & 1u)) continue;
+
+            if (client_hash == hash && expires_at_ms > now_ms) {
+                out->client_hash = client_hash;
+                out->expires_at_ms = expires_at_ms;
+                out->max_rps = max_rps;
+                out->tier = tier;
+                out->flags = flags;
+                for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
+                    out->challenge_seed[i] = challenge_seed[i];
+                return true;
+            }
+
+            // Empty terminates the probe: writers never place a rule beyond
+            // the first empty candidate. Expired entries are skipped because
+            // an older rule may have expired while a later live collision
+            // remains in the bounded probe window.
+            if (client_hash == 0) break;
+            continue;
+        }
     }
     return false;
 }

@@ -19,6 +19,11 @@ grep -q 'ramshield-${VERSION}-${TARGET}.tar.gz' scripts/install.sh && ok 'instal
 grep -q 'config.baseline.toml' .github/workflows/release.yml && ok 'release config asset' || bad 'release config asset'
 grep -q 'ReadWritePaths=.*sys/fs/bpf' scripts/install.sh deploy/systemd/ramshield.service && ok 'XDP filesystem access' || bad 'XDP filesystem access'
 grep -q 'RAMSHIELD_IPC_KEY' scripts/upgrade_qualification.sh && ok 'qualification IPC auth' || bad 'qualification IPC auth'
+grep -q 'mark_xdp_projection_stale' crates/ramshield-metrics/src/lib.rs && grep -q 'mark_xdp_projection_stale' crates/ramshield-enforcement/src/lib.rs && ok 'XDP mutation failures mark projection stale' || bad 'XDP stale failure path'
+grep -q 'SHM_PROBE_LIMIT' crates/ramshield-cgnat/src/shm.rs && grep -q 'RAMSHIELD_SHM_PROBE_LIMIT' crates/ramshield-cgnat/include/ramshield_shm.h && ok 'SHM Rust/C probe contract' || bad 'SHM probe contract'
+grep -q 'mode(0o600)' crates/ramwal/src/segment.rs crates/ramwal/src/wal.rs crates/ramshield-cgnat/src/shm.rs && ok 'owner-only state files' || bad 'owner-only state files'
+grep -q '^## \[0.4.0\]' CHANGELOG.md && grep -q '^## \[0.3.4\]' CHANGELOG.md && ok 'release history boundaries' || bad 'release history boundaries'
+[[ ! -f src/entry.rs ]] && ok 'obsolete duplicate SHM ABI removed' || bad 'obsolete duplicate SHM ABI remains'
 grep -q 'gcc-aarch64-linux-gnu' .github/workflows/release.yml && ok 'aarch64 linker setup' || bad 'aarch64 linker setup'
 grep -q '127.0.0.1:7890' deploy/k8s/configmap.yaml && ok 'Kubernetes IPC loopback' || bad 'Kubernetes IPC loopback'
 grep -q '127.0.0.1:9999' deploy/k8s/configmap.yaml && ok 'Kubernetes dashboard loopback' || bad 'Kubernetes dashboard loopback'
@@ -27,12 +32,14 @@ python3 -c 'import pathlib,tomllib; [tomllib.loads(p.read_text()) for p in pathl
 python3 -c 'import pathlib,yaml; [list(yaml.safe_load_all(p.read_text())) for p in pathlib.Path("deploy/k8s").glob("*.yaml")]' && ok 'Kubernetes YAML' || bad 'Kubernetes YAML'
 bash -n scripts/*.sh && ok 'shell syntax' || bad 'shell syntax'
 python3 -m compileall -q scripts && ok 'Python syntax' || bad 'Python syntax'
+scripts/verify_shm_header.sh && ok 'SHM C ABI' || bad 'SHM C ABI'
 if (( STATIC == 0 )); then
   cargo fmt --all -- --check && ok 'fmt' || bad 'fmt'
   cargo check --workspace --locked --all-targets --features full && ok 'check' || bad 'check'
   cargo clippy --workspace --locked --all-targets --features full -- -D warnings && ok 'clippy' || bad 'clippy'
   cargo test --workspace --locked --features full && ok 'tests' || bad 'tests'
   cargo audit --locked && ok 'audit' || bad 'audit'
+  cargo deny check && ok 'cargo-deny' || bad 'cargo-deny'
 fi
 printf 'release gate: %d pass, %d fail\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

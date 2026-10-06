@@ -1,4 +1,4 @@
-# RamShield — autonomous DDoS defense in Rust
+# RamShield — self-hosted Linux ingress defense in Rust
 Detects and blocks abusive traffic at the kernel (XDP/eBPF) level.
 For self-hosted/sovereign infra operators who can't afford enterprise DDoS mitigation.
 Run it locally or behind your reverse proxy.

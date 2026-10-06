@@ -522,7 +522,16 @@ impl Wal {
         let tmp_path = manifest_path.with_extension("tmp");
         drop(g); // release append lock before filesystem I/O
         let storage_result = (|| {
-            let mut f = File::create(&tmp_path).map_err(Error::from_io)?;
+            let mut f = {
+                let mut opts = std::fs::OpenOptions::new();
+                opts.create(true).write(true).truncate(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                opts.open(&tmp_path).map_err(Error::from_io)?
+            };
 
             writeln!(f, "lsn={}", lsn.get()).map_err(Error::from_io)?;
 

@@ -1048,18 +1048,38 @@ impl DetectionEngine {
                     );
                 }
 
-                // Update the slow baseline AFTER evaluating the current sample.
-                // The first sample seeds the baseline but cannot satisfy the
-                // relative maturity gate because there is no prior baseline.
-                rec.baseline_rps = if prior_baseline > 0.0 && prior_baseline.is_finite() {
-                    ewma_alpha_slow() * rec.ewma_rps + (1.0 - ewma_alpha_slow()) * prior_baseline
+                let relative_breach = if det.relative_enabled
+                    && prior_baseline.is_finite()
+                    && prior_baseline > 0.0
+                    && u32::from(rec.sample_count) >= det.relative_min_samples
+                {
+                    let need = (det.relative_factor * prior_baseline).max(det.relative_floor_rps);
+                    need.is_finite() && inst_rps.is_finite() && inst_rps >= need
                 } else {
-                    // Seed from the observed batch rate, not the cold-start fast
-                    // EWMA. Otherwise the first few samples can create an
-                    // artificially low baseline and trip the relative detector
-                    // during perfectly steady startup traffic.
-                    inst_rps
+                    false
                 };
+                if relative_breach {
+                    rec.relative_breach_streak = rec.relative_breach_streak.saturating_add(1);
+                } else {
+                    rec.relative_breach_streak = 0;
+                }
+
+                // Freeze the slow reference while a relative breach is being
+                // established. Otherwise the detector learns the attack rate
+                // into its own baseline and can outrun its breach hysteresis.
+                // A non-breach resumes normal adaptation.
+                if !relative_breach {
+                    rec.baseline_rps = if prior_baseline > 0.0 && prior_baseline.is_finite() {
+                        ewma_alpha_slow() * rec.ewma_rps
+                            + (1.0 - ewma_alpha_slow()) * prior_baseline
+                    } else {
+                        // Seed from the observed batch rate, not the cold-start fast
+                        // EWMA. Otherwise the first few samples can create an
+                        // artificially low baseline and trip the relative detector
+                        // during perfectly steady startup traffic.
+                        inst_rps
+                    };
+                }
 
                 let rps_score = (rec.ewma_rps / det_thr as f64).min(1.0);
                 let total: u32 = rec.status_dist.iter().sum();
@@ -1091,21 +1111,6 @@ impl DetectionEngine {
                 );
                 rec.pulse_samples_in_window = pulse_count;
                 rec.pulse_window_start_ns = pulse_start;
-                let relative_breach = if det.relative_enabled
-                    && prior_baseline.is_finite()
-                    && prior_baseline > 0.0
-                    && u32::from(rec.sample_count) >= det.relative_min_samples
-                {
-                    let need = (det.relative_factor * prior_baseline).max(det.relative_floor_rps);
-                    need.is_finite() && inst_rps.is_finite() && inst_rps >= need
-                } else {
-                    false
-                };
-                if relative_breach {
-                    rec.relative_breach_streak = rec.relative_breach_streak.saturating_add(1);
-                } else {
-                    rec.relative_breach_streak = 0;
-                }
                 let relative_fired = det.relative_enabled
                     && relative_breach
                     && rec.relative_breach_streak >= det.relative_min_breaches;
@@ -1354,14 +1359,20 @@ impl DetectionEngine {
                 std::net::IpAddr::V6(_) => sk as u64,
             };
             if subnet_tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
-                self.shm_table.publish_rule(
+                if self.shm_table.publish_rule(
                     shm_key,
                     cfg.detection.subnet_burst_ttl_secs * 1000,
                     subnet_tier,
                     0,
                     true,
-                );
-                self.metrics.inc_shm_publish();
+                ) {
+                    self.metrics.inc_shm_publish();
+                } else {
+                    warn!(
+                        subnet = ?cidr,
+                        "CGNAT SHM probe window saturated; userspace enforcement remains authoritative"
+                    );
+                }
             }
             if subnet_tier == ramshield_cgnat::CGNAT_TIER_BLOCK {
                 // The decision, in operator history — one row keyed by the
@@ -2495,6 +2506,11 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 0);
+        let baseline_before_attack = if let Value::IpRecord(r) = store.get(&ip).unwrap() {
+            r.baseline_rps
+        } else {
+            panic!("expected IpRecord, got something else");
+        };
 
         // One breach must not fire: hysteresis requires two consecutive breaches.
         let base = 8_000_000_000;
@@ -2513,6 +2529,16 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 0);
+        let baseline_after_first_breach = if let Value::IpRecord(r) = store.get(&ip).unwrap() {
+            r.baseline_rps
+        } else {
+            panic!("expected IpRecord, got something else");
+        };
+        assert_eq!(
+            baseline_after_first_breach.to_bits(),
+            baseline_before_attack.to_bits(),
+            "relative baseline must stay frozen during a breach streak"
+        );
 
         // Second consecutive breach fires. Absolute threshold remains unreachable.
         let base = 9_000_000_000;

@@ -53,7 +53,20 @@ pub fn list_segs_with_size(dir: &str) -> std::io::Result<Vec<(u64, PathBuf, u64)
 }
 
 pub fn open_segment(path: &PathBuf) -> std::io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 pub fn open_segment_read(path: &PathBuf) -> std::io::Result<File> {
