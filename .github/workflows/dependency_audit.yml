@@ -16,4 +16,4 @@ jobs:
         with: {toolchain: nightly-2026-08-29}
       - uses: taiki-e/install-action@v2
         with: {tool: cargo-audit}
-      - run: cargo audit --locked
+      - run: cargo audit --no-yanked

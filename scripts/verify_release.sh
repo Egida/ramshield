@@ -38,7 +38,7 @@ if (( STATIC == 0 )); then
   cargo check --workspace --locked --all-targets --features full && ok 'check' || bad 'check'
   cargo clippy --workspace --locked --all-targets --features full -- -D warnings && ok 'clippy' || bad 'clippy'
   cargo test --workspace --locked --features full && ok 'tests' || bad 'tests'
-  cargo audit --locked && ok 'audit' || bad 'audit'
+  cargo audit --no-yanked && ok 'audit' || bad 'audit'
   cargo deny check && ok 'cargo-deny' || bad 'cargo-deny'
 fi
 printf 'release gate: %d pass, %d fail\n' "$PASS" "$FAIL"

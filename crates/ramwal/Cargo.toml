@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 crc = "^3"
-lz4_flex = "^0.6"
+lz4_flex = "^0.12.1"
 
 [[bin]]
 name = "ramwal-cli"
