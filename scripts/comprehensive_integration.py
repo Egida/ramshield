@@ -22,7 +22,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 def _read(path):
-    return {"content": Path(path).read_text()}
+    """Read a module's source including submodules split into sibling files
+    (`lib.rs`/`mod.rs` -> whole directory, `foo.rs` -> `foo.rs` + `foo/`)."""
+    p = Path(path)
+    if p.name in ("lib.rs", "mod.rs"):
+        files = sorted(p.parent.rglob("*.rs"))
+    elif p.with_suffix("").is_dir():
+        files = [p] + sorted(p.with_suffix("").rglob("*.rs"))
+    else:
+        files = [p]
+    return {"content": "\n".join(f.read_text() for f in files)}
 
 read_file = _read
 

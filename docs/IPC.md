@@ -1,6 +1,6 @@
 # RamShield IPC Protocol
 
-Wire format: newline-delimited JSON over TCP. One JSON `Request` per line, one JSON `Response` per line. Server is `src/ipc/server.rs::IpcServer`; framing handled by `handle_connection`.
+Wire format: newline-delimited JSON over TCP. One JSON `Request` per line, one JSON `Response` per line. Server is `src/ipc/server.rs::IpcServer`; framing handled by `handle_connection` (`src/ipc/server/connection.rs`).
 
 Transport: TCP, address from `ipc.tcp_addr`, max concurrent connections from `ipc.max_connections`.
 
@@ -80,6 +80,6 @@ print(s.recv(4096).decode().strip()); s.close()
 
 - Types: `crates/ramshield-protocol/src/message.rs`
 - Auth + replay: `crates/ramshield-protocol/src/auth.rs` (`verify`, `verify_authenticated`, `ReplayStore`)
-- Authorization: `src/ipc/server.rs` (`Principal`, `authorize`)
-- Config: `crates/ramshield-config/src/lib.rs` (`IpcConfig`, `KeyRole`, `KeyRoleConfig`)
-- Server / framing: `src/ipc/server.rs` (`IpcServer`, `handle_connection`, `process_request`)
+- Authorization: `src/ipc/server.rs` (`Principal`) and `src/ipc/server/auth.rs` (`authorize`, `verify_frame_auth`)
+- Config: `crates/ramshield-config/src/sections/ipc.rs` (`IpcConfig`, `KeyRole`, `KeyRoleConfig`)
+- Server / framing: `src/ipc/server.rs` (`IpcServer`), `src/ipc/server/connection.rs` (`handle_connection`), `src/ipc/server/handlers.rs` (`process_request`)

@@ -34,6 +34,12 @@ def find_test_lines(src_path: str) -> set[int]:
         brace_start = content.find("{", pos)
         if brace_start == -1:
             continue
+        # `#[cfg(test)] mod tests;` / `#[cfg(test)] use x;` declare no block
+        # here; without this guard the next production block was treated as
+        # test code and its unwrap()/expect() hits were silently dropped.
+        semi = content.find(";", pos)
+        if semi != -1 and semi < brace_start:
+            continue
         depth = 0
         line_no = content[:brace_start].count("\n") + 1
         for ch in content[brace_start:]:

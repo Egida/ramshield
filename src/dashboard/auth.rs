@@ -75,6 +75,8 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 impl AuthState {
     // ponytail: too_many_arguments suppressed intentionally — builder pattern
     // adds ceremony without clarity for a constructor called once at startup.
+    // collapsible_if is suppressed to keep the PHC validation below readable
+    // instead of folding it into a let-chain.
     #[allow(clippy::too_many_arguments, clippy::collapsible_if)]
     pub fn new(
         password_hash: Option<String>,
@@ -252,7 +254,7 @@ pub async fn require_auth(
     // ponytail: /static/ is dead — nothing serves it (the HUD is inlined via
     // include_str! in mod.rs). Leaving the prefix exemption is a latent
     // unauthenticated surface the moment a static mount is added. Drop it.
-    if path == "/healthz" || path == "/login" || path == "/metrics" {
+    if path == "/healthz" || path == "/livez" || path == "/login" || path == "/metrics" {
         return next.run(req).await;
     }
     let valid = req

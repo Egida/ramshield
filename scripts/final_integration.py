@@ -12,6 +12,22 @@ IPC_HOST, IPC_PORT = "127.0.0.1", 17890
 DASH_PORT = 19999
 DASH_URL = f"http://127.0.0.1:{DASH_PORT}"
 
+
+def read_module(rel: str) -> str:
+    """Source of a module including submodules split into sibling files
+    (`lib.rs`/`mod.rs` -> whole directory, `foo.rs` -> `foo.rs` + `foo/`)."""
+    path = os.path.join(REPO, rel)
+    base = os.path.basename(path)
+    if base in ("lib.rs", "mod.rs"):
+        root, files = os.path.dirname(path), []
+    elif os.path.isdir(path[:-3]):
+        root, files = path[:-3], [path]
+    else:
+        return open(path).read()
+    for dp, _, fs in sorted(os.walk(root)):
+        files += [os.path.join(dp, f) for f in sorted(fs) if f.endswith(".rs")]
+    return "\n".join(open(f).read() for f in files)
+
 def ipc(payload: dict, key_hex: str = "", timeout=5.0) -> dict:
     frame = dict(payload)
     if key_hex:
@@ -299,15 +315,15 @@ def audit_static():
     legit = ("spawn batch processor","spawn subnet batch loop","OUT_DIR","try_into().unwrap()","ponytail:")
     kept = [l for l in f.stdout.splitlines() if l.strip() and not any(x in l for x in legit)]
     c.ok(not kept, "no-unwrap gate (legit sites excluded)", "\n".join(kept[:6]))
-    src = open(REPO + "/src/ipc/server.rs").read()
+    src = read_module("src/ipc/server.rs")
     c.ok("config: ConfigHandle" in src, "H3 IpcServer holds ConfigHandle")
     c.ok("event_tx: Sender<ConnectionEvent>" in src, "H3 per-connection live keys")
     c.ok("config: &Config" not in src, "H3 old &Config sig gone")
-    eng = open(REPO + "/src/engine/mod.rs").read()
+    eng = read_module("src/engine/mod.rs")
     c.ok("cfg_handle.clone()" in eng, "H3 engine passes handle")
     auth = open(REPO + "/src/dashboard/auth.rs").read()
     c.ok("Path=/" in auth and "DashMap" in auth, "dashboard Path=/ + DashMap")
-    cfg = open(REPO + "/crates/ramshield-config/src/lib.rs").read()
+    cfg = read_module("crates/ramshield-config/src/lib.rs")
     c.ok("is_ascii_hexdigit" in cfg, "validate hex keys")
     c.ok("PasswordHash::new(" in cfg, "validate PHC hash")
     proto = open(REPO + "/crates/ramshield-protocol/src/auth.rs").read()

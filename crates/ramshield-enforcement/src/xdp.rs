@@ -175,8 +175,8 @@ fn bpf_elem_attr(fd: std::os::fd::RawFd, key: u64, value_or_next: u64, flags: u6
 /// bpf_map_get_next_key — returns next key after `prev`, or None at end.
 ///
 /// # Safety
-/// `fd` must be a valid BPF map file descriptor.
-#[allow(unsafe_code)]
+/// `fd` must be a valid BPF map file descriptor whose key size equals
+/// `size_of::<K>()`.
 unsafe fn raw_get_next_key<K: Copy>(
     fd: std::os::fd::RawFd,
     prev: Option<&K>,
@@ -185,6 +185,10 @@ unsafe fn raw_get_next_key<K: Copy>(
     let mut next = std::mem::MaybeUninit::<K>::uninit();
     let next_ptr = next.as_mut_ptr() as u64;
     let attr = bpf_elem_attr(fd, key_ptr, next_ptr, 0);
+    // SAFETY: `attr` is a live, fully initialized 32-byte bpf_attr buffer.
+    // `key_ptr` is null or points to a valid `K`, and `next_ptr` points to
+    // writable storage for one `K`; both outlive the syscall. The caller
+    // guarantees `fd` is a BPF map whose key size matches `K`.
     let ret = unsafe {
         libc::syscall(
             libc::SYS_bpf,
@@ -200,16 +204,21 @@ unsafe fn raw_get_next_key<K: Copy>(
         }
         return Err(e);
     }
+    // SAFETY: BPF_MAP_GET_NEXT_KEY succeeded, so the kernel wrote a complete
+    // key of `size_of::<K>()` bytes into `next`; `K: Copy` has no drop glue.
     Ok(Some(unsafe { next.assume_init() }))
 }
 
 /// bpf_map_delete_elem — remove `key` from the map.
 ///
 /// # Safety
-/// `fd` must be a valid BPF map file descriptor.
-#[allow(unsafe_code)]
+/// `fd` must be a valid BPF map file descriptor whose key size equals
+/// `size_of::<K>()`.
 unsafe fn raw_delete_elem<K: Copy>(fd: std::os::fd::RawFd, key: &K) -> std::io::Result<()> {
     let attr = bpf_elem_attr(fd, std::ptr::from_ref(key) as u64, 0, 0);
+    // SAFETY: `attr` is a live, fully initialized 32-byte bpf_attr buffer and
+    // its key pointer references `key`, which is valid for the whole syscall.
+    // The caller guarantees `fd` is a BPF map whose key size matches `K`.
     let ret = unsafe {
         libc::syscall(
             libc::SYS_bpf,
@@ -376,6 +385,8 @@ impl XdpApplier for AyaXdpApplier {
         // CLOCK_MONOTONIC — same clock as BPF's bpf_ktime_get_ns, so the
         // absolute expiry is comparable in-kernel.
         let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: `ts.as_mut_ptr()` points to writable storage for one
+        // `timespec`, and CLOCK_MONOTONIC is a valid clock id.
         let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) };
         if rc != 0 {
             return Err(map_err(std::io::Error::last_os_error()));
@@ -433,10 +444,15 @@ impl XdpApplier for AyaXdpApplier {
                 let fd_raw = m.map().fd().as_fd().as_raw_fd();
                 let mut prev_key: Option<BlocklistKey> = None;
                 loop {
+                    // SAFETY: `fd_raw` comes from the BLOCKLIST/BLOCKLIST6 map
+                    // borrowed as `m` for this whole closure, so it stays open;
+                    // both maps use 16-byte keys matching `BlocklistKey`.
                     let next = unsafe { raw_get_next_key(fd_raw, prev_key.as_ref()) };
                     match next {
                         Ok(Some(k)) => {
                             if !expected.contains(&k) {
+                                // SAFETY: same live map fd and 16-byte key
+                                // layout as the get-next-key call above.
                                 unsafe { raw_delete_elem(fd_raw, &k) }.map_err(MapError::from)?;
                                 stale_count += 1;
                             } else {

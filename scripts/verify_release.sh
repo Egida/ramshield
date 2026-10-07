@@ -19,7 +19,7 @@ grep -q 'ramshield-${VERSION}-${TARGET}.tar.gz' scripts/install.sh && ok 'instal
 grep -q 'config.baseline.toml' .github/workflows/release.yml && ok 'release config asset' || bad 'release config asset'
 grep -q 'ReadWritePaths=.*sys/fs/bpf' scripts/install.sh deploy/systemd/ramshield.service && ok 'XDP filesystem access' || bad 'XDP filesystem access'
 grep -q 'RAMSHIELD_IPC_KEY' scripts/upgrade_qualification.sh && ok 'qualification IPC auth' || bad 'qualification IPC auth'
-grep -q 'mark_xdp_projection_stale' crates/ramshield-metrics/src/lib.rs && grep -q 'mark_xdp_projection_stale' crates/ramshield-enforcement/src/lib.rs && ok 'XDP mutation failures mark projection stale' || bad 'XDP stale failure path'
+grep -Rq 'mark_xdp_projection_stale' crates/ramshield-metrics/src/ && grep -Rq 'mark_xdp_projection_stale' crates/ramshield-enforcement/src/ && ok 'XDP mutation failures mark projection stale' || bad 'XDP stale failure path'
 grep -q 'SHM_PROBE_LIMIT' crates/ramshield-cgnat/src/shm.rs && grep -q 'RAMSHIELD_SHM_PROBE_LIMIT' crates/ramshield-cgnat/include/ramshield_shm.h && ok 'SHM Rust/C probe contract' || bad 'SHM probe contract'
 grep -q 'mode(0o600)' crates/ramwal/src/segment.rs crates/ramwal/src/wal.rs crates/ramshield-cgnat/src/shm.rs && ok 'owner-only state files' || bad 'owner-only state files'
 grep -q '^## \[0.4.0\]' CHANGELOG.md && grep -q '^## \[0.3.4\]' CHANGELOG.md && ok 'release history boundaries' || bad 'release history boundaries'

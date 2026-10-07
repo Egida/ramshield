@@ -64,11 +64,14 @@ mod counter {
 fn inc_counter(slot: u32) {
     let ptr = COUNTERS.get_ptr_mut(slot);
     if let Some(p) = ptr {
+        // SAFETY: `get_ptr_mut` returned a valid pointer to this CPU's slot,
+        // and XDP runs non-preemptibly per CPU, so no other writer aliases it.
         unsafe { *p += 1 };
     }
 }
 
 fn emit_drop_event(slot: u32, ip: &[u8; 16]) {
+    // SAFETY: bpf_ktime_get_ns takes no arguments and has no preconditions.
     let ts = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
     let mut buf = [0u8; 26];
     buf[0..16].copy_from_slice(ip);
@@ -131,6 +134,7 @@ pub fn ramshield_xdp(ctx: XdpContext) -> u32 {
 
 fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
     let eth: *const EthHdr = ptr_at(&ctx, 0)?;
+    // SAFETY: `ptr_at` verified the full EthHdr lies within packet bounds.
     let mut proto = unsafe { (*eth).ether_type } as u16;
     let mut l3_off = EthHdr::LEN;
 
@@ -143,6 +147,8 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
         // comparing an integer offset directly with data_end lets the BPF
         // verifier lose the packet range and rejects the subsequent read.
         let vlan: *const [u8; 4] = ptr_at(&ctx, l3_off)?;
+        // SAFETY: `ptr_at` verified all 4 VLAN header bytes are in bounds;
+        // bytes 2..4 (the inner ethertype) are read unaligned.
         proto = unsafe { core::ptr::read_unaligned((vlan as *const u8).add(2) as *const u16) };
         l3_off += 4;
     }
@@ -151,6 +157,9 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
         let ip6: *const Ipv6Hdr = ptr_at(&ctx, l3_off)?;
         let mut key = [0u64; 2];
         let mut key_bytes = [0u8; 16];
+        // SAFETY: `ptr_at` verified the full Ipv6Hdr is in bounds, so its
+        // 16-byte src_addr is readable; `key` and `key_bytes` are distinct
+        // 16-byte locals, so the copies cannot overlap or overflow.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (*ip6).src_addr.as_ptr(),
@@ -162,7 +171,10 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
                 16,
             ));
         }
+        // SAFETY: the returned value is a plain u64 read once, immediately;
+        // a concurrent userspace update can only yield a stale expiry.
         if let Some(v) = unsafe { BLOCKLIST6.get(&key) } {
+            // SAFETY: bpf_ktime_get_ns takes no arguments and has no preconditions.
             let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
             if now < *v {
                 inc_counter(counter::V6_DROP);
@@ -189,8 +201,11 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
     // Zero-conversion raw byte copy: wire octets → key memory directly.
     // No from_be_bytes / from_ne_bytes / integer casts — eliminates
     // the endianness inversion that made every v4 lookup miss on LE.
+    // SAFETY: `ptr_at` verified the full Ipv4Hdr is in bounds.
     let src_bytes = unsafe { (*ip).src_addr }; // [u8; 4] raw wire order
     let mut key = [0u64; 2];
+    // SAFETY: copies 4 bytes from a local array into the 16-byte local
+    // `key`; both are valid and non-overlapping.
     unsafe {
         core::ptr::copy_nonoverlapping(
             src_bytes.as_ptr(),
@@ -200,7 +215,10 @@ fn try_ramshield_xdp(ctx: XdpContext) -> Result<u32, ()> {
     }
     let mut ipb = [0u8; 16];
     ipb[0..4].copy_from_slice(&src_bytes);
+    // SAFETY: the returned value is a plain u64 read once, immediately;
+    // a concurrent userspace update can only yield a stale expiry.
     if let Some(v) = unsafe { BLOCKLIST.get(&key) } {
+        // SAFETY: bpf_ktime_get_ns takes no arguments and has no preconditions.
         let now = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
         if now < *v {
             inc_counter(counter::V4_DROP);

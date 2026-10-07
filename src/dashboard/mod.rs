@@ -28,6 +28,8 @@ pub struct AppState {
     pub auth: Arc<auth::AuthState>,
 }
 
+// ponytail: this is redundant due to Rust edition; async fn is part of
+// the standard (edition 2021). Keep for clarity, but no syntax change needed.
 pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), String> {
     let auth = auth::AuthState::new(
         cfg.dashboard.admin_password_hash.clone(),
@@ -49,6 +51,7 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(api_healthz))
+        .route("/livez", get(api_livez))
         .route("/metrics", get(api_metrics))
         .route("/api/snapshot", get(api_snapshot))
         .route("/api/stream", get(api_stream))
@@ -113,6 +116,25 @@ async fn api_healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_j
             "xdp_configured": snapshot.xdp_configured,
             "protection_state": snapshot.protection_state,
         })),
+    )
+}
+
+/// Process-alive endpoint for liveness probes.
+///
+/// This endpoint is used by Kubernetes liveness probes. It always returns
+/// 200 OK while the process is running, regardless of RAM usage or XDP
+/// state. This is critical because:
+/// 1. A DDoS attack causes high RAM usage and stale XDP projection.
+/// 2. Without this endpoint, Kubernetes would restart the pod during an
+///    attack (since /healthz returns 503 under those conditions).
+///
+/// The endpoint is unauthenticated by design — it's a raw liveness check
+/// that should only be reachable from the cluster's control plane, not
+/// from external clients.
+async fn api_livez() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "alive" })),
     )
 }
 

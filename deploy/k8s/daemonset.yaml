@@ -74,7 +74,7 @@ spec:
               memory: "2Gi"
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: 9999
             initialDelaySeconds: 5
             periodSeconds: 10

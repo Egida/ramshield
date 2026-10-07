@@ -95,7 +95,7 @@ else
     ok "no deadbeef fixtures"
 fi
 # hardcoded 64-hex keys in tests
-if rg -l "[0-9a-f]{64}" tests/ crates/*/src/lib.rs 2>/dev/null | grep -q .; then
+if rg -l "[0-9a-f]{64}" tests/ crates/*/src/lib.rs crates/*/src/tests/ 2>/dev/null | grep -q .; then
     bad "hardcoded 64-hex keys in tests"
 else
     ok "no hardcoded 64-hex keys in tests"
@@ -111,37 +111,37 @@ fi
 
 echo "=== 8. AUDIT FINDINGS (AUDIT_FULL_20260911) ==="
 # P0/H1: bind fail-fast on bad keys, never warn+skip
-check_grep "H1 parse_ipc_keys exists" "fn parse_ipc_keys" src/ipc/server.rs
-check_grep "H1 bind returns io::Error on bad keys" "map_err\(std::io::Error::other\)" src/ipc/server.rs
-check_absent "H1 no warn+skip on bad keys" "warn!.*skip|skipping.*key" src/ipc/server.rs
+check_grep "H1 parse_ipc_keys exists" "fn parse_ipc_keys" src/ipc/server.rs src/ipc/server/
+check_grep "H1 bind returns io::Error on bad keys" "map_err\(std::io::Error::other\)" src/ipc/server.rs src/ipc/server/
+check_absent "H1 no warn+skip on bad keys" "warn!.*skip|skipping.*key" src/ipc/server.rs src/ipc/server/
 # H3: hot reload via ConfigHandle
-check_grep "H3 IpcServer holds ConfigHandle" "config: ConfigHandle" src/ipc/server.rs
-check_grep "H3 per-connection live keys" "live_keys" src/ipc/server.rs
-check_grep "H3 engine passes handle" "cfg_handle\.clone\(\)" src/engine/mod.rs
+check_grep "H3 IpcServer holds ConfigHandle" "config: ConfigHandle" src/ipc/server.rs src/ipc/server/
+check_grep "H3 per-connection live keys" "live_keys" src/ipc/server.rs src/ipc/server/
+check_grep "H3 engine passes handle" "cfg_handle\.clone\(\)" src/engine/
 # P1: epoch_ns gone
 check_absent "epoch_ns removed" "epoch_ns" src/ crates/
-check_grep "now_ms used" "now_ms" src/ipc/server.rs crates/ramshield-metrics/src/lib.rs
+check_grep "now_ms used" "now_ms" src/ipc/server.rs src/ipc/server/ crates/ramshield-metrics/src/
 # P1: TCP_NODELAY on accepted streams
-check_grep "set_nodelay on accept" "set_nodelay\(true\)" src/ipc/server.rs
+check_grep "set_nodelay on accept" "set_nodelay\(true\)" src/ipc/server.rs src/ipc/server/
 # P1: hex key validation in Config::validate
-check_grep "validate checks hex keys" "is_ascii_hexdigit" crates/ramshield-config/src/lib.rs
-check_grep "validate 16-byte HMAC minimum" "16" crates/ramshield-config/src/lib.rs
+check_grep "validate checks hex keys" "is_ascii_hexdigit" crates/ramshield-config/src/
+check_grep "validate 16-byte HMAC minimum" "16" crates/ramshield-config/src/
 # P1: public bind guard
-check_grep "is_public_bind exists" "fn is_public_bind" crates/ramshield-config/src/lib.rs
+check_grep "is_public_bind exists" "fn is_public_bind" crates/ramshield-config/src/
 # P1: HMAC key_id binding
 check_grep "sign takes key_id" "key_id" crates/ramshield-protocol/src/auth.rs
 # P1: replay store stored seed
 check_grep "replay stored seed" "RandomState|seed" crates/ramshield-protocol/src/auth/replay_store.rs
 # P2: dead_code cleanup
 check_absent "no allow(dead_code) in prod" "allow\(dead_code\)" src/ crates/*/src/
-check_absent "enforcement ops() deleted" "fn ops" crates/ramshield-enforcement/src/lib.rs
+check_absent "enforcement ops() deleted" "fn ops" crates/ramshield-enforcement/src/
 # P2: XDP build.rs resilient
 check_absent "xdp build.rs no panic" "panic!" crates/ramshield-xdp/build.rs
 # P2: dashboard sessions + cookie
 check_grep "dashboard DashMap sessions" "DashMap" src/dashboard/auth.rs
 check_grep "cookie Path=/" "Path=/" src/dashboard/auth.rs
 # P2: PHC hash validation
-check_grep "validate checks PHC hash" "PasswordHash::new" crates/ramshield-config/src/lib.rs
+check_grep "validate checks PHC hash" "PasswordHash::new" crates/ramshield-config/src/
 
 echo "=== 9. ENFORCEMENT COVERAGE (audit: was 1 test / 1090 LOC) ==="
 N=$(rg -c '#\[test\]|#\[tokio::test\]' crates/ramshield-enforcement/src/ 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
@@ -150,7 +150,8 @@ if [ "$N" -ge 5 ]; then ok "enforcement tests: $N (>=5)"; else bad "enforcement 
 echo "=== 10. HYGIENE ==="
 check_absent "no TODO/FIXME in prod" "TODO|FIXME|XXX|HACK" src/ crates/*/src/
 check_absent "no dbg! in prod" "dbg!" src/ crates/*/src/
-check_absent "no println in prod lib" "println!" src/lib.rs src/engine/ crates/*/src/lib.rs
+check_absent "no println in prod lib" "println!" src/lib.rs src/engine/ crates/*/src/lib.rs \
+    crates/ramshield-{config,detection,enforcement,forecasting,metrics,storage}/src/
 
 echo "=== 11. GIT STATE ==="
 if [ -z "$(git status --short)" ]; then ok "worktree clean"; else bad "worktree clean"; git status --short | head -5; fi

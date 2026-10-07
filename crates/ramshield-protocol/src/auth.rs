@@ -14,7 +14,6 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 mod replay_store;
-#[allow(unused_imports)]
 pub use replay_store::ReplayStore;
 
 type HmacSha256 = Hmac<Sha256>;

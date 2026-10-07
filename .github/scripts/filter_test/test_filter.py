@@ -207,6 +207,17 @@ fn use_s() -> i32 {
     S::new().v
 }
 """,
+
+    # T9: out-of-line `#[cfg(test)] mod tests;` must not swallow the next
+    #     production block.
+    "cfg_test_mod_decl.rs": """\
+#[cfg(test)]
+mod tests;
+
+fn production_fn() -> String {
+    std::fs::read_to_string("config.toml").unwrap()
+}
+""",
 }
 
 # ---------------------------------------------------------------------------
@@ -283,6 +294,10 @@ def filter_production_hits(hits: str, src_dir: str) -> list[str]:
             # Find the opening { of the block starting from cfg(test) position
             brace_start = content.find("{", pos)
             if brace_start == -1:
+                continue
+            # `#[cfg(test)] mod tests;` / `#[cfg(test)] use x;` own no block.
+            semi = content.find(";", pos)
+            if semi != -1 and semi < brace_start:
                 continue
             depth = 0
             line_no = content[:brace_start].count("\n") + 1
@@ -405,6 +420,7 @@ def main():
         ("two_test_modules.rs",     False, "T7: two separate mod tests → DROPPED"),
         ("cfg_test_struct.rs",      False, "T8: #[cfg(test)] impl block → DROPPED"),
         ("brace_in_string.rs",      False, "T5b: brace inside string literal → DROPPED"),
+        ("cfg_test_mod_decl.rs",    True,  "T9: #[cfg(test)] mod tests; + production unwrap → FLAGGED"),
     ]
 
     all_pass = True

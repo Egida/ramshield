@@ -6,7 +6,7 @@ The configuration is TOML. Environment variables can override config values usin
 RAMSHIELD_<SECTION>__<KEY>
 ```
 
-The canonical repository example is [`config.baseline.toml`](../config.baseline.toml). The schema and validation live in [`crates/ramshield-config/src/lib.rs`](../crates/ramshield-config/src/lib.rs).
+The canonical repository example is [`config.baseline.toml`](../config.baseline.toml). The schema lives in [`crates/ramshield-config/src/sections/`](../crates/ramshield-config/src/sections/) (one file per `[section]`, with its serde defaults); validation lives in [`crates/ramshield-config/src/validate.rs`](../crates/ramshield-config/src/validate.rs) and environment overrides in [`crates/ramshield-config/src/env.rs`](../crates/ramshield-config/src/env.rs).
 
 The baseline file intentionally contains explicit values for development/testing. It is not a universal production tuning profile.
 

@@ -41,14 +41,14 @@ else
   printf '[WARN] bpftool: unavailable; kernel-map inspection will be limited\n'
 fi
 
-if grep -R -q 'expected_cidrs' crates/ramshield-enforcement/src/lib.rs crates/ramshield-enforcement/src/xdp.rs; then
+if grep -R -q 'expected_cidrs' crates/ramshield-enforcement/src/; then
   printf '[OK]   CIDR-aware reconciliation contract present\n'
 else
   printf '[FAIL] CIDR-aware reconciliation contract missing\n'
   fail=1
 fi
 
-if grep -q 'invalid value for {name}' crates/ramshield-config/src/lib.rs; then
+if grep -R -q 'invalid value for {name}' crates/ramshield-config/src/; then
   printf '[OK]   invalid env values fail loudly\n'
 else
   printf '[FAIL] typed env validation helper missing\n'

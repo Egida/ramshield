@@ -21,7 +21,7 @@ sees them, so even the broken-above path never runs on them.
 
 The correct fix is a **relative** signal: `inst_rps > N × baseline_rps`
 (with a baseline floor), applied where `should_block` is computed
-(`merge_record`, lib.rs ~1046). It must be tuned for FP against organic
+(`merge_record`, `crates/ramshield-detection/src/merge.rs`). It must be tuned for FP against organic
 traffic sawtooth (mobile CGNAT, CDN bursts), so it needs its own soak before
 it becomes a block decision.
 
