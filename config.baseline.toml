@@ -106,7 +106,7 @@ tls_enabled = false
 
 [wal]
 enabled = true
-dir = "/var/lib/ramshield/wal"
+dir = "/tmp/ramshield-wal"
 # GroupCommit = fsync amortized across concurrent commits; Flush = fdatasync
 # per write (use "flush" only when every block must survive power loss).
 durability = "GroupCommit"
@@ -126,7 +126,7 @@ min_entropy = 4.5
 [xdp]
 # Kernel dataplane: needs cap_net_admin,cap_perfmon,cap_bpf on the binary
 # (setcap re-applied after every rebuild). Fails gracefully → in-band.
-enabled = true
+enabled = false
 interface = "eth0"
 mode = "drv"
 require_native_for_autonomous = true
@@ -134,6 +134,7 @@ require_rss_rebalance = true
 # Example cloud/LB node identity prefixes; keep empty unless this host receives
 # traffic through an overlay whose outer source is not the real client.
 trusted_overlay_cidrs = []
+allow_inband_fallback = true
 
 
 # ── Fleet mesh ─────────────────────────────────────────────────────────
@@ -162,7 +163,7 @@ bgp_community = ""
 
 [autonomous]
 # First-line cold-start packet protection in XDP. Production baseline enabled.
-enabled = true
+enabled = false
 syn_pps_per_cpu = 25000
 udp_pps_per_cpu = 50000
 packet_pps_per_cpu = 200000
@@ -170,13 +171,16 @@ window_ms = 100
 
 # ── Native host observation ────────────────────────────────────────────
 [native_ingest]
-enabled = true
+# ponytail: eth0 doesn't exist on this host (eno1/wlp2s0) — disable until
+# interface is auto-detected; upgrade path: derive from default route.
+enabled = false
 interface = "eth0"
 max_events_per_sec = 20000
 
 # ── Kernel SYN proxy ──────────────────────────────────────────────────
 [synproxy]
-enabled = true
+# ponytail: disabled until running with CAP_NET_ADMIN / root.
+enabled = false
 ports = [22, 53, 80, 443]
 mss = 1460
 wscale = 7

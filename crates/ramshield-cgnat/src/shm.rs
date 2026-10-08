@@ -11,7 +11,7 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-pub const SHM_TABLE_CAPACITY: usize = 262_144; // 256K rule slots (~32 MiB at 128 B/slot)
+pub const SHM_TABLE_CAPACITY: usize = 262_144; // 256K rule slots (~16 MiB at 64 B/slot)
 pub const SHM_PROBE_LIMIT: usize = 8;
 
 /// Stable Rust/C slot key for an IPv4 network prefix.
@@ -33,13 +33,64 @@ pub struct ShmRuleEntry {
     pub seq: AtomicU32,
     pub client_hash: AtomicU64,   // 0 = Empty
     pub expires_at_ms: AtomicU64, // Absolute Unix epoch (ms)
+    /// The 16-byte challenge seed is split into two naturally aligned
+    /// atomic 64-bit words so a reader never observes a torn mix of two
+    /// writer generations under seqlock.
+    pub challenge_seed_lo: AtomicU64, // offset 24
+    pub challenge_seed_hi: AtomicU64, // offset 32
     pub max_rps: AtomicU16,       // 0 = Block, >0 = Rate Limit
     pub tier: AtomicU8,           // 0: Allow, 1: Challenge (429+JS), 2: XDP Drop, 3: Block
     pub flags: AtomicU8,          // Bit 0: Shared Infrastructure / CGNAT
-    pub challenge_seed: [u8; 16],
-    pub _padding: [u8; 26], // Exact 128-byte slot alignment
+    pub _padding: [u8; 20], // Exact 64-byte slot alignment
 }
 
+
+
+#[cfg(test)]
+mod abi_asserts {
+    use super::*;
+
+    #[test]
+    fn challenge_seed_lo_is_naturally_aligned() {
+        use std::mem::{size_of, align_of};
+        assert_eq!(align_of::<ShmRuleEntry>(), 64);
+        assert_eq!(size_of::<ShmRuleEntry>(), 64);
+        let entry = ShmRuleEntry { 
+            seq: AtomicU32::new(0),
+            client_hash: AtomicU64::new(0),
+            expires_at_ms: AtomicU64::new(0),
+            challenge_seed_lo: AtomicU64::new(0),
+            challenge_seed_hi: AtomicU64::new(0),
+            max_rps: AtomicU16::new(0),
+            tier: AtomicU8::new(0),
+            flags: AtomicU8::new(0),
+            _padding: [0; 20],
+        };
+        // ptr::addr_of! on a field of a let-bound value works because the value
+        // lives for the duration of the statement.
+        let offset = std::ptr::addr_of!(entry.challenge_seed_lo) as usize;
+        assert_eq!(offset % 8, 0, "challenge_seed_lo must be 8-byte aligned");
+    }
+
+    #[test]
+    fn challenge_seed_hi_is_naturally_aligned() {
+        let entry = ShmRuleEntry { 
+            seq: AtomicU32::new(0),
+            client_hash: AtomicU64::new(0),
+            expires_at_ms: AtomicU64::new(0),
+            challenge_seed_lo: AtomicU64::new(0),
+            challenge_seed_hi: AtomicU64::new(0),
+            max_rps: AtomicU16::new(0),
+            tier: AtomicU8::new(0),
+            flags: AtomicU8::new(0),
+            _padding: [0; 20],
+        };
+        // ptr::addr_of! on a field of a let-bound value works because the value
+        // lives for the duration of the statement.
+        let offset = std::ptr::addr_of!(entry.challenge_seed_hi) as usize;
+        assert_eq!(offset % 8, 0, "challenge_seed_hi must be 8-byte aligned");
+    }
+}
 pub struct ShmTableManager {
     _file: std::fs::File,
     mmap: MmapMut,
@@ -76,6 +127,10 @@ impl ShmTableManager {
         // Grow-only initialization. Never shrink or truncate an active mapping:
         // readers that still hold the old mapping cannot receive SIGBUS from a
         // daemon reopen or log rotation.
+        // ponytail: a leftover file from the pre-P0-B 128-byte ABI is read as
+        // all-zero-ish garbage here (hash mismatch → empty slots); WAL replay
+        // repopulates at boot. If a file must be reset explicitly, add an ABI
+        // magic word at offset 0 and invalidate on mismatch.
         if file.metadata()?.len() < total_size as u64 {
             file.set_len(total_size as u64)?;
         }
@@ -157,7 +212,7 @@ impl ShmTableManager {
         slot.expires_at_ms
             .store(now_ms.saturating_add(ttl_ms), Ordering::Relaxed);
         slot.client_hash.store(client_hash, Ordering::Relaxed);
-        slot.seq.fetch_add(1, Ordering::Release);
+slot.seq.fetch_add(1, Ordering::Release);
         true
     }
 }
@@ -168,8 +223,18 @@ mod tests {
 
     #[test]
     fn abi_is_fixed_and_cache_aligned() {
-        assert_eq!(std::mem::size_of::<ShmRuleEntry>(), 128);
+        assert_eq!(std::mem::size_of::<ShmRuleEntry>(), 64);
         assert_eq!(std::mem::align_of::<ShmRuleEntry>(), 64);
+        // Field offsets must match the C header exactly (P0-B).
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(ShmRuleEntry, seq), 0);
+        assert_eq!(offset_of!(ShmRuleEntry, client_hash), 8);
+        assert_eq!(offset_of!(ShmRuleEntry, expires_at_ms), 16);
+        assert_eq!(offset_of!(ShmRuleEntry, challenge_seed_lo), 24);
+        assert_eq!(offset_of!(ShmRuleEntry, challenge_seed_hi), 32);
+        assert_eq!(offset_of!(ShmRuleEntry, max_rps), 40);
+        assert_eq!(offset_of!(ShmRuleEntry, tier), 42);
+        assert_eq!(offset_of!(ShmRuleEntry, flags), 43);
     }
 
     #[test]

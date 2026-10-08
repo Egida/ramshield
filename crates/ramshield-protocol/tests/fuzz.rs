@@ -61,7 +61,8 @@ proptest! {
     fn auth_verify_never_panics(input in arb_auth()) {
         let (kid, ts, sig, payload) = input;
         let keys = vec![("k1".to_string(), b"the-real-key".to_vec())];
-        let _ = auth::verify(&keys, &kid, ts, &sig, &payload, None);
+        let _store = auth::ReplayStore::new(10, std::time::Duration::from_secs(1));
+        let _ = auth::verify(&keys, &kid, ts, &sig, &payload, &_store);
     }
 
     /// A signature produced from a *different* key must always be rejected,
@@ -76,7 +77,8 @@ proptest! {
             .unwrap_or(0);
         let sig = auth::sign(b"attacker-key", "attacker", now, &payload).expect("test key non-empty");
         let keys = vec![("k1".to_string(), b"server-key".to_vec())];
-        let res = auth::verify(&keys, "k1", now, &sig, &payload, None);
+        let store = auth::ReplayStore::new(10, std::time::Duration::from_secs(1));
+        let res = auth::verify(&keys, "k1", now, &sig, &payload, &store);
         prop_assert!(res.is_err(), "forged signature accepted");
     }
 }

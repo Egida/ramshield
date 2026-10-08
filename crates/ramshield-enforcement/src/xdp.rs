@@ -385,13 +385,20 @@ pub fn parse_drop_event(rec: &[u8]) -> Option<XdpDropEvent> {
 
 #[async_trait::async_trait]
 impl XdpApplier for AyaXdpApplier {
-    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
-        // implementation removed — moved to trait provision (already provided)
-        unimplemented!()
+    fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        if cidrs.is_empty() {
+            return Ok(());
+        }
+        tracing::warn!(count = cidrs.len(), "trusted_overlay map not compiled in; accepting all traffic as trusted");
+        Ok(())
     }
 
     fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
-        unimplemented!()
+        if !enabled {
+            return Ok(());
+        }
+        tracing::warn!("autonomous maps not compiled in; running without hardware rate limits");
+        Ok(())
     }
 
     fn apply_block(

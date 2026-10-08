@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stddef.h>
 
 #define RAMSHIELD_SHM_TABLE_CAPACITY 262144
 #define RAMSHIELD_SHM_PROBE_LIMIT 8
@@ -24,6 +25,9 @@ ramshield_subnet_key(uint32_t network, uint8_t prefix_len)
 static inline uint64_t
 ramshield_ipv4_subnet_key(uint32_t client_ip, uint8_t prefix_len)
 {
+    if (prefix_len > 32) {
+        return 0;  // reject invalid prefix; caller must treat as policy error
+    }
     uint32_t mask = prefix_len == 0 ? 0 : 0xffffffffU << (32 - prefix_len);
     return ramshield_subnet_key(client_ip & mask, prefix_len);
 }
@@ -31,18 +35,26 @@ ramshield_ipv4_subnet_key(uint32_t client_ip, uint8_t prefix_len)
 
 /* Must match Rust ShmRuleEntry byte-for-byte. */
 typedef struct __attribute__((aligned(64))) {
-    _Atomic uint32_t seq;       /* odd = writer active, even = stable */
-    _Atomic uint64_t client_hash;
-    _Atomic uint64_t expires_at_ms;
-    _Atomic uint16_t max_rps;
-    _Atomic uint8_t  tier;
-    _Atomic uint8_t  flags;
-    uint8_t          challenge_seed[16];
-    uint8_t          _padding[26];
+    _Atomic uint32_t seq;           /* odd = writer active, even = stable */
+    _Atomic uint64_t client_hash;   /* offset 8  (4 bytes padding after seq) */
+    _Atomic uint64_t expires_at_ms; /* offset 16 */
+    /* Two naturally aligned atomic words replace the former byte array:
+     * a 16-byte memcpy under a seqlock is a torn-read/UB hazard for a
+     * non-atomic object while a writer runs (C11 data race). */
+    _Atomic uint64_t challenge_seed_lo; /* offset 24 */
+    _Atomic uint64_t challenge_seed_hi; /* offset 32 */
+    _Atomic uint16_t max_rps;       /* offset 40 */
+    _Atomic uint8_t  tier;          /* offset 42 */
+    _Atomic uint8_t  flags;         /* offset 43 */
+    uint8_t          _padding[20];  /* offset 44..64 */
 } RamshieldShmRuleEntry;
 
-_Static_assert(sizeof(RamshieldShmRuleEntry) == 128,
-               "RamshieldShmRuleEntry ABI must remain 128 bytes");
+_Static_assert(offsetof(RamshieldShmRuleEntry, challenge_seed_lo) % 8 == 0,
+               "challenge_seed_lo must be naturally aligned to 8 bytes");
+_Static_assert(offsetof(RamshieldShmRuleEntry, challenge_seed_hi) % 8 == 0,
+               "challenge_seed_hi must be naturally aligned to 8 bytes");
+_Static_assert(sizeof(RamshieldShmRuleEntry) == 64,
+               "RamshieldShmRuleEntry ABI must remain exactly 64 bytes");
 
 typedef struct {
     uint64_t client_hash;
@@ -84,9 +96,10 @@ ramshield_shm_read(const RamshieldShmRuleEntry *table,
             uint16_t max_rps = atomic_load_explicit(&entry->max_rps, memory_order_relaxed);
             uint8_t tier = atomic_load_explicit(&entry->tier, memory_order_relaxed);
             uint8_t flags = atomic_load_explicit(&entry->flags, memory_order_relaxed);
-            uint8_t challenge_seed[16];
-            for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
-                challenge_seed[i] = entry->challenge_seed[i];
+            /* Atomic loads, not a byte copy: the seed is two 64-bit words so
+             * a reader never observes a mix of two writer generations. */
+            uint64_t challenge_seed_lo = atomic_load_explicit(&entry->challenge_seed_lo, memory_order_relaxed);
+            uint64_t challenge_seed_hi = atomic_load_explicit(&entry->challenge_seed_hi, memory_order_relaxed);
 
             atomic_thread_fence(memory_order_acquire);
             uint32_t after = atomic_load_explicit(&entry->seq, memory_order_acquire);
@@ -98,8 +111,10 @@ ramshield_shm_read(const RamshieldShmRuleEntry *table,
                 out->max_rps = max_rps;
                 out->tier = tier;
                 out->flags = flags;
-                for (unsigned i = 0; i < sizeof(challenge_seed); ++i)
-                    out->challenge_seed[i] = challenge_seed[i];
+                for (unsigned i = 0; i < 8; ++i)
+                    out->challenge_seed[i]     = (uint8_t)(challenge_seed_lo >> (8 * i));
+                for (unsigned i = 0; i < 8; ++i)
+                    out->challenge_seed[8 + i] = (uint8_t)(challenge_seed_hi >> (8 * i));
                 return true;
             }
 
@@ -141,6 +156,8 @@ ramshield_shm_flush_all(RamshieldShmRuleEntry *table, uint64_t now_ms)
         atomic_store_explicit(&table[i].max_rps, 0, memory_order_relaxed);
         atomic_store_explicit(&table[i].tier, RAMSHIELD_TIER_ALLOW, memory_order_relaxed);
         atomic_store_explicit(&table[i].flags, 0, memory_order_relaxed);
+        atomic_store_explicit(&table[i].challenge_seed_lo, 0, memory_order_relaxed);
+        atomic_store_explicit(&table[i].challenge_seed_hi, 0, memory_order_relaxed);
         atomic_fetch_add_explicit(&table[i].seq, 1, memory_order_release);
     }
 }

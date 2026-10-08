@@ -4,9 +4,9 @@
 //!
 //! Production replay protection = ReplayStore (crates/ramshield-protocol/src/auth/replay_store.rs),
 //! wired at src/ipc/server.rs verify_frame_auth(Some(replay)). `auth::verify`
-//! with replay=None is the store-less baseline: identical signed frames repeat
-//! freely inside the ±MAX_CLOCK_SKEW window — pinning THAT contract is this
-//! file's remaining job.
+//! with a required store: identical signed frames are rejected as replays
+//! inside the store TTL, and frames outside the skew window are rejected
+//! regardless of store state.
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,11 +23,8 @@ fn keys() -> Vec<(String, Vec<u8>)> {
     vec![("k1".to_string(), b"server-key".to_vec())]
 }
 
-/// Baseline: verify() WITHOUT a nonce store (replay=None) accepts duplicate
-/// frames by design — replay protection lives in ReplayStore, which
-/// production wires in at src/ipc/server.rs (Some(replay)). This test pins
-/// the None path's contract; server-side dedup is covered by the
-/// replay_store tests in crates/ramshield-protocol/src/auth/.
+/// P0-C: verify() requires a store. Duplicate frames against the same
+/// store are rejected as replays; skew rejection works independently.
 #[test]
 fn replay_protection_requires_store() {
     let k = keys();
@@ -35,13 +32,12 @@ fn replay_protection_requires_store() {
     let ts = now_ms();
     let sig = auth::sign(b"server-key", "k1", ts, payload).expect("test key non-empty");
 
-    assert!(auth::verify(&k, "k1", ts, &sig, payload, None).is_ok());
-    // No store => no memory => duplicate is (correctly) accepted.
-    let second = auth::verify(&k, "k1", ts, &sig, payload, None);
-    assert!(
-        second.is_ok(),
-        "second identical frame must currently be accepted (replay bug present)"
-    );
+    let store = ReplayStore::new(10, Duration::from_secs(1));
+    // P0-C: verify() now REQUIRES a store; first frame accepted, identical
+    // second frame rejected as replay within the store TTL.
+    assert!(auth::verify(&k, "k1", ts, &sig, payload, &store).is_ok());
+    let second = auth::verify(&k, "k1", ts, &sig, payload, &store);
+    assert_eq!(second, Err("replay"));
 }
 
 /// GREEN (forward-looking): a replay with `ts_ms` outside the skew window
@@ -52,7 +48,8 @@ fn replay_outside_window_rejected() {
     let payload = b"x";
     let stale_ts = now_ms() - MAX_CLOCK_SKEW_MS - 1;
     let sig = auth::sign(b"server-key", "k1", stale_ts, payload).expect("test key non-empty");
-    assert!(auth::verify(&k, "k1", stale_ts, &sig, payload, None).is_err());
+    let store = ReplayStore::new(10, Duration::from_secs(1));
+    assert!(auth::verify(&k, "k1", stale_ts, &sig, payload, &store).is_err());
 }
 
 /// GREEN: fresh `ReplayStore` rejects the first frame's nonce, then accepts

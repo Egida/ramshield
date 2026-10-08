@@ -12,6 +12,7 @@
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::time::Duration;
 
 mod replay_store;
 pub use replay_store::ReplayStore;
@@ -53,7 +54,7 @@ pub fn verify(
     ts_ms: u64,
     sig_hex: &str,
     payload: &[u8],
-    replay: Option<&ReplayStore>,
+    replay: &ReplayStore,
 ) -> Result<(), &'static str> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,10 +86,10 @@ pub fn verify(
         return Err("signature mismatch");
     }
     // Replay check runs *after* constant-time compare so an attacker
-    // can't use timing to probe the store for seen digests.
-    if let Some(store) = replay {
-        store.check_and_record(key_id, &expected)?;
-    }
+    // can't use timing to probe the store for seen digests. The store is a
+    // mandatory parameter: a caller cannot opt out of replay protection by
+    // passing None (compile-time enforced).
+    replay.check_and_record(key_id, &expected)?;
     Ok(())
 }
 
@@ -108,7 +109,7 @@ pub fn verify_authenticated(
     payload: &[u8],
     replay: &ReplayStore,
 ) -> Result<AuthenticatedPrincipal, &'static str> {
-    verify(keys, key_id, ts_ms, sig_hex, payload, Some(replay))?;
+    verify(keys, key_id, ts_ms, sig_hex, payload, replay)?;
     Ok(AuthenticatedPrincipal {
         key_id: key_id.to_string(),
     })
@@ -137,7 +138,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         let sig = sign(b"secret-key", "k1", now, payload).expect("test key non-empty");
-        assert!(verify(&keys, "k1", now, &sig, payload, None).is_ok());
+        assert!(verify(&keys, "k1", now, &sig, payload, &ReplayStore::default()).is_ok());
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         let sig = sign(b"secret-key", "k1", now, b"honest payload").expect("test key non-empty");
-        assert!(verify(&keys, "k1", now, &sig, b"evil payload", None).is_err());
+        assert!(verify(&keys, "k1", now, &sig, b"evil payload", &ReplayStore::default()).is_err());
     }
 
     #[test]
@@ -167,13 +168,17 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         let sig = sign(b"other-key", "k1", now, b"x").expect("test key non-empty");
-        assert!(verify(&keys, "k1", now, &sig, b"x", None).is_err());
+        let store = ReplayStore::new(10, Duration::from_secs(1));
+        assert!(verify(&keys, "k1", now, &sig, b"x", &store).is_err());
         let good_sig = sign(b"secret-key", "k1", now, b"x").expect("test key non-empty");
         let old = now - MAX_CLOCK_SKEW_MS - 1000;
-        assert!(verify(&keys, "k1", old, &good_sig, b"x", None).is_err());
+        let store = ReplayStore::new(10, Duration::from_secs(1));
+        assert!(verify(&keys, "k1", old, &good_sig, b"x", &store).is_err());
     }
 
-    /// RED: replay accepted without a ReplayStore (documents the bug).
+    /// GREEN: replay rejected when the same store is reused (P0-C made the
+    /// store a required parameter — passing a fresh store per call is a
+    /// caller bug, not an API escape hatch).
     #[test]
     fn replay_without_store_accepted() {
         let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
@@ -183,9 +188,13 @@ mod tests {
             .as_millis() as u64;
         let payload = br#"{"type":"check_ip","ip":"1.2.3.4"}"#;
         let sig = sign(b"secret-key", "k1", now, payload).expect("test key non-empty");
-        assert!(verify(&keys, "k1", now, &sig, payload, None).is_ok());
-        // BUG: second call passes — no store supplied, no replay protection.
-        assert!(verify(&keys, "k1", now, &sig, payload, None).is_ok());
+        let store = ReplayStore::new(10, Duration::from_secs(1));
+        assert!(verify(&keys, "k1", now, &sig, payload, &store).is_ok());
+        // Second identical frame must be rejected as a replay.
+        assert_eq!(
+            verify(&keys, "k1", now, &sig, payload, &store),
+            Err("replay")
+        );
     }
 }
 
@@ -210,10 +219,10 @@ mod replay_tests {
         let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
 
         // First call should succeed
-        assert!(verify(&keys, "k1", now, &sig, payload, Some(&store)).is_ok());
+        assert!(verify(&keys, "k1", now, &sig, payload, &store).is_ok());
         // Second call with identical frame should be rejected as replay
         assert_eq!(
-            verify(&keys, "k1", now, &sig, payload, Some(&store)),
+            verify(&keys, "k1", now, &sig, payload, &store),
             Err("replay")
         );
     }
@@ -234,8 +243,8 @@ mod replay_tests {
         let sig2 = sign(b"key-b", "k2", now, payload).expect("test key non-empty");
         let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
         // Different keys, same payload: both should pass (different signatures)
-        assert!(verify(&keys, "k1", now, &sig1, payload, Some(&store)).is_ok());
-        assert!(verify(&keys, "k2", now, &sig2, payload, Some(&store)).is_ok());
+        assert!(verify(&keys, "k1", now, &sig1, payload, &store).is_ok());
+        assert!(verify(&keys, "k2", now, &sig2, payload, &store).is_ok());
     }
 
     #[test]
@@ -250,8 +259,8 @@ mod replay_tests {
         let sig2 = sign(b"secret-key", "k1", now, b"payload-b").expect("test key non-empty");
         let store = ReplayStore::new(64, Duration::from_millis(MAX_CLOCK_SKEW_MS));
         // Different payloads: both should pass
-        assert!(verify(&keys, "k1", now, &sig1, b"payload-a", Some(&store)).is_ok());
-        assert!(verify(&keys, "k1", now, &sig2, b"payload-b", Some(&store)).is_ok());
+        assert!(verify(&keys, "k1", now, &sig1, b"payload-a", &store).is_ok());
+        assert!(verify(&keys, "k1", now, &sig2, b"payload-b", &store).is_ok());
     }
 
     /// RED -> GREEN: H5 — two key_ids with identical key bytes MUST produce
@@ -276,11 +285,11 @@ mod replay_tests {
         // Signatures differ even though key material is identical.
         assert_ne!(sig1, sig2, "identical bytes + different key_id must differ");
         // A frame signed under k1 must NOT be accepted as k1 if key_id is wrong.
-        assert!(verify(&keys, "k1", now, &sig2, payload, None).is_err());
-        assert!(verify(&keys, "k2", now, &sig1, payload, None).is_err());
+        assert!(verify(&keys, "k1", now, &sig2, payload, &ReplayStore::default()).is_err());
+        assert!(verify(&keys, "k2", now, &sig1, payload, &ReplayStore::default()).is_err());
         // Each frame still validates under its own key_id.
-        assert!(verify(&keys, "k1", now, &sig1, payload, None).is_ok());
-        assert!(verify(&keys, "k2", now, &sig2, payload, None).is_ok());
+        assert!(verify(&keys, "k1", now, &sig1, payload, &ReplayStore::default()).is_ok());
+        assert!(verify(&keys, "k2", now, &sig2, payload, &ReplayStore::default()).is_ok());
     }
 }
 #[cfg(test)]

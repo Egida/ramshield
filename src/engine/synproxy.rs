@@ -32,8 +32,8 @@ fn render_ruleset(
     set conn_limit6 {{ type ipv6_addr; size 65536; flags dynamic; }}
     chain preraw {{
         type filter hook prerouting priority raw; policy accept;
-        iifname "{interface}" ip saddr tcp flags syn tcp dport {{ {ports} }} meter syn_rate4 {{ ip saddr limit rate over {new_rate}/second burst {burst} packets }} drop
-        iifname "{interface}" ip6 saddr tcp flags syn tcp dport {{ {ports} }} meter syn_rate6 {{ ip6 saddr limit rate over {new_rate}/second burst {burst} packets }} drop
+        iifname "{interface}" meta nfproto ipv4 tcp flags syn tcp dport {{ {ports} }} meter syn_rate4 {{ ip saddr limit rate over {new_rate}/second burst {burst} packets }} drop
+        iifname "{interface}" meta nfproto ipv6 tcp flags syn tcp dport {{ {ports} }} meter syn_rate6 {{ ip6 saddr limit rate over {new_rate}/second burst {burst} packets }} drop
         iifname "{interface}" tcp flags syn tcp dport {{ {ports} }} limit rate over {total_rate}/second burst {total_burst} packets drop
         iifname "{interface}" tcp flags syn tcp dport {{ {ports} }} notrack
     }}
@@ -41,8 +41,8 @@ fn render_ruleset(
         type filter hook input priority filter; policy accept;
         iifname "{interface}" tcp dport {{ {ports} }} ct state invalid,untracked synproxy mss {mss} wscale {wscale} timestamp sack-perm
         iifname "{interface}" tcp dport {{ {ports} }} ct state new ct count over {total} drop
-        iifname "{interface}" ip saddr tcp dport {{ {ports} }} ct state new add @conn_limit4 {{ ip saddr ct count over {per_source} }} drop
-        iifname "{interface}" ip6 saddr tcp dport {{ {ports} }} ct state new add @conn_limit6 {{ ip6 saddr ct count over {per_source} }} drop
+        iifname "{interface}" meta nfproto ipv4 tcp dport {{ {ports} }} ct state new add @conn_limit4 {{ ip saddr ct count over {per_source} }} drop
+        iifname "{interface}" meta nfproto ipv6 tcp dport {{ {ports} }} ct state new add @conn_limit6 {{ ip6 saddr ct count over {per_source} }} drop
         iifname "{interface}" ct state invalid tcp dport {{ {ports} }} drop
     }}
 }}
