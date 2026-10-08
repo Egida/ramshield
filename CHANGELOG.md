@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased — Maturity hardening
+- Fix synproxy nftables syntax error (meta nfproto ipv4/ipv6), restore XDP stubs, ensure E0277 guard dropped before await, and adjust config defaults for dev boot (wal.dir, enable inband fallback).
 
 - Restore the XDP packet-boundary helpers, counters, and drop-event emitter required by the Aya program.
 - Make VXLAN/Geneve raw-pointer access verifier-safe.
