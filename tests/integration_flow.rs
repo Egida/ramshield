@@ -35,6 +35,7 @@ async fn detection_tracks_ip_through_engine_pipeline() {
             bytes: 512,
             status_code: if i % 3 == 0 { 404 } else { 200 },
             proto_fingerprint: 42,
+            l7: None,
         })
         .collect();
     detection.flush_events(&events);
@@ -93,6 +94,7 @@ async fn enforcement_wal_replay_roundtrip() {
         ip: std::net::IpAddr::from([192, 168, 7, 7]),
         cidr: None,
         action: EnforceAction::Block,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     };
     tx.send(cmd).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

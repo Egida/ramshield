@@ -15,6 +15,15 @@ pub struct XdpConfig {
     /// Default false: configured XDP that is not attached is FAILED /healthz 503.
     #[serde(default)]
     pub allow_inband_fallback: bool,
+    /// Autonomous protection is qualified only for native/driver XDP.
+    #[serde(default = "default_require_native_xdp")]
+    pub require_native_for_autonomous: bool,
+    /// Refuse autonomous startup if RSS cannot be rebalanced.
+    #[serde(default)]
+    pub require_rss_rebalance: bool,
+    /// Trusted cloud/LB source prefixes that must not be interpreted as tenant bans.
+    #[serde(default)]
+    pub trusted_overlay_cidrs: Vec<ramshield_types::IpNetwork>,
 }
 
 impl Default for XdpConfig {
@@ -24,6 +33,9 @@ impl Default for XdpConfig {
             interface: default_xdp_iface(),
             mode: default_xdp_mode(),
             allow_inband_fallback: false,
+            require_native_for_autonomous: default_require_native_xdp(),
+            require_rss_rebalance: false,
+            trusted_overlay_cidrs: Vec::new(),
         }
     }
 }
@@ -35,3 +47,5 @@ fn default_xdp_iface() -> String {
 fn default_xdp_mode() -> String {
     "skb".into()
 }
+
+fn default_require_native_xdp() -> bool { true }

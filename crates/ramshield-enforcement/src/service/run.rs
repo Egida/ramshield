@@ -40,6 +40,7 @@ impl EnforcementService {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    self.apply_mesh_messages().await;
                     self.expire_due().await;
                     let now_unix = SystemTime::now()
                         .duration_since(UNIX_EPOCH)

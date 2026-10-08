@@ -269,6 +269,7 @@ fn block_cmd(ip: IpAddr, ttl: u64) -> EnforceCommand {
         ip,
         cidr: None,
         action: EnforceAction::Block,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 fn unblock_cmd(ip: IpAddr) -> EnforceCommand {
@@ -283,6 +284,7 @@ fn unblock_cmd(ip: IpAddr) -> EnforceCommand {
         ip,
         cidr: None,
         action: EnforceAction::Unblock,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 
@@ -302,6 +304,7 @@ fn block_cidr_command(network: IpNetwork, ttl: u64) -> EnforceCommand {
         ip: network.addr,
         cidr: Some(network),
         action: EnforceAction::Block,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 
@@ -317,6 +320,7 @@ fn unblock_cidr_command(network: IpNetwork) -> EnforceCommand {
         ip: network.addr,
         cidr: Some(network),
         action: EnforceAction::Unblock,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 

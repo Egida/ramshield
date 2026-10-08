@@ -1202,7 +1202,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramshield"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1221,6 +1221,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "libc",
  "memmap2",
  "proptest",
  "ramshield-analytics",
@@ -1270,6 +1271,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "argon2",
+ "hex",
  "proptest",
  "ramshield-types",
  "serde",
@@ -1332,10 +1334,16 @@ dependencies = [
 
 [[package]]
 name = "ramshield-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
+ "hex",
+ "hmac",
  "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1355,6 +1363,7 @@ dependencies = [
  "hex",
  "hmac",
  "proptest",
+ "ramshield-types",
  "serde",
  "serde_json",
  "sha2",

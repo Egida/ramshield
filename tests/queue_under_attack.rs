@@ -48,6 +48,7 @@ fn crossbeam_channel_drops_at_16k_capacity() {
             bytes: 64,
             status_code: 200,
             proto_fingerprint: 0,
+            l7: None,
         };
         match tx.try_send(ev) {
             Ok(()) => accepted += 1,
@@ -99,6 +100,7 @@ fn semantic_shedding_prioritizes_high_signal() {
             bytes: 64,
             status_code: 200,
             proto_fingerprint: 0,
+            l7: None,
         };
         assert!(tx.try_send(ev).is_ok(), "fill to watermark failed at {}", i);
     }
@@ -111,6 +113,7 @@ fn semantic_shedding_prioritizes_high_signal() {
         bytes: 64,
         status_code: 401,
         proto_fingerprint: 0,
+        l7: None,
     };
     assert!(
         tx.try_send(high).is_ok(),
@@ -126,6 +129,7 @@ fn semantic_shedding_prioritizes_high_signal() {
             bytes: 64,
             status_code: 200,
             proto_fingerprint: 0,
+            l7: None,
         };
         assert!(tx.try_send(ev).is_ok(), "fill to full failed at {}", i);
     }

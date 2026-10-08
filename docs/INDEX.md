@@ -1,6 +1,6 @@
 # RamShield Documentation Index
 
-This is the canonical documentation map for RamShield 0.4.0. The repository is a Linux-native, single-node ingress-defense system. The userspace state and WAL are authoritative; XDP is a kernel projection.
+This is the canonical documentation map for RamShield 0.6.0. The repository is a Linux-native, single-node ingress-defense system. The userspace state and WAL are authoritative; XDP is a kernel projection.
 
 ## Operators
 
@@ -26,7 +26,7 @@ This is the canonical documentation map for RamShield 0.4.0. The repository is a
 - [Release runbook](RELEASE_RUNBOOK.md) — exact release procedure.
 - [Enterprise release](ENTERPRISE_RELEASE.md) — packaging/install contract.
 - [Release contract](RELEASE_CONTRACT_1.0.md) — long-term product promises.
-- [Production 0.4.0](PRODUCTION_0.4.0.md) — current release contract.
+- [Production 0.6.0](PRODUCTION_0.4.0.md) — inherited production contract plus 0.6 security-gateway additions.
 
 ## Performance and Evidence
 
@@ -50,3 +50,9 @@ All documented features undergo a structured validation:
 **Projection state:** XDP + SHM kernel projections
 
 Never infer kernel qualification from a userspace unit test.
+
+- [0.5.0 L7 / mesh / upstream](FEATURE_0.5_L7_MESH_UPSTREAM.md) — integrated feature expansion.
+
+- [Defense Model](DEFENSE_MODEL.md) — autonomous packet guard, L7 boundary, upstream escalation, management-plane and mesh model.
+
+- [Security Gateway](SECURITY_GATEWAY.md) — autonomous observation, kernel defense, WAF boundary, and upstream BGP escalation.

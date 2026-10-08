@@ -269,6 +269,7 @@ impl Forecaster {
                 ip,
                 cidr: None,
                 action: EnforceAction::Block,
+                evidence_source: ramshield_types::EvidenceSource::LocalSignals,
             };
             if self.enforcement_tx.try_send(cmd).is_err() {
                 // Sampled: queue-full fires per IP in a burst.

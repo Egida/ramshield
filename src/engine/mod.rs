@@ -5,6 +5,11 @@ use tokio::sync::{mpsc, watch};
 use tracing::info;
 
 pub mod checkpoint;
+pub mod native;
+pub mod rss;
+pub mod synproxy;
+pub mod upstream;
+pub mod waf;
 
 mod boot;
 
@@ -28,6 +33,7 @@ use ramshield_storage::{
     wal::Wal,
 };
 use ramshield_types::EnforceCommand;
+use ramshield_mesh::{MeshHandle}; use ramshield_mesh::aworset::AworsetBlocklist;
 
 pub struct Engine {
     pub config: Arc<arc_swap::ArcSwap<Config>>,

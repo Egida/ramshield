@@ -99,4 +99,4 @@ cargo bench --bench hot_paths --features full -- subnet_swarm
 
 ## Testing
 
-45 tests across `src/tests/mod.rs` and `batch.rs`: EWMA threshold triggering, CUSUM warmup period, pulse tracker sliding window, subnet swarm unique-IP counting, Bloom filter false positive rate, batch flush timing, and worker thread shutdown. Integration tests feed synthetic traffic through `flush_events()` and verify correct block/unblock decisions.
+55 tests across `src/tests/mod.rs` and `batch.rs`: EWMA threshold triggering, CUSUM warmup period, pulse tracker sliding window, subnet swarm unique-IP counting, Bloom filter false positive rate, batch flush timing, worker thread shutdown, per-IP XDP drop counters, mesh blocklist CRDT merge, and checkpoint coordination. Integration tests feed synthetic traffic through `flush_events()` and verify correct block/unblock decisions.

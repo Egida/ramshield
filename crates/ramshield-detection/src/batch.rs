@@ -1,9 +1,20 @@
 use ahash::AHashMap as HashMap;
 use ramshield_types::IpNetwork;
-use ramshield_types::events::ConnectionEvent;
+use ramshield_types::events::{ConnectionEvent, HttpMethod};
 use std::net::IpAddr;
 
 /// In-memory aggregation for one flush window — no store access until flush completes.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RouteAgg {
+    pub route_hash: u64,
+    pub method: HttpMethod,
+    pub count: u32,
+    pub http2_opened: u32,
+    pub http2_reset: u32,
+    pub latency_sum_us: u64,
+    pub latency_max_us: u64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct IpAgg {
     pub count: u32,
@@ -12,6 +23,12 @@ pub struct IpAgg {
     pub proto_fp: u32,
     pub first_ts_ns: u64,
     pub last_ts_ns: u64,
+    pub l7_count: u32,
+    pub http2_opened: u32,
+    pub http2_reset: u32,
+    pub http2_completed: u32,
+    pub http2_active_max: u32,
+    pub routes: [RouteAgg; 4],
 }
 
 impl IpAgg {
@@ -29,6 +46,33 @@ impl IpAgg {
             self.first_ts_ns = ev.timestamp_ns;
             self.proto_fp = ev.proto_fingerprint;
         }
+        if let Some(l7) = ev.l7 {
+            self.l7_count = self.l7_count.saturating_add(1);
+            if let Some(h2) = l7.http2 {
+                self.http2_opened = self.http2_opened.saturating_add(h2.streams_opened);
+                self.http2_reset = self.http2_reset.saturating_add(h2.streams_reset);
+                self.http2_completed = self.http2_completed.saturating_add(h2.streams_completed);
+                self.http2_active_max = self.http2_active_max.max(h2.active_streams);
+            }
+            if l7.route_hash != 0 {
+                if let Some(slot) = self.routes.iter_mut().find(|r| r.route_hash == l7.route_hash) {
+                    slot.count = slot.count.saturating_add(1);
+                    if let Some(h2) = l7.http2 {
+                        slot.http2_opened = slot.http2_opened.saturating_add(h2.streams_opened);
+                        slot.http2_reset = slot.http2_reset.saturating_add(h2.streams_reset);
+                    }
+                    slot.latency_sum_us = slot.latency_sum_us.saturating_add(l7.latency_us);
+                    slot.latency_max_us = slot.latency_max_us.max(l7.latency_us);
+                    slot.method = l7.method;
+                } else if let Some(slot) = self.routes.iter_mut().find(|r| r.route_hash == 0) {
+                    *slot = RouteAgg { route_hash: l7.route_hash, method: l7.method, count: 1, latency_sum_us: l7.latency_us, latency_max_us: l7.latency_us, http2_opened: l7.http2.map_or(0, |h| h.streams_opened), http2_reset: l7.http2.map_or(0, |h| h.streams_reset) };
+                } else if let Some((idx, _)) = self.routes.iter().enumerate().min_by_key(|(_, r)| r.count) {
+                    if self.routes[idx].count <= 1 {
+                        self.routes[idx] = RouteAgg { route_hash: l7.route_hash, method: l7.method, count: 1, latency_sum_us: l7.latency_us, latency_max_us: l7.latency_us, http2_opened: l7.http2.map_or(0, |h| h.streams_opened), http2_reset: l7.http2.map_or(0, |h| h.streams_reset) };
+                    }
+                }
+            }
+        }
         self.last_ts_ns = ev.timestamp_ns;
     }
 
@@ -43,6 +87,23 @@ impl IpAgg {
         }
         self.first_ts_ns = self.first_ts_ns.min(other.first_ts_ns);
         self.last_ts_ns = self.last_ts_ns.max(other.last_ts_ns);
+        self.l7_count = self.l7_count.saturating_add(other.l7_count);
+        self.http2_opened = self.http2_opened.saturating_add(other.http2_opened);
+        self.http2_reset = self.http2_reset.saturating_add(other.http2_reset);
+        self.http2_completed = self.http2_completed.saturating_add(other.http2_completed);
+        self.http2_active_max = self.http2_active_max.max(other.http2_active_max);
+        for other_route in other.routes.iter().filter(|r| r.route_hash != 0) {
+            if let Some(slot) = self.routes.iter_mut().find(|r| r.route_hash == other_route.route_hash) {
+                slot.count = slot.count.saturating_add(other_route.count);
+                slot.http2_opened = slot.http2_opened.saturating_add(other_route.http2_opened);
+                slot.http2_reset = slot.http2_reset.saturating_add(other_route.http2_reset);
+                slot.latency_sum_us = slot.latency_sum_us.saturating_add(other_route.latency_sum_us);
+                slot.latency_max_us = slot.latency_max_us.max(other_route.latency_max_us);
+                slot.method = other_route.method;
+            } else if let Some(slot) = self.routes.iter_mut().find(|r| r.route_hash == 0) {
+                *slot = *other_route;
+            }
+        }
         if self.proto_fp == 0 {
             self.proto_fp = other.proto_fp;
         }
@@ -173,7 +234,7 @@ mod tests {
 
     #[test]
     fn absorb_invalid_status_no_panic() {
-        use ramshield_types::events::ConnectionEvent;
+        use ramshield_types::events::{ConnectionEvent, HttpMethod};
         use std::net::IpAddr;
         use std::net::Ipv4Addr;
 
@@ -184,6 +245,7 @@ mod tests {
             bytes: 10,
             status_code: 0, // invalid — status_bucket returns 255
             proto_fingerprint: 0,
+            l7: None,
         };
         agg.absorb(&ev);
         assert_eq!(agg.count, 1);
@@ -200,6 +262,7 @@ mod tests {
             bytes: 100,
             status_code: 200,
             proto_fingerprint: 0,
+            l7: None,
         };
         let a = aggregate(&[ev(1), ev(2), ev(3)]);
         assert_eq!(a.ips[&ip].count, 3);
@@ -223,6 +286,7 @@ mod tests {
             bytes: 100,
             status_code: 200,
             proto_fingerprint: 0,
+            l7: None,
         };
         let a = aggregate(&[ev(ipv4, 1), ev(ipv4, 2), ev(ipv6, 3)]);
         let (ips, subnets, networks) = (&a.ips, &a.subnets, &a.networks);
@@ -258,4 +322,26 @@ mod tests {
         assert_eq!(&bytes[..2], &[0x20, 0x01]);
         assert_eq!(&bytes[2..4], &[0x0d, 0xb8]);
     }
+    #[test]
+    fn l7_and_http2_telemetry_is_bounded_and_aggregated() {
+        use ramshield_types::events::{Http2Telemetry, HttpMethod, HttpVersion, L7Metadata};
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let ev = ConnectionEvent {
+            ip, timestamp_ns: 1, bytes: 100, status_code: 200, proto_fingerprint: 0,
+            l7: Some(L7Metadata {
+                host_hash: 1, route_hash: 42, method: HttpMethod::Post, version: HttpVersion::Http2,
+                latency_us: 500, request_bytes: 32, response_bytes: 128,
+                http2: Some(Http2Telemetry { active_streams: 8, streams_opened: 10, streams_reset: 9, streams_completed: 1 }),
+            }),
+        };
+        let a = aggregate(&[ev]);
+        let agg = &a.ips[&ip];
+        assert_eq!(agg.l7_count, 1);
+        assert_eq!(agg.http2_opened, 10);
+        assert_eq!(agg.http2_reset, 9);
+        assert_eq!(agg.http2_active_max, 8);
+        assert_eq!(agg.routes[0].route_hash, 42);
+        assert_eq!(agg.routes[0].http2_reset, 9);
+    }
+
 }

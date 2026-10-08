@@ -39,12 +39,17 @@ pub struct ConnectionEvent {
 
 Created by the IPC server when it parses a client `ConnectionReport`. Fed into the detection engine's channel. The detection crate never creates these — it only consumes them.
 
+### EvidenceSource — first-party enforcement provenance
+
+`EvidenceSource` is intentionally limited to `LocalSignals`, `FleetSignals`, and `Operator`. Community/public reputation is not an authoritative enforcement source and therefore cannot be represented in the command vocabulary.
+
 ### EnforceCommand — the decision payload
 
 ```rust
 pub struct EnforceCommand {
     pub id: Uuid,              // unique decision ID (dedup key)
     pub action: EnforceAction,
+    pub evidence_source: EvidenceSource,
     pub ip: IpAddr,
     pub ttl_secs: Option<u64>,
     pub reason: BlockReason,
@@ -175,4 +180,4 @@ cargo bench --bench hot_paths --features full -- bounded_vec_deque
 
 ## Testing
 
-28 tests covering: `IpNetwork` pack/unpack round-trip for IPv4 and IPv6, `BoundedVecDeque` eviction at capacity, `BlockReason` string mapping round-trip, `RsError` display formatting, and `EnforceCommand` serialization.
+12 tests covering: `IpNetwork` pack/unpack round-trip for IPv4 and IPv6, `BoundedVecDeque` eviction at capacity, `BlockReason` string mapping round-trip, `RsError` display formatting, and `EnforceCommand` serialization.

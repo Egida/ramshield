@@ -138,4 +138,4 @@ cargo bench --bench hot_paths --features full -- subnet_key
 
 ## Testing
 
-52 tests covering: shard-level concurrency (10 threads inserting simultaneously), RAM limit enforcement (insert until limit hit, verify eviction), WAL append+replay round-trip, subnet index consistency (insert IP → verify subnet index → remove IP → verify index cleaned up), and expired entry eviction timing.
+38 tests covering: shard-level concurrency (10 threads inserting simultaneously), RAM limit enforcement (insert until limit hit, verify eviction), WAL append+replay round-trip, subnet index consistency (insert IP → verify subnet index → remove IP → verify index cleaned up), and expired entry eviction timing.

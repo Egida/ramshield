@@ -2,7 +2,7 @@
 - name: Run all gates in order
   ansible.builtin.command: "{{ gate.cmd }}"
   environment:
-    CARGO_HOME: "/home/m/.cargo"
+    CARGO_HOME: "{{ lookup('env', 'CARGO_HOME') | default(lookup('env', 'HOME') ~ '/.cargo', true) }}"
   args:
     chdir: "{{ project_dir }}"
   register: gate_results

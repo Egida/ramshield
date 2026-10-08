@@ -251,6 +251,18 @@ impl EnforcementService {
                     false
                 });
                 self.metrics.inc_blocks();
+                // First-party local/operator blocks clear a prior mesh suppression
+                // and may publish the decision to peers. Mesh-originated blocks do
+                // not rebroadcast, preventing gossip amplification.
+                if cmd.cidr.is_none() && cmd.source != "mesh" {
+                    self.mesh_operator_suppressions.remove(&cmd.ip);
+                    if let (Some(mesh), Some(handle)) = (&self.mesh_blocklist, &self.mesh_handle) {
+                        let ttl_ms = cmd.ttl_seconds.saturating_mul(1000);
+                        let delta = mesh.record_ban(cmd.ip, ttl_ms, 2);
+                        self.metrics.inc_mesh_record_ban();
+                        handle.broadcast(ramshield_mesh::MeshMessage::Block(delta)).await;
+                    }
+                }
                 let result = EnforceResult {
                     decision_id: cmd.decision_id,
                     committed: true,
@@ -301,9 +313,20 @@ impl EnforcementService {
                     // Ponytail: mesh CRDT unbans — publish so dashboard reflects
                     // live unblock activity. A CIDR unblock is NOT an IP unban.
                     if let Some(mesh) = &self.mesh_blocklist {
-                        mesh.record_unban(cmd.ip);
+                        let deltas = mesh.record_unban(cmd.ip);
                         self.metrics.inc_mesh_record_unban();
+                        if cmd.source != "mesh" {
+                            if let Some(handle) = &self.mesh_handle {
+                                for delta in deltas {
+                                    handle.broadcast(ramshield_mesh::MeshMessage::Unblock(delta)).await;
+                                }
+                            }
+                        }
                     }
+                    if cmd.source != "mesh" {
+                        self.mesh_operator_suppressions.insert(cmd.ip);
+                    }
+                    self.mesh_applied_ips.remove(&cmd.ip);
                     // Purge any pending TTL so a later re-block starts clean.
                     self.detach_expiration(cmd.ip);
                     if let Some(shared) = &self.checkpoint_shared {

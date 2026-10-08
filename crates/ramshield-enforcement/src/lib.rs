@@ -99,6 +99,9 @@ pub struct EnforcementService {
     /// Local blocks are authoritative; this CRDT absorbs peer deltas and
     /// merges them on the next enforcement tick. None = single-node.
     mesh_blocklist: Option<Arc<ramshield_mesh::aworset::AworsetBlocklist>>,
+    mesh_handle: Option<ramshield_mesh::MeshHandle>,
+    mesh_applied_ips: HashSet<IpAddr>,
+    mesh_operator_suppressions: HashSet<IpAddr>,
     /// Checkpoint coordination: barrier + absolute-deadline mirror. None =
     /// engine never attached one (standalone use, tests).
     checkpoint_shared: Option<Arc<CheckpointShared>>,
@@ -127,6 +130,9 @@ impl EnforcementService {
             shutdown,
             last_wal_lsn: None,
             mesh_blocklist: None,
+            mesh_handle: None,
+            mesh_applied_ips: HashSet::new(),
+            mesh_operator_suppressions: HashSet::new(),
             checkpoint_shared: None,
         }
     }
@@ -143,6 +149,12 @@ impl EnforcementService {
         mesh_blocklist: Arc<ramshield_mesh::aworset::AworsetBlocklist>,
     ) -> Self {
         self.mesh_blocklist = Some(mesh_blocklist);
+        self
+    }
+
+    /// Attach the authenticated mesh transport.
+    pub fn with_mesh_handle(mut self, mesh_handle: ramshield_mesh::MeshHandle) -> Self {
+        self.mesh_handle = Some(mesh_handle);
         self
     }
 

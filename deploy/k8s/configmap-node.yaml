@@ -17,7 +17,8 @@ data:
 
     [ipc]
     tcp_addr = "127.0.0.1:7890"
-    max_connections = 4096
+    max_connections = 1024
+    max_line_length = 262144
 
     [dashboard]
     enabled = true
@@ -44,4 +45,32 @@ data:
     enabled = true
     interface = "eth0"
     mode = "drv"
+    require_native_for_autonomous = true
     allow_inband_fallback = false
+
+    [native_ingest]
+    enabled = true
+    interface = "eth0"
+    max_events_per_sec = 20000
+
+    [autonomous]
+    enabled = true
+    syn_pps_per_cpu = 25000
+    udp_pps_per_cpu = 50000
+    packet_pps_per_cpu = 200000
+    window_ms = 100
+
+    [synproxy]
+    # Node-guard uses the host-tooling image, which includes nft/sysctl.
+    # This is intentionally enabled here; the ordinary server Deployment keeps
+    # SYNPROXY disabled because it does not own the host network namespace.
+    enabled = true
+    ports = [22, 53, 80, 443]
+    mss = 1460
+    wscale = 7
+    max_connections_per_source = 128
+    max_connections_total = 16384
+    new_connections_per_second = 50
+    new_connection_burst = 100
+    new_connections_total_per_second = 2000
+    new_connection_total_burst = 4000

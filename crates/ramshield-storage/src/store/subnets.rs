@@ -110,6 +110,8 @@ impl Store {
     }
 
     /// Update the reverse index for subnet lookups. Call after inserting/updating an IP record.
+    pub const MAX_SUBNET_INDEX_KEYS: usize = 131_072;
+
     pub fn update_subnet_index(
         &self,
         ip_key: IpAddr,
@@ -137,6 +139,12 @@ impl Store {
                 }
             }
         } else {
+            // Hard cardinality ceiling: IPv6 prefix hopping can manufacture an
+            // unbounded number of /64 keys. Detection continues to operate, but
+            // the reverse index refuses new keys once bounded capacity is reached.
+            if !self.subnet_index.contains_key(&sk) && self.subnet_index.len() >= Self::MAX_SUBNET_INDEX_KEYS {
+                return;
+            }
             self.subnet_index
                 .entry(sk)
                 .or_insert_with(

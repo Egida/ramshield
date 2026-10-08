@@ -131,4 +131,4 @@ No standalone benchmarks — metrics overhead is measured implicitly through the
 
 ## Testing
 
-22 tests covering: atomic counter accuracy under concurrent increment, batch history ring buffer overflow (old entries evicted), block log ring buffer overflow, Prometheus format validity (parsed by `prometheus::text::parse`), and dashboard snapshot field completeness.
+14 tests covering: atomic counter accuracy under concurrent increment, batch history ring buffer overflow (old entries evicted), block log ring buffer overflow, Prometheus format validity (parsed by `prometheus::text::parse`), and dashboard snapshot field completeness.

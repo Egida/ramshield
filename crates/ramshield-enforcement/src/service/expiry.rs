@@ -17,7 +17,8 @@ impl EnforcementService {
                 }
             }
         }
-        for ip in due {
+        for (idx, ip) in due.into_iter().enumerate() {
+            if idx > 0 && idx % 128 == 0 { tokio::task::yield_now().await; }
             let cmd = EnforceCommand {
                 decision_id: Uuid::new_v4(),
                 policy_version: 0,
@@ -29,6 +30,7 @@ impl EnforcementService {
                 ip,
                 cidr: None,
                 action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::LocalSignals,
             };
             match self.enforce(cmd).await {
                 Ok(_) => {
@@ -66,6 +68,7 @@ impl EnforcementService {
                 ip: network.addr,
                 cidr: Some(network),
                 action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::LocalSignals,
             };
             match self.enforce(cmd).await {
                 Ok(_) => {}

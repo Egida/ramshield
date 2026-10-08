@@ -11,8 +11,8 @@ XDP enforcement is required.
 | --- | --- |
 | `namespace.yaml` | Namespace |
 | `configmap.yaml` | Loopback-only server configuration; XDP disabled |
-| `deployment.yaml` | Single-replica server; local WAL on `emptyDir` |
-| `node-configmap.yaml` | Node-guard configuration |
+| `deployment.yaml` | Single-replica server; durable WAL on a `ReadWriteOnce` PVC |
+| `configmap-node.yaml` | Node-guard configuration |
 | `daemonset.yaml` | Host-network XDP node guard |
 | `rbac.yaml` | Service account / minimal RBAC |
 | `networkpolicy.yaml` | Network restrictions |
@@ -39,17 +39,24 @@ The dashboard password hash and IPC authentication key come from the
 
 The DaemonSet uses `hostNetwork: true`, the host `/sys/fs/bpf`, memory-backed
 `/dev/shm`, a host WAL directory, non-root UID/GID 65532, RuntimeDefault
-seccomp, privilege escalation disabled, and only `NET_ADMIN`, `BPF`, and
-`PERFMON` capabilities. `BPF` is the Kubernetes capability name corresponding
-to Linux `CAP_BPF`.
+seccomp, privilege escalation disabled, and only `NET_ADMIN`, `BPF`, `PERFMON`,
+and `NET_RAW` capabilities. `BPF` is the Kubernetes capability name
+corresponding to Linux `CAP_BPF`. The node guard uses the dedicated
+`Containerfile.node-guard` image because SYNPROXY/RSS setup requires `nft`,
+`sysctl`, and `ethtool`; the ordinary server image remains distroless.
 
 XDP remains kernel/driver/NIC dependent and must be qualified on target nodes.
 
 ## Build and deploy
 
 ```bash
-docker build --build-arg RAMSHIELD_VERSION=0.4.0 -t ghcr.io/grep999/ramshield:0.4.0 .
-docker push ghcr.io/grep999/ramshield:0.4.0
+docker build --build-arg RAMSHIELD_VERSION=0.6.0 -t ghcr.io/grep999/ramshield:0.6.0 .
+
+# Build the host-network node guard after producing target/release/ramshield.
+docker build -f Containerfile.node-guard -t ghcr.io/grep999/ramshield:0.6.0-node .
+
+docker push ghcr.io/grep999/ramshield:0.6.0
+docker push ghcr.io/grep999/ramshield:0.6.0-node
 kubectl apply -f deploy/k8s/
 ```
 
@@ -68,3 +75,16 @@ truths.
 allowed fallback, attach failure or a stale projection affects health according
 to the enforcement configuration. `/metrics` is Prometheus text exposition,
 not JSON.
+
+## Autonomous host defense
+
+The node-guard profile now enables three independent host-level defenses:
+
+1. XDP per-CPU packet/SYN/UDP budgets for cold-start flood control.
+2. Native AF_PACKET L3/L4 observation so direct SSH/DNS/custom-port attacks do not depend on proxy IPC.
+3. Linux kernel SYNPROXY is enabled in the node-guard profile; its dedicated host-tooling image supplies `nft` and `sysctl`.
+
+`NET_RAW` is required for AF_PACKET. `NET_ADMIN` is required for netfilter/XDP setup.
+Qualify the configured PPS thresholds and SYNPROXY ports on each node class before rollout.
+
+The ordinary Deployment intentionally leaves these host-network defenses disabled.

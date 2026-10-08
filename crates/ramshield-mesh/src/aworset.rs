@@ -9,8 +9,13 @@
 use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Dot = u64;
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
@@ -104,8 +109,9 @@ impl Default for Aworset {
 pub struct AworsetBlocklist {
     node_id: u32,
     hlc: Hlc,
-    entries: DashMap<(IpAddr, u32), (u32, u64)>,
-    tombstones: DashMap<(IpAddr, u32), u32>,
+    pub(crate) entries: DashMap<(IpAddr, u32), (u32, u64)>,
+    pub(crate) tombstones: DashMap<(IpAddr, u32), u32>,
+    tombstone_times: DashMap<(IpAddr, u32), u64>,
 }
 
 impl AworsetBlocklist {
@@ -115,13 +121,14 @@ impl AworsetBlocklist {
             hlc: Hlc::new(),
             entries: DashMap::new(),
             tombstones: DashMap::new(),
+            tombstone_times: DashMap::new(),
         }
     }
 
     /// Record a local ban. Returns the delta to broadcast to peers.
     pub fn record_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
         let (phys_ms, seq) = self.hlc.tick(0, 0);
-        let expires_at_ms = phys_ms + ttl_ms;
+        let expires_at_ms = if ttl_ms == 0 { u64::MAX } else { phys_ms.saturating_add(ttl_ms) };
 
         let dot = ClusterDot {
             node_id: self.node_id,
@@ -196,9 +203,14 @@ impl AworsetBlocklist {
     /// re-bans the IP. The horizon must exceed max network delay + clock
     /// skew across the fleet.
     pub fn purge_expired(&self, now_ms: u64) {
-        const TOMBSTONE_HORIZON_MS: u64 = 5_000;
+        const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
         self.entries
             .retain(|_, (_, exp)| now_ms.saturating_sub(*exp) < TOMBSTONE_HORIZON_MS);
+        self.tombstone_times.retain(|key, created| {
+            let keep = now_ms.saturating_sub(*created) < TOMBSTONE_HORIZON_MS;
+            if !keep { self.tombstones.remove(key); }
+            keep
+        });
     }
 
     /// Local unblock: create a tombstone delta for the observed local dot.
@@ -219,6 +231,7 @@ impl AworsetBlocklist {
                 .entry(key)
                 .and_modify(|existing| *existing = (*existing).max(counter))
                 .or_insert(counter);
+            self.tombstone_times.insert(key, now_ms());
             deltas.push(ClusterUnblockDelta {
                 ip,
                 dot: ClusterDot { node_id, counter },
@@ -244,6 +257,7 @@ impl AworsetBlocklist {
                 changed = true;
                 delta.dot.counter
             });
+        if changed { self.tombstone_times.insert(key, now_ms()); }
         // ponytail: avoid let-chains; drop the DashMap guard before remove.
         if self
             .entries
@@ -253,6 +267,26 @@ impl AworsetBlocklist {
             changed |= self.entries.remove(&key).is_some();
         }
         changed
+    }
+    /// Bounded anti-entropy snapshot used by the authenticated transport.
+    pub fn snapshot(&self, limit: usize) -> (Vec<ClusterBlockDelta>, Vec<ClusterUnblockDelta>) {
+        let mut blocks = Vec::new();
+        for e in self.entries.iter().take(limit) {
+            blocks.push(ClusterBlockDelta {
+                ip: e.key().0,
+                dot: ClusterDot { node_id: e.key().1, counter: e.value().0 },
+                expires_at_ms: e.value().1,
+                tier: 1,
+            });
+        }
+        let mut unblocks = Vec::new();
+        for e in self.tombstones.iter().take(limit.saturating_sub(blocks.len())) {
+            unblocks.push(ClusterUnblockDelta {
+                ip: e.key().0,
+                dot: ClusterDot { node_id: e.key().1, counter: *e.value() },
+            });
+        }
+        (blocks, unblocks)
     }
 }
 
@@ -295,7 +329,7 @@ mod tests {
         let mesh = AworsetBlocklist::new(1);
         let ip = IpAddr::from([203, 0, 113, 196]);
         let delta = mesh.record_ban(ip, 60_000, 2);
-        mesh.purge_expired(delta.expires_at_ms + 5_000);
+        mesh.purge_expired(delta.expires_at_ms + 86_400_000);
         assert!(mesh.is_empty(), "expired mesh state must be bounded");
     }
 
@@ -334,4 +368,19 @@ mod tests {
             "pre-unblock ban must not resurrect"
         );
     }
+    #[test]
+    fn snapshot_carries_active_dot_and_tombstone() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 7]);
+        let ban = mesh.record_ban(ip, 60_000, 1);
+        let (blocks, _) = mesh.snapshot(16);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].dot, ban.dot);
+        let unblocks = mesh.record_unban(ip);
+        assert_eq!(unblocks.len(), 1);
+        let (_, tombstones) = mesh.snapshot(16);
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].dot, ban.dot);
+    }
+
 }

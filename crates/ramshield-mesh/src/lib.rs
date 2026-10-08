@@ -1,7 +1,5 @@
-//! Fleet Federation via AWORSet CRDT & Hybrid Logical Clock (HLC)
-//!
-//! Distributed blocklist sync: Add-Wins Observed-Remove Set backed by
-//! DashMap, with a burst-safe HLC (64-bit ms + 32-bit logical counter).
-
+//! Fleet federation: AWORSet CRDT + authenticated TCP transport.
 pub mod aworset;
 pub mod hlc;
+pub mod transport;
+pub use transport::{MeshHandle, MeshMessage};

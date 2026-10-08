@@ -125,6 +125,7 @@ pub(crate) fn process_request(
                 ip: ip_addr,
                 cidr: None,
                 action: EnforceAction::Block,
+                evidence_source: ramshield_types::EvidenceSource::Operator,
             };
             match enforcement_tx.try_send(cmd) {
                 Ok(()) => {
@@ -180,6 +181,7 @@ pub(crate) fn process_request(
                 ip: network.addr,
                 cidr: Some(network),
                 action: EnforceAction::Block,
+                evidence_source: ramshield_types::EvidenceSource::Operator,
             };
             match enforcement_tx.try_send(cmd) {
                 Ok(()) => Response::Ok {
@@ -214,6 +216,7 @@ pub(crate) fn process_request(
                 ip: ip_addr,
                 cidr: None,
                 action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::Operator,
             };
             match enforcement_tx.try_send(cmd) {
                 Ok(()) => Response::Ok {
@@ -247,6 +250,7 @@ pub(crate) fn process_request(
                 ip: network.addr,
                 cidr: Some(network),
                 action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::Operator,
             };
             match enforcement_tx.try_send(cmd) {
                 Ok(()) => Response::Ok {
@@ -314,6 +318,8 @@ pub(crate) fn process_request(
             bytes,
             status_code,
             proto_fp,
+            l7,
+            http_request: _,
         } => {
             let ev = ConnectionEvent {
                 ip: match ip.parse() {
@@ -328,7 +334,8 @@ pub(crate) fn process_request(
                 timestamp_ns: now_ms() * 1_000_000,
                 bytes,
                 status_code,
-                proto_fingerprint: proto_fp,
+proto_fingerprint: proto_fp,
+                l7: l7,
             };
             // STAGE 1: Semantic shedding — at >=75% occupancy, shed low-signal
             // (routine 200 OK / benign fingerprint) to preserve space for
@@ -381,6 +388,7 @@ pub(crate) fn process_request(
                     bytes: cr.bytes,
                     status_code: cr.status_code,
                     proto_fingerprint: cr.proto_fp,
+                    l7: cr.l7.clone(),
                 };
                 // STAGE 1: Semantic shedding — at >=75% occupancy, shed low-signal
                 // (routine 200 OK / benign fingerprint) to preserve space for

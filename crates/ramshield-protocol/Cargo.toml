@@ -13,6 +13,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 ahash = "0.8"
+ramshield-types = { path = "../ramshield-types" }
 
 [dev-dependencies]
 proptest = "1"

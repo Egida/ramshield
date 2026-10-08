@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $EUID -eq 0 ]] || die 'run as root'
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'VERSION=x.y.z is required; latest/unpinned installs are forbidden'
-for c in curl tar sha256sum install systemctl useradd getent groupadd usermod; do need "$c"; done
+for c in curl tar sha256sum install systemctl useradd getent groupadd usermod od tr sed; do need "$c"; done
 need "$COSIGN_BIN"
 case "$(uname -m)" in
   x86_64|amd64) TARGET=x86_64-unknown-linux-gnu;;
@@ -52,6 +52,11 @@ install -o root -g root -m 0755 "$TMP/unpack/ramshield" "$PREFIX/bin/ramshield"
 install -o root -g root -m 0755 "$TMP/unpack/ramshield-cli" "$PREFIX/bin/ramshield-cli"
 if [[ ! -f "$CONFIG_DIR/config.toml" ]]; then
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$BASE/config.baseline.toml" -o "$CONFIG_DIR/config.toml"
+  # Replace the tracked development credential with a unique 256-bit key.
+  # The installed config remains HMAC-authenticated even on loopback.
+  IPC_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$IPC_KEY" =~ ^[0-9a-f]{64}$ ]] || die 'failed to generate IPC authentication key'
+  sed -i "s/k1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/k1:$IPC_KEY/" "$CONFIG_DIR/config.toml"
   chown root:"$GROUP_NAME" "$CONFIG_DIR/config.toml"; chmod 0640 "$CONFIG_DIR/config.toml"
 fi
 cat > /etc/systemd/system/ramshield.service <<UNIT
@@ -78,14 +83,16 @@ ProtectSystem=strict
 ProtectHome=true
 ProtectControlGroups=true
 ProtectKernelTunables=true
+# SYNPROXY needs exactly these three kernel tunables; keep all other tunables read-only.
+ReadWritePaths=/proc/sys/net/ipv4/tcp_syncookies /proc/sys/net/ipv4/tcp_timestamps /proc/sys/net/netfilter/nf_conntrack_tcp_loose
 ProtectKernelModules=true
 ProtectKernelLogs=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
-AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_NET_RAW
 ReadWritePaths=${STATE_DIR} /dev/shm /sys/fs/bpf
 
 [Install]

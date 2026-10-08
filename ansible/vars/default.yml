@@ -2,7 +2,7 @@
 # vars/default.yml — fill these per project/context
 # skeleton remains the same; only values change.
 
-project_dir: "/home/m/vehicle_of_rationalism/ramshield/beta/rs"
+project_dir: "{{ lookup('env', 'RAMSHIELD_PROJECT_DIR') | default(lookup('env', 'PWD'), true) }}"
 remote: "origin"
 branch: "master"
 

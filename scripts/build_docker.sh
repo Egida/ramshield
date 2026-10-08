@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 VERSION="$(scripts/release_version.sh)"
 TAG="${1:-$VERSION}"
 [[ "$TAG" == "$VERSION" ]] || { echo "tag $TAG != Cargo.toml $VERSION" >&2; exit 1; }
-XDP_ENABLED=true
+XDP_ENABLED=false
 [[ "${2:-}" == --no-xdp ]] && XDP_ENABLED=false
 [[ -x target/release/ramshield ]] || { echo 'build target/release/ramshield first' >&2; exit 1; }
 CTX="$(mktemp -d)"; trap 'rm -rf "$CTX"' EXIT

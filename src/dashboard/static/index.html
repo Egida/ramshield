@@ -586,8 +586,12 @@
   }
   function exportCSV(){
     const rows=document.querySelectorAll('#quarantineBody tr');
+    const csvSafe=v=>{
+      const value=v.replace(/^[=+\-@\t\r]/, m=>"'"+m);
+      return '"'+value.replace(/"/g,'""')+'"';
+    };
     let csv='IP,Module,Severity,Tier,Time\n';
-    rows.forEach(r=>{const cells=r.querySelectorAll('td');if(cells.length>=4)csv+=Array.from(cells).slice(0,4).map(c=>'"'+c.textContent.trim()+'"').join(',')+'\n';});
+    rows.forEach(r=>{const cells=r.querySelectorAll('td');if(cells.length>=4)csv+=Array.from(cells).slice(0,4).map(c=>csvSafe(c.textContent.trim())).join(',')+'\n';});
     const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='quarantine.csv';a.click();
   }
   refresh(); connectStream();

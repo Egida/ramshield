@@ -5,8 +5,8 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
-#define RAMSHIELD_SHM_TABLE_CAPACITY 65536
-#define RAMSHIELD_SHM_PROBE_LIMIT 4
+#define RAMSHIELD_SHM_TABLE_CAPACITY 262144
+#define RAMSHIELD_SHM_PROBE_LIMIT 8
 #define RAMSHIELD_FLAG_SHARED_INFRA 0x01
 
 static inline uint64_t
@@ -89,7 +89,7 @@ ramshield_shm_read(const RamshieldShmRuleEntry *table,
                 challenge_seed[i] = entry->challenge_seed[i];
 
             atomic_thread_fence(memory_order_acquire);
-            uint32_t after = atomic_load_explicit(&entry->seq, memory_order_relaxed);
+            uint32_t after = atomic_load_explicit(&entry->seq, memory_order_acquire);
             if (before != after || (after & 1u)) continue;
 
             if (client_hash == hash && expires_at_ms > now_ms) {
@@ -133,17 +133,14 @@ static inline void
 ramshield_shm_flush_all(RamshieldShmRuleEntry *table, uint64_t now_ms)
 {
     for (uint32_t i = 0; i < RAMSHIELD_SHM_TABLE_CAPACITY; i++) {
-        /* Relaxed is correct for the odd marker itself — but the marker must
-         * be VISIBLE before the payload stores, or a reader can observe a
-         * half-published entry while seq still reads even (before == after)
-         * and accept the tear. The audit's fix (release ON this increment)
-         * orders the previous cycle's stores, not the payload after it; the
-         * release FENCE here is what pairs with the reader's acquire fence. */
-        atomic_fetch_add_explicit(&table[i].seq, 1, memory_order_relaxed);
-        atomic_thread_fence(memory_order_release);
+        /* Publish the odd marker before clearing payload fields so readers
+         * cannot accept a partially reset slot on weakly ordered CPUs. */
+        atomic_fetch_add_explicit(&table[i].seq, 1, memory_order_release);
         atomic_store_explicit(&table[i].client_hash, 0, memory_order_relaxed);
         atomic_store_explicit(&table[i].expires_at_ms, now_ms, memory_order_relaxed);
+        atomic_store_explicit(&table[i].max_rps, 0, memory_order_relaxed);
         atomic_store_explicit(&table[i].tier, RAMSHIELD_TIER_ALLOW, memory_order_relaxed);
+        atomic_store_explicit(&table[i].flags, 0, memory_order_relaxed);
         atomic_fetch_add_explicit(&table[i].seq, 1, memory_order_release);
     }
 }

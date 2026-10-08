@@ -1,8 +1,58 @@
 # Changelog
 
+## Unreleased — Maturity hardening
+
+- Restore the XDP packet-boundary helpers, counters, and drop-event emitter required by the Aya program.
+- Make VXLAN/Geneve raw-pointer access verifier-safe.
+- Replace private AF_PACKET fanout groups with a shared `PACKET_FANOUT_HASH` group and remove a per-packet mutex from the native event budget.
+- Extend native overlay observation to inner IPv6 and prevent trusted outer LB/node addresses from becoming enforcement identities.
+- Scope SSRF inspection away from the HTTP `Host` header and add a localhost health-check regression test.
+- Make SYNPROXY ruleset generation testable, rate-limit SYNs before NOTRACK, preserve established flows under connection ceilings, and cleanly tear down on partial startup failure.
+- Restore Kubernetes separation between the sandboxed server Deployment and the host-network node-guard DaemonSet; disable SYNPROXY in the distroless node profile unless a host-netfilter helper is supplied.
+- Make the tracked baseline IPC configuration authenticated and have the installer replace its development credential with a unique 256-bit key.
+- Make the default Docker build a sandboxed profile with host-network defenses disabled unless explicitly requested.
+
+## 0.6.0 — Security gateway closure
+
+- Add native Linux AF_PACKET L3/L4 observation so proxy IPC is no longer the sole telemetry source.
+- Add bounded per-source SYN/UDP and aggregate packet controls in XDP; fix the previous double-counting path.
+- Add Linux kernel SYNPROXY integration for selected TCP ports.
+- Add a bounded deterministic HTTP/1.0/1.1 parser and WAF checks for SQLi, XSS, path traversal, command injection, SSRF, malformed and oversized requests.
+- Add non-blocking ExaBGP FlowSpec and RTBH command emission through a restrictive FIFO, including recovery withdrawal.
+- Require IPC HMAC credentials in every validated configuration, including loopback.
+- Add deployment capabilities/documentation for native host observation and keep the distroless Kubernetes profile from silently attempting unavailable host netfilter tooling.
+- Preserve the first-principles enforcement boundary: no community reputation feed becomes an enforcement authority.
+
+## 0.5.0 — First-party threat intelligence boundary
+
+- Enforcement decisions now carry explicit evidence provenance: local signals, trusted fleet signals, or operator action.
+- Community/public reputation feeds are intentionally not representable as an authoritative enforcement source.
+- Mesh-originated mitigations are marked as trusted fleet evidence.
+- Manual IPC mitigations are marked as operator evidence.
+- This keeps RamShield first-principles: reputation is never required for detection or blocking.
+- Add an optional autonomous XDP packet guard for cold-start SYN, UDP and aggregate packet floods.
+- Preserve bounded L7 metadata through the IPC ingress path; reduce decoded IPC batch size to 8,192 events.
+- Increase the CGNAT shared-memory table to 256K slots with an 8-probe window to reduce churn-driven saturation.
+
+
 Notable user-facing changes are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/) and releases use Semantic Versioning.
+
+## [0.5.0] - 2026-10-06
+
+### Feature release — integrated expansion
+- Extend the existing `ConnectionEvent` telemetry contract with bounded L7 and HTTP/2 metadata while preserving legacy wire compatibility.
+- Add route/method-aware L7 thresholds and HTTP/2 stream-reset detection through the existing detection and EnforcementService path.
+- Activate the existing AWORSet mesh foundation with authenticated TCP delta transport, bounded anti-entropy and safe remote unblock semantics.
+- Add uplink saturation detection and a vendor-neutral upstream mitigation webhook without changing the local XDP dataplane.
+- Keep XDP Linux-specific while allowing the core telemetry/protocol/userspace path to participate on non-Linux systems.
+
+### Verification contract
+- Existing WAL → Store → XDP ordering remains authoritative for every local and remote block.
+- Mesh traffic is HMAC authenticated and timestamp bounded.
+- L7 state is bounded per IP and route; raw URL/header/body data is not retained.
+- Upstream escalation is advisory/adapter-driven and cannot itself mutate local enforcement state.
 
 ## [0.4.0] - 2026-10-05
 

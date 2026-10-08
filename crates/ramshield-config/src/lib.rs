@@ -10,8 +10,9 @@ mod validate;
 
 pub use net::{is_loopback_bind, peer_is_trusted_proxy, xff_client};
 pub use sections::{
-    DashboardConfig, DetectionConfig, EngineConfig, ForecastingConfig, IpcConfig, KeyRole,
-    KeyRoleConfig, WalConfig, XdpConfig,
+    AutonomousConfig, DashboardConfig, DetectionConfig, EngineConfig, ForecastingConfig, IpcConfig, L7Rule,
+    KeyRole, KeyRoleConfig, MeshConfig, NativeIngestConfig, SynproxyConfig, UpstreamConfig,
+    WalConfig, XdpConfig,
 };
 
 use net::is_public_bind;
@@ -34,6 +35,16 @@ pub struct Config {
     pub wal: WalConfig,
     #[serde(default)]
     pub dashboard: DashboardConfig,
+    #[serde(default)]
+    pub mesh: MeshConfig,
+    #[serde(default)]
+    pub upstream: UpstreamConfig,
+    #[serde(default)]
+    pub autonomous: AutonomousConfig,
+    #[serde(default)]
+    pub native_ingest: NativeIngestConfig,
+    #[serde(default)]
+    pub synproxy: SynproxyConfig,
 }
 
 /// Sentinel used by the dashboard's GET /api/config for secret fields.

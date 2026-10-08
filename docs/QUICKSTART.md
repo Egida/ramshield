@@ -11,7 +11,9 @@ cd ramshield
 cargo build --release --locked --features full
 
 # 2. Start with baseline config, no XDP
+# The baseline contains a public dev-only loopback HMAC key; replace it before production.
 cp config.baseline.toml config.toml
+RAMSHIELD_AUTONOMOUS__ENABLED=false RAMSHIELD_NATIVE_INGEST__ENABLED=false RAMSHIELD_SYNPROXY__ENABLED=false \
 ./target/release/ramshield --config config.toml --no-xdp
 
 # 3. Verify it's running

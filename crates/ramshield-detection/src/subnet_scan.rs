@@ -195,6 +195,7 @@ impl DetectionEngine {
                         ip: cidr.addr,
                         cidr: Some(cidr),
                         action: EnforceAction::Block,
+                        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
                     };
                     if self.enforcement_tx.try_send(cmd).is_err() {
                         self.retreat_mitigation(key);

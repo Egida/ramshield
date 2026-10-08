@@ -10,6 +10,7 @@ toml = "1"
 arc-swap = "1"
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
+hex = "0.4"
 
 [dev-dependencies]
 serial_test = "3"

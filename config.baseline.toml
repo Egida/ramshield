@@ -1,9 +1,9 @@
 # config.baseline.toml — THE canonical template. Every config in this repo
 # derives from it; hand-rolled per-harness configs are forbidden.
 # Covers every field of Config (crates/ramshield-config). All features
-# enabled, detection-priority tuned. Secrets (IPC auth key, admin hash) are
-# NOT here — add them in your local overlay (config.prod.toml etc.,
-# gitignored) or via RAMSHIELD_*__ env overrides.
+# enabled, detection-priority tuned. The IPC key below is a public development
+# credential only; every real deployment MUST replace it through the installer
+# or RAMSHIELD_IPC__AUTH_KEYS before exposing any untrusted local principal.
 #
 # Harnesses (suite e2e, stress) generate scratch configs from this file with
 # surgical overrides only (ports, wal.dir, xdp toggle). Never copy-paste a
@@ -60,19 +60,37 @@ subnet_burst_ttl_secs = 60
 pulse_window_secs = 5
 pulse_threshold_samples = 3
 
+# ── L7 / HTTP2 ─────────────────────────────────────────────────────────
+l7_enabled = false
+l7_rps_threshold = 500
+l7_http2_min_streams = 32
+l7_http2_reset_ratio_pct = 80
+l7_block_ttl_secs = 300
+# Example route rule (disabled by default):
+# [[detection.l7_rules]]
+# route_hash = 123456789
+# method = "Post"
+# max_rps = 50
+# max_http2_reset_ratio_pct = 70
+# max_latency_us = 250000
+# cost_weight = 8.0
+# baseline_latency_us = 100000
+# max_effective_rps = 100
+
 [ipc]
 tcp_addr = "127.0.0.1:7890"
-max_connections = 8192
-max_line_length = 33_554_432
+max_connections = 1024
+max_line_length = 262_144
 max_connection_bytes = 1_048_576
 read_timeout_ms = 5000
 write_timeout_ms = 5000
 connection_idle_timeout_ms = 30_000
-# `key_id:hex_key` (>=16 bytes hex). Non-empty ⇒ every frame MUST carry a
-# valid HMAC envelope. Put the real key in a gitignored overlay — never here.
-auth_keys = []
-# Set true (CI/staging) to refuse booting with empty auth_keys.
-require_auth = false
+# Development-only loopback credential. It is intentionally public and MUST be
+# replaced in any deployment where an untrusted local principal exists.
+# Every IPC frame remains HMAC-authenticated even on loopback.
+auth_keys = ["k1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+key_roles = [{ key_id = "k1", role = "Admin" }]
+require_auth = true
 
 [dashboard]
 enabled = true
@@ -110,4 +128,61 @@ min_entropy = 4.5
 # (setcap re-applied after every rebuild). Fails gracefully → in-band.
 enabled = true
 interface = "eth0"
-mode = "skb"
+mode = "drv"
+require_native_for_autonomous = true
+require_rss_rebalance = true
+# Example cloud/LB node identity prefixes; keep empty unless this host receives
+# traffic through an overlay whose outer source is not the real client.
+trusted_overlay_cidrs = []
+
+
+# ── Fleet mesh ─────────────────────────────────────────────────────────
+[mesh]
+enabled = false
+node_id = 1
+listen_addr = "127.0.0.1:7900"
+peers = []
+# Required when enabled. Keep in a local overlay, not this template.
+auth_key = ""
+
+# ── Upstream saturation escalation ────────────────────────────────────
+[upstream]
+enabled = false
+interface = "eth0"
+link_capacity_mbps = 0
+saturation_pct = 90
+poll_ms = 1000
+webhook_url = ""
+cooldown_secs = 60
+bgp_mode = "none"
+bgp_fifo = ""
+protected_prefix = ""
+bgp_community = ""
+
+
+[autonomous]
+# First-line cold-start packet protection in XDP. Production baseline enabled.
+enabled = true
+syn_pps_per_cpu = 25000
+udp_pps_per_cpu = 50000
+packet_pps_per_cpu = 200000
+window_ms = 100
+
+# ── Native host observation ────────────────────────────────────────────
+[native_ingest]
+enabled = true
+interface = "eth0"
+max_events_per_sec = 20000
+
+# ── Kernel SYN proxy ──────────────────────────────────────────────────
+[synproxy]
+enabled = true
+ports = [22, 53, 80, 443]
+mss = 1460
+wscale = 7
+max_connections_per_source = 128
+max_connections_total = 16384
+new_connections_per_second = 50
+new_connection_burst = 100
+new_connections_total_per_second = 2000
+new_connection_total_burst = 4000

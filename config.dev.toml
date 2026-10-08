@@ -9,7 +9,7 @@ ram_limit_mb = 1024
 tcp_addr = "127.0.0.1:7890"
 max_connections = 1000
 max_line_length = 1048576
-# auth_keys = []  # empty = open (dev only)
+# auth_keys must be supplied for every profile; use a local overlay or RAMSHIELD_IPC__AUTH_KEYS
 # key_roles = []
 
 [dashboard]

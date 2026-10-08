@@ -23,7 +23,7 @@ unused_imports = "warn"
 
 [package]
 name    = "ramshield"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 
@@ -81,6 +81,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+libc = "0.2"
 rand = "0.9"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -98,7 +99,7 @@ ramshield-forecasting = { path = "crates/ramshield-forecasting", version = "0.1.
 ramshield-protocol = { path = "crates/ramshield-protocol", version = "0.1.0" }
 ramshield-cgnat = { path = "crates/ramshield-cgnat", version = "0.1.0" }
 ramshield-analytics = { path = "crates/ramshield-analytics", version = "0.1.0" }
-ramshield-mesh = { path = "crates/ramshield-mesh", version = "0.1.0" }
+ramshield-mesh = { path = "crates/ramshield-mesh", version = "0.2.0" }
 
 [dev-dependencies]
 serial_test = "3"

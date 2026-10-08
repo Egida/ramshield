@@ -58,7 +58,7 @@ struct ConnectionConfig {
 const DEFAULT_MAX_CONNECTION_BYTES: usize = 1_048_576; // 1MB per connection
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_WRITE_TIMEOUT_MS: u64 = 5000;
-const BATCH_MAX: usize = 1_000_000;
+const BATCH_MAX: usize = 8_192;
 /// Upper bound on a block TTL. 1 year in seconds — the panic class here is
 /// `Instant::now() + Duration::from_secs(u64::MAX)` overflowing; the clamp
 /// keeps every TTL arithmetic in the enforcement task well inside range.

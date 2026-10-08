@@ -166,6 +166,7 @@ fn enforcement_queue_full_returns_503() {
         ip: "10.0.0.1".parse().unwrap(),
         cidr: None,
         action: EnforceAction::Block,
+        evidence_source: ramshield_types::EvidenceSource::Operator,
     };
     tx.try_send(cmd).unwrap();
     // Second send → full
@@ -180,6 +181,7 @@ fn enforcement_queue_full_returns_503() {
         ip: "10.0.0.2".parse().unwrap(),
         cidr: None,
         action: EnforceAction::Block,
+        evidence_source: ramshield_types::EvidenceSource::Operator,
     });
     assert!(err.is_err());
     // The response builder turns this into 503 "enforcement queue full"

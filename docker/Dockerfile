@@ -16,7 +16,7 @@
 # still serves IPC + dashboard; XDP reports inactive.
 FROM debian:bookworm-slim
 ARG RAMSHIELD_VERSION
-ARG XDP_ENABLED=true
+ARG XDP_ENABLED=false
 ENV XDP_ENABLED=$XDP_ENABLED
 
 RUN apt-get update \

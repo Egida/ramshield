@@ -18,8 +18,8 @@ Group=ramshield
 # Minimal capabilities for Aya eBPF/XDP. CAP_BPF + CAP_PERFMON cover
 # map creation and program load; CAP_NET_ADMIN covers XDP attach and
 # NIC-level operations. Everything else is denied.
-AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_NET_RAW
 
 # Sandboxing
 NoNewPrivileges=true
@@ -28,7 +28,11 @@ ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectControlGroups=true
-ProtectKernelTunables=true
+# SYNPROXY changes exactly three kernel tunables at startup. ProtectKernelTunables
+# cannot be combined with those writes; the service remains capability-bounded and
+# does not grant general device/filesystem access.
+ProtectKernelTunables=false
+ReadWritePaths=/proc/sys/net/ipv4/tcp_syncookies /proc/sys/net/ipv4/tcp_timestamps /proc/sys/net/netfilter/nf_conntrack_tcp_loose
 ProtectKernelModules=true
 # Write access is restricted to these three locations:
 #   /var/lib/ramshield  — WAL segments + checkpoint

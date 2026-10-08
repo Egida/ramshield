@@ -1,6 +1,32 @@
 use super::*;
 
 impl DetectionEngine {
+    /// Emit a bounded application-layer mitigation through the same enforcement
+    /// queue as every other detector. L7 never bypasses WAL/XDP authority.
+    pub(crate) fn emit_l7_block(&self, ip: IpAddr, reason: BlockReason, ttl_secs: u64) {
+        let key = (ip, reason);
+        if !self.admit_mitigation(key, ttl_secs, now_ns()) {
+            return;
+        }
+        let cmd = EnforceCommand {
+            decision_id: Uuid::new_v4(),
+            policy_version: 1,
+            source: "detection-l7".into(),
+            actor: "system".into(),
+            timestamp_utc: (now_ns() / 1_000_000_000) as i64,
+            ttl_seconds: ttl_secs,
+            reason: reason.as_str().into(),
+            ip,
+            cidr: None,
+            action: EnforceAction::Block,
+            evidence_source: ramshield_types::EvidenceSource::LocalSignals,
+        };
+        match self.enforcement_tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(_) => self.retreat_mitigation(key),
+        }
+    }
+
     /// Step 3 fast path: emit a per-IP block the instant its unflushed-window
     /// event count crosses `emergency_threshold`, instead of waiting for the
     /// periodic flush (~50-1000ms of uninhibited traffic). `local` drains at
@@ -83,6 +109,7 @@ impl DetectionEngine {
             ip,
             cidr: None,
             action: EnforceAction::Block,
+            evidence_source: ramshield_types::EvidenceSource::LocalSignals,
         };
         match self.enforcement_tx.try_send(cmd) {
             Ok(()) => {

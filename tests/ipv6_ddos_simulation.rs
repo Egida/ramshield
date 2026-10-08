@@ -27,6 +27,7 @@ fn ev(ip: IpAddr, ts: u64) -> ConnectionEvent {
         bytes: 64,
         status_code: 200,
         proto_fingerprint: 0,
+        l7: None,
     }
 }
 

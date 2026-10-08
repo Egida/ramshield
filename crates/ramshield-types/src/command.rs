@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::IpNetwork;
+
+/// Provenance of an enforcement decision. Community reputation is deliberately
+/// not representable here: RamShield decisions must originate from local
+/// telemetry, trusted RamShield fleet evidence, or an explicit operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceSource {
+    LocalSignals,
+    FleetSignals,
+    Operator,
+}
+
+impl Default for EvidenceSource {
+    fn default() -> Self { Self::LocalSignals }
+}
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +34,10 @@ pub struct EnforceCommand {
     #[serde(default)]
     pub cidr: Option<IpNetwork>,
     pub action: EnforceAction,
+    /// First-party provenance. External/community reputation is intentionally
+    /// excluded from the enforcement vocabulary.
+    #[serde(default)]
+    pub evidence_source: EvidenceSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +73,18 @@ pub enum EnforcementError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enforcement_provenance_excludes_external_reputation() {
+        let local = EvidenceSource::LocalSignals;
+        let fleet = EvidenceSource::FleetSignals;
+        let operator = EvidenceSource::Operator;
+        assert_ne!(local, fleet);
+        assert_ne!(local, operator);
+        assert_ne!(fleet, operator);
+        let encoded = serde_json::to_string(&fleet).unwrap();
+        assert_eq!(encoded, "\"FleetSignals\"");
+    }
 
     #[test]
     fn cidr_target_preserves_normalized_network() {

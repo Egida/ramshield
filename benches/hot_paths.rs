@@ -141,6 +141,7 @@ fn bench_batch_aggregate(n: usize) -> f64 {
             bytes: 256,
             status_code: 200,
             proto_fingerprint: 1,
+            l7: None,
         })
         .collect();
     let t0 = Instant::now();
@@ -279,6 +280,8 @@ fn bench_request_serialize(n: usize) -> f64 {
                 bytes: 256,
                 status_code: 200,
                 proto_fp: 1,
+                l7: None,
+                http_request: None,
             })
             .collect(),
     };
@@ -300,6 +303,8 @@ fn bench_request_deserialize(n: usize) -> f64 {
                 bytes: 256,
                 status_code: 200,
                 proto_fp: 1,
+                l7: None,
+                http_request: None,
             })
             .collect(),
     };
@@ -448,6 +453,7 @@ fn bench_aggregate_2000_subnets(n: usize) -> f64 {
                 bytes: 65535,
                 status_code: 502,
                 proto_fingerprint: 42,
+                l7: None,
             }
         })
         .collect();

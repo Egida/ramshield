@@ -111,4 +111,4 @@ No standalone benchmarks — the forecaster runs every 10 seconds and consumes <
 
 ## Testing
 
-31 tests covering: Holt-Winters forecast accuracy on synthetic seasonal data, CUSUM warmup period (6 samples), CUSUM drift detection below individual thresholds, Bayesian hypothesis classification (flash crowd vs. slow ramp with identical event curves), and edge cases (zero events, single-sample windows).
+19 tests covering: Holt-Winters forecast accuracy on synthetic seasonal data, CUSUM warmup period (6 samples), CUSUM drift detection below individual thresholds, Bayesian hypothesis classification (flash crowd vs. slow ramp with identical event curves), and edge cases (zero events, single-sample windows).

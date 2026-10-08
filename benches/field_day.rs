@@ -47,6 +47,7 @@ fn events_for(
             bytes: 256,
             status_code: 200,
             proto_fingerprint: 1,
+            l7: None,
         });
     }
     out
@@ -229,6 +230,7 @@ fn enf_block_cmd(ip: IpAddr, ttl: u64, id: uuid::Uuid) -> ramshield_types::Enfor
         ip,
         cidr: None,
         action: ramshield_types::EnforceAction::Block,
+            evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 
@@ -244,6 +246,7 @@ fn enf_unblock_cmd(ip: IpAddr, id: uuid::Uuid) -> ramshield_types::EnforceComman
         ip,
         cidr: None,
         action: ramshield_types::EnforceAction::Unblock,
+        evidence_source: ramshield_types::EvidenceSource::LocalSignals,
     }
 }
 

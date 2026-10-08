@@ -28,6 +28,9 @@ pub enum BlockReason {
     ForecastAnomaly,
     EntropyAnomaly,
     ManualBlock,
+    L7HighRps,
+    L7Cost,
+    Http2StreamAbuse,
 }
 
 impl BlockReason {
@@ -39,6 +42,9 @@ impl BlockReason {
             BlockReason::ForecastAnomaly => "forecast_anomaly",
             BlockReason::EntropyAnomaly => "entropy_anomaly",
             BlockReason::ManualBlock => "manual",
+            BlockReason::L7HighRps => "l7_high_rps",
+            BlockReason::L7Cost => "l7_cost",
+            BlockReason::Http2StreamAbuse => "http2_stream_abuse",
         }
     }
 
@@ -50,6 +56,9 @@ impl BlockReason {
             "forecast_anomaly" => Some(BlockReason::ForecastAnomaly),
             "entropy_anomaly" | "anomaly" => Some(BlockReason::EntropyAnomaly),
             "manual" | "manual_unblock" | "manual_block" => Some(BlockReason::ManualBlock),
+            "l7_high_rps" => Some(BlockReason::L7HighRps),
+            "l7_cost" => Some(BlockReason::L7Cost),
+            "http2_stream_abuse" => Some(BlockReason::Http2StreamAbuse),
             // Mesh gossip emits its own reason strings; no canonical variant
             // exists (wire-shared enum). ManualBlock fallback is the intended
             // safe behavior — recognizing the tokens quiets spurious WARNs.
@@ -68,4 +77,16 @@ pub enum Durability {
     Fsync,
     #[default]
     GroupCommit,
+}
+
+
+#[cfg(test)]
+mod block_reason_tests {
+    use super::BlockReason;
+
+    #[test]
+    fn l7_cost_reason_round_trips() {
+        assert_eq!(BlockReason::from_reason_str("l7_cost"), Some(BlockReason::L7Cost));
+        assert_eq!(BlockReason::L7Cost.as_str(), "l7_cost");
+    }
 }

@@ -14,7 +14,7 @@
 use crate::{EnforcementError, ReconciliationState, XdpApplier, XdpDropEvent};
 use aya::Ebpf;
 use aya::maps::{
-    HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues, RingBuf,
+    Array as AyaArray, HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues, RingBuf,
     lpm_trie::{Key as LpmKey, LpmTrie},
 };
 use aya::programs::Xdp;
@@ -260,6 +260,7 @@ impl AyaXdpApplier {
     /// Load ELF + attach + return. Errors surface verbatim for boot logging.
     pub fn load_and_attach(&mut self) -> Result<(), EnforcementError> {
         let mut bpf = Ebpf::load(ramshield_xdp::BPF_ELF).map_err(map_err)?;
+
         let program: &mut Xdp = bpf
             .program_mut("ramshield_xdp")
             .ok_or_else(|| EnforcementError::Xdp("program ramshield_xdp missing".into()))?
@@ -305,6 +306,14 @@ impl AyaXdpApplier {
             .ok_or_else(|| EnforcementError::Xdp(format!("{name} map missing")))?;
         let mut trie = LpmTrie::try_from(map).map_err(map_err)?;
         f(&mut trie).map_err(map_err)
+    }
+
+    pub fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
+        let bpf = self.bpf.as_mut().ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
+        let map = bpf.map_mut("AUTONOMOUS_CONFIG").ok_or_else(|| EnforcementError::Xdp("AUTONOMOUS_CONFIG map missing".into()))?;
+        let mut cfg: AyaArray<_, [u64; 4]> = AyaArray::try_from(map).map_err(map_err)?;
+        let values = if enabled { [syn_pps_per_cpu, udp_pps_per_cpu, packet_pps_per_cpu, window_ms] } else { [0, 0, 0, 0] };
+        cfg.set(0, values, 0).map_err(map_err)
     }
 
     /// Read XDP per-CPU drop counters. Returns [v4_drop, v6_drop, pass, parse_fail]
@@ -376,6 +385,36 @@ pub fn parse_drop_event(rec: &[u8]) -> Option<XdpDropEvent> {
 
 #[async_trait::async_trait]
 impl XdpApplier for AyaXdpApplier {
+    fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        AyaXdpApplier::configure_trusted_overlay(self, cidrs)
+    }
+
+    fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
+        AyaXdpApplier::configure_autonomous(self, enabled, syn_pps_per_cpu, udp_pps_per_cpu, packet_pps_per_cpu, window_ms)
+    }
+
+    pub fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        let bpf = self.bpf.as_mut().ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
+        let mut v4 = LpmTrie::try_from(
+            bpf.map_mut("TRUSTED_OVERLAY4").ok_or_else(|| EnforcementError::Xdp("TRUSTED_OVERLAY4 map missing".into()))?
+        ).map_err(map_err)?;
+        let mut v6 = LpmTrie::try_from(
+            bpf.map_mut("TRUSTED_OVERLAY6").ok_or_else(|| EnforcementError::Xdp("TRUSTED_OVERLAY6 map missing".into()))?
+        ).map_err(map_err)?;
+        for network in cidrs {
+            let bytes = BlocklistKey::from_ip(network.addr).0;
+            let mut data = [0u64; 2];
+            data[0] = u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+            data[1] = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+            let key = LpmKey::new(network.prefix_len as u32, data);
+            match network.addr {
+                IpAddr::V4(_) => { v4.insert(key, 1, 0).map_err(map_err)?; }
+                IpAddr::V6(_) => { v6.insert(key, 1, 0).map_err(map_err)?; }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_block(
         &mut self,
         ip: IpAddr,

@@ -80,7 +80,28 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
             );
             match applier.load_and_attach() {
                 Ok(()) => {
-                    tracing::info!(iface = %cfg_snapshot.xdp.interface, mode = %cfg_snapshot.xdp.mode, "XDP dataplane active");
+                    if cfg_snapshot.autonomous.enabled {
+                        if let Err(e) = crate::engine::rss::rebalance(
+                            &cfg_snapshot.xdp.interface,
+                            cfg_snapshot.xdp.require_rss_rebalance,
+                        ) {
+                            if hard_xdp {
+                                return Err(std::io::Error::other(format!("RSS rebalance required but unavailable: {e}")));
+                            }
+                            tracing::warn!(error = %e, "RSS rebalance unavailable");
+                        }
+                    }
+                    if let Err(e) = applier.configure_trusted_overlay(&cfg_snapshot.xdp.trusted_overlay_cidrs) {
+                        tracing::error!(error = %e, "failed to configure trusted overlay source prefixes");
+                        if hard_xdp {
+                            return Err(std::io::Error::other(format!("trusted overlay configuration failed: {e}")));
+                        }
+                    }
+                    if let Err(e) = applier.configure_autonomous(cfg_snapshot.autonomous.enabled, cfg_snapshot.autonomous.syn_pps_per_cpu, cfg_snapshot.autonomous.udp_pps_per_cpu, cfg_snapshot.autonomous.packet_pps_per_cpu, cfg_snapshot.autonomous.window_ms) {
+                        tracing::error!(error = %e, "failed to configure autonomous XDP guard");
+                        if hard_xdp { return Err(std::io::Error::other(format!("autonomous XDP configuration failed: {e}"))); }
+                    }
+                    tracing::info!(iface = %cfg_snapshot.xdp.interface, mode = %cfg_snapshot.xdp.mode, autonomous = cfg_snapshot.autonomous.enabled, "XDP dataplane active");
                     engine.xdp_active.store(true, Ordering::Release);
                     metrics.set_xdp_projection_active(true);
                     Box::new(applier)
@@ -119,12 +140,46 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     } else {
         Box::new(StubXdpApplier)
     };
+    let mesh_blocklist = if cfg_snapshot.mesh.enabled {
+        Some(Arc::new(AworsetBlocklist::new(cfg_snapshot.mesh.node_id)))
+    } else {
+        None
+    };
+    let mesh_handle = if cfg_snapshot.mesh.enabled {
+        let listen = cfg_snapshot.mesh.listen_addr.parse().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh.listen_addr: {e}"))
+        })?;
+        let mut peers = Vec::with_capacity(cfg_snapshot.mesh.peers.len());
+        for peer in &cfg_snapshot.mesh.peers {
+            peers.push(peer.parse().map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh peer {peer}: {e}"))
+            })?);
+        }
+        let key = hex::decode(cfg_snapshot.mesh.auth_key.trim()).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh.auth_key: {e}"))
+        })?;
+        let blocklist = mesh_blocklist.as_ref().cloned().ok_or_else(|| {
+            std::io::Error::other("mesh enabled without a blocklist")
+        })?;
+        Some(MeshHandle::bind(cfg_snapshot.mesh.node_id, blocklist, listen, peers, key).await.map_err(|e| {
+            std::io::Error::other(format!("mesh bind failed: {e}"))
+        })?)
+    } else {
+        None
+    };
+
     let mut enforcement = EnforcementService::new(
         store.clone(),
         metrics.clone(),
         xdp_box,
         enforcement_shutdown.clone(),
     );
+    if let Some(mesh) = mesh_blocklist {
+        enforcement = enforcement.with_mesh_blocklist(mesh);
+    }
+    if let Some(handle) = mesh_handle {
+        enforcement = enforcement.with_mesh_handle(handle);
+    }
     // Checkpoint coordination: barrier + deadline mirror shared with the
     // periodic checkpoint loop (PATCH 7/8: build_snapshot consumes real state).
     let checkpoint_shared = Arc::new(CheckpointShared::new());
@@ -339,16 +394,44 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         engine.shutdown.clone(),
     )?);
     let event_tx = detection.event_sender();
+    if cfg_snapshot.native_ingest.enabled {
+        if let Err(e) = crate::engine::native::spawn(
+            cfg_snapshot.native_ingest.interface.clone(),
+            cfg_snapshot.native_ingest.max_events_per_sec,
+            cfg_snapshot.xdp.trusted_overlay_cidrs.clone(),
+            event_tx.clone(),
+            engine.shutdown.clone(),
+        ) {
+            return Err(std::io::Error::other(format!("native ingest start failed: {e}")));
+        }
+    }
+    if cfg_snapshot.synproxy.enabled {
+        if let Err(e) = crate::engine::synproxy::install(&cfg_snapshot.synproxy, &cfg_snapshot.xdp.interface) {
+            engine.shutdown.store(true, Ordering::Release);
+            return Err(std::io::Error::other(format!("synproxy setup failed: {e}")));
+        }
+    }
     let detection_started = detection
         .clone()
         .spawn_workers(cfg_snapshot.engine.worker_threads);
     if !detection_started {
         engine.pipeline_failed.store(true, Ordering::Release);
+        engine.shutdown.store(true, Ordering::Release);
+        if cfg_snapshot.synproxy.enabled {
+            let _ = crate::engine::synproxy::uninstall();
+        }
         return Err(std::io::Error::other(
             "detection workers failed to start; refusing ready state",
         ));
     }
     *engine.detection.lock().unwrap_or_else(|e| e.into_inner()) = Some(detection.clone());
+
+    let upstream_cfg = Arc::new(cfg_snapshot.clone());
+    let upstream_metrics = metrics.clone();
+    let mut upstream_shutdown = engine.shutdown_rx();
+    tokio::spawn(async move {
+        crate::engine::upstream::run(upstream_cfg, upstream_metrics, upstream_shutdown).await;
+    });
 
     let mut forecaster = if cfg_snapshot.forecasting.enabled {
         let forecaster = Arc::new(Forecaster::new(
@@ -381,14 +464,23 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     let store_arc = store.clone();
     let cfg_dir = cfg_snapshot.wal.dir;
 
-    let server = crate::ipc::server::IpcServer::bind(
+    let server = match crate::ipc::server::IpcServer::bind(
         cfg_handle.clone(),
         engine.clone(),
         event_tx,
         store,
         engine.enforcement_tx.clone(),
     )
-    .await?;
+    .await {
+        Ok(server) => server,
+        Err(e) => {
+            if cfg_snapshot.synproxy.enabled {
+                let _ = crate::engine::synproxy::uninstall();
+            }
+            engine.shutdown.store(true, Ordering::Release);
+            return Err(e);
+        }
+    };
     // Pipeline is genuinely serving: enforcement, detection, IPC all running.
     // boot_pipeline blocks in select! below until shutdown, so this is the
     // one place readiness can be observed while the daemon is live.
@@ -485,13 +577,18 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 }
             }
             if let Some((_, handle)) = forecaster.as_mut() {
-                    tokio::select! {
-                        _ = handle => {}
-                        _ = tokio::time::sleep_until(deadline) => {
-                            tracing::warn!("forecaster shutdown timed out");
-                        }
+                tokio::select! {
+                    _ = handle => {}
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!("forecaster shutdown timed out");
                     }
                 }
+            }
+        }
+    }
+    if cfg_snapshot.synproxy.enabled {
+        if let Err(e) = crate::engine::synproxy::uninstall() {
+            tracing::warn!(error = %e, "failed to remove RamShield SYNPROXY ruleset during shutdown");
         }
     }
     Ok(())

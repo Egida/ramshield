@@ -11,8 +11,8 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-pub const SHM_TABLE_CAPACITY: usize = 65_536; // 64K rule slots
-pub const SHM_PROBE_LIMIT: usize = 4;
+pub const SHM_TABLE_CAPACITY: usize = 262_144; // 256K rule slots (~32 MiB at 128 B/slot)
+pub const SHM_PROBE_LIMIT: usize = 8;
 
 /// Stable Rust/C slot key for an IPv4 network prefix.
 pub fn subnet_key(network: u32, prefix_len: u8) -> u64 {
@@ -145,7 +145,7 @@ impl ShmTableManager {
 
         // Seqlock publication: odd means a reader must retry; the final even
         // Release publishes the complete rule as one coherent snapshot.
-        slot.seq.fetch_add(1, Ordering::Relaxed);
+        slot.seq.fetch_add(1, Ordering::Release);
         // The odd marker must be globally visible before the payload stores
         // (Relaxed alone lets them overtake it on ARM64, so a reader can see
         // a half-published entry with before == after and accept the tear).

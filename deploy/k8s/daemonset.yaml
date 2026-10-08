@@ -26,7 +26,7 @@ spec:
         - operator: Exists
       containers:
         - name: ramshield
-          image: ghcr.io/grep999/ramshield:0.4.0
+          image: ghcr.io/grep999/ramshield:0.6.0-node
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/ramshield/config.toml"]
           securityContext:
@@ -36,10 +36,12 @@ spec:
             seccompProfile:
               type: RuntimeDefault
             capabilities:
+              drop: ["ALL"]
               add:
                 - NET_ADMIN
                 - BPF
                 - PERFMON
+                - NET_RAW
             # BPF map creation needs CAP_BPF; drop everything else the
             # container does not need.
             allowPrivilegeEscalation: false

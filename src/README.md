@@ -96,7 +96,7 @@ pub struct IpcServer {
 
 Binds to `127.0.0.1:7890` (configurable). Each connection is a tokio task that:
 
-1. Reads a line (up to `max_line_length`, default 32MB).
+1. Reads a line (up to `max_line_length`, default 256 KiB).
 2. Parses it as `Message` (protocol crate).
 3. Verifies HMAC authentication if configured.
 4. Dispatches the `Request` to the appropriate handler.

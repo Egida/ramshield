@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use ramshield_types::L7Metadata;
 
 /// Protocol version for compatibility checks.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -73,6 +74,10 @@ pub enum Request {
         bytes: u64,
         status_code: u16,
         proto_fp: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        l7: Option<L7Metadata>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_request: Option<String>,
     },
     ReportConnections {
         events: Vec<ConnectionReport>,
@@ -121,6 +126,10 @@ pub struct ConnectionReport {
     pub bytes: u64,
     pub status_code: u16,
     pub proto_fp: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l7: Option<L7Metadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_request: Option<String>,
 }
 
 /// Global statistics.
