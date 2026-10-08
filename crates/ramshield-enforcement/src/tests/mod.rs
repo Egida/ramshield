@@ -40,6 +40,12 @@ impl XdpApplier for RecordingApplier {
             evicted_count: 0,
         })
     }
+    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        Ok(())
+    }
+    fn configure_autonomous(&mut self, _enabled: bool, _syn_pps_per_cpu: u64, _udp_pps_per_cpu: u64, _packet_pps_per_cpu: u64, _window_ms: u64) -> Result<(), EnforcementError> {
+        Ok(())
+    }
 }
 
 fn svc(xdp: Box<dyn XdpApplier>) -> EnforcementService {
@@ -254,6 +260,12 @@ impl XdpApplier for DroppingApplier {
     }
     fn drain_drop_events(&mut self) -> Vec<XdpDropEvent> {
         std::mem::take(&mut self.events)
+    }
+    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        Ok(())
+    }
+    fn configure_autonomous(&mut self, _enabled: bool, _syn_pps_per_cpu: u64, _udp_pps_per_cpu: u64, _packet_pps_per_cpu: u64, _window_ms: u64) -> Result<(), EnforcementError> {
+        Ok(())
     }
 }
 
@@ -538,6 +550,12 @@ impl XdpApplier for FailingApplier {
             pending_unblocks: Vec::new(),
             evicted_count: 0,
         })
+    }
+    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        Ok(())
+    }
+    fn configure_autonomous(&mut self, _enabled: bool, _syn_pps_per_cpu: u64, _udp_pps_per_cpu: u64, _packet_pps_per_cpu: u64, _window_ms: u64) -> Result<(), EnforcementError> {
+        Ok(())
     }
 }
 
@@ -1032,6 +1050,12 @@ impl XdpApplier for MapApplier {
             pending_unblocks: stale.clone(),
             evicted_count: stale.len() as u64,
         })
+    }
+    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+        Ok(())
+    }
+    fn configure_autonomous(&mut self, _enabled: bool, _syn_pps_per_cpu: u64, _udp_pps_per_cpu: u64, _packet_pps_per_cpu: u64, _window_ms: u64) -> Result<(), EnforcementError> {
+        Ok(())
     }
 }
 

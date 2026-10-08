@@ -385,7 +385,7 @@ pub fn parse_drop_event(rec: &[u8]) -> Option<XdpDropEvent> {
 
 #[async_trait::async_trait]
 impl XdpApplier for AyaXdpApplier {
-    fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
+    fn configure_trusted_overlay(&mut self, _cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
         // implementation removed — moved to trait provision (already provided)
         unimplemented!()
     }
