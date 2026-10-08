@@ -461,52 +461,6 @@ impl XdpApplier for AyaXdpApplier {
             self.with_map(name, |m| {
                 let fd_raw = m.map().fd().as_fd().as_raw_fd();
                 let mut prev_key: Option<BlocklistKey> = None;
-                // ... rest of implementation
-            })
-        }
-    }
-    }
-
-    fn apply_unblock(&mut self, ip: IpAddr, _decision_id: Uuid) -> Result<(), EnforcementError> {
-        self.with_map(xdp_map_for(ip), |m| m.remove(&BlocklistKey::from_ip(ip)))
-    }
-
-    fn apply_cidr_block(
-        &mut self,
-        network: IpNetwork,
-        _decision_id: Uuid,
-        _ttl_seconds: u64,
-    ) -> Result<(), EnforcementError> {
-        let key = cidr_key(network);
-        self.with_cidr_map(cidr_map_for(network), |m| m.insert(&key, 1u8, 0))
-    }
-
-    fn apply_cidr_unblock(
-        &mut self,
-        network: IpNetwork,
-        _decision_id: Uuid,
-    ) -> Result<(), EnforcementError> {
-        let key = cidr_key(network);
-        self.with_cidr_map(cidr_map_for(network), |m| m.remove(&key))
-    }
-
-    fn reconcile(
-        &mut self,
-        expected_blocks: &[IpAddr],
-        expected_cidrs: &[IpNetwork],
-    ) -> Result<ReconciliationState, EnforcementError> {
-        // IPv6 plan Task 3: the two maps are reconciled independently — each
-        // drains its stale keys against its family's expected set only. The
-        // old single-map sweep would have deleted every live v6 key when the
-        // expected set was v4-only, and vice versa.
-        let (v4_keys, v6_keys) = split_by_family(expected_blocks);
-        let mut evicted_count: u64 = 0;
-        for (name, expected) in [("BLOCKLIST", v4_keys), ("BLOCKLIST6", v6_keys)] {
-            let expected: std::collections::HashSet<BlocklistKey> = expected.into_iter().collect();
-            let mut stale_count = 0usize;
-            self.with_map(name, |m| {
-                let fd_raw = m.map().fd().as_fd().as_raw_fd();
-                let mut prev_key: Option<BlocklistKey> = None;
                 loop {
                     // SAFETY: `fd_raw` comes from the BLOCKLIST/BLOCKLIST6 map
                     // borrowed as `m` for this whole closure, so it stays open;
