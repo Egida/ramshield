@@ -12,77 +12,81 @@ impl EnforcementService {
             .as_millis() as u64;
         for message in messages {
             match message {
-                MeshMessage::Block(delta) => self.apply_mesh_block(delta, now_ms).await,
-                MeshMessage::Unblock(delta) => self.apply_mesh_unblock(delta, now_ms).await,
+                MeshMessage::Block(delta) => { let _ = self.apply_mesh_block(delta, now_ms).await; }
+                MeshMessage::Unblock(delta) => { let _ = self.apply_mesh_unblock(delta, now_ms).await; }
                 MeshMessage::Sync { blocks, unblocks } => {
-                    for delta in blocks { self.apply_mesh_block(delta, now_ms).await; }
-                    for delta in unblocks { self.apply_mesh_unblock(delta, now_ms).await; }
+                    for delta in blocks { let _ = self.apply_mesh_block(delta, now_ms).await; }
+                    for delta in unblocks { let _ = self.apply_mesh_unblock(delta, now_ms).await; }
                 }
             }
         }
     }
 
     async fn apply_mesh_block(
-        &mut self,
-        delta: ramshield_mesh::aworset::ClusterBlockDelta,
-        now_ms: u64,
-    ) {
-        if delta.expires_at_ms <= now_ms { return; }
-        let Some(mesh) = &self.mesh_blocklist else { return; };
-        if self.mesh_operator_suppressions.contains(&delta.ip) { return; }
-        if !mesh.merge_delta(&delta) { return; }
-        let remaining_ms = delta.expires_at_ms.saturating_sub(now_ms);
-        let ttl = if delta.expires_at_ms == u64::MAX {
-            0
-        } else {
-            remaining_ms.saturating_add(999) / 1000
-        };
-        if delta.expires_at_ms != u64::MAX && ttl == 0 { return; }
-        let cmd = EnforceCommand {
-            decision_id: Uuid::new_v4(),
-            policy_version: 1,
-            source: "mesh".into(),
-            actor: format!("mesh:{}", delta.dot.node_id),
-            timestamp_utc: (now_ms / 1000) as i64,
-            ttl_seconds: ttl,
-            reason: "mesh_final".into(),
-            ip: delta.ip,
-            cidr: None,
-            action: EnforceAction::Block,
-            evidence_source: ramshield_types::EvidenceSource::FleetSignals,
-        };
-        if self.enforce(cmd).await.is_ok() {
-            self.mesh_applied_ips.insert(delta.ip);
+            &mut self,
+            delta: ramshield_mesh::aworset::ClusterBlockDelta,
+            now_ms: u64,
+        ) -> Result<(), EnforcementError> {
+            if delta.expires_at_ms <= now_ms { return Ok(()); }
+            let Some(mesh) = &self.mesh_blocklist else { return Ok(()); };
+            if self.mesh_operator_suppressions.contains(&delta.ip) { return Ok(()); }
+            if !mesh.merge_delta(&delta) { return Ok(()); }
+            let remaining_ms = delta.expires_at_ms.saturating_sub(now_ms);
+            let ttl = if delta.expires_at_ms == u64::MAX {
+                0
+            } else {
+                remaining_ms.saturating_add(999) / 1000
+            };
+            if delta.expires_at_ms != u64::MAX && ttl == 0 { return Ok(()); }
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "mesh".into(),
+                actor: format!("mesh:{}", delta.dot.node_id),
+                timestamp_utc: (now_ms / 1000) as i64,
+                ttl_seconds: ttl,
+                reason: "mesh_final".into(),
+                ip: delta.ip,
+                cidr: None,
+                action: EnforceAction::Block,
+                evidence_source: ramshield_types::EvidenceSource::FleetSignals,
+            };
+            let enforce_result = self.enforce(cmd).await;
+            if enforce_result.is_ok() {
+                self.mesh_applied_ips.insert(delta.ip);
+            }
+            enforce_result.map(|_| ())
         }
-    }
 
     async fn apply_mesh_unblock(
-        &mut self,
-        delta: ramshield_mesh::aworset::ClusterUnblockDelta,
-        now_ms: u64,
-    ) {
-        let Some(mesh) = &self.mesh_blocklist else { return; };
-        if !mesh.merge_unblock_delta(&delta)
-            || mesh.is_blocked(&delta.ip, now_ms)
-            || !self.mesh_applied_ips.contains(&delta.ip)
-        {
-            return;
+            &mut self,
+            delta: ramshield_mesh::aworset::ClusterUnblockDelta,
+            now_ms: u64,
+        ) -> Result<(), EnforcementError> {
+            let Some(mesh) = &self.mesh_blocklist else { return Ok(()); };
+            if !mesh.merge_unblock_delta(&delta)
+                || mesh.is_blocked(&delta.ip, now_ms)
+                || !self.mesh_applied_ips.contains(&delta.ip)
+            {
+                return Ok(());
+            }
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "mesh".into(),
+                actor: format!("mesh:{}", delta.dot.node_id),
+                timestamp_utc: (now_ms / 1000) as i64,
+                ttl_seconds: 0,
+                reason: "mesh_purge".into(),
+                ip: delta.ip,
+                cidr: None,
+                action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::FleetSignals,
+            };
+            let enforce_result = self.enforce(cmd).await;
+            if enforce_result.is_ok() {
+                self.mesh_applied_ips.remove(&delta.ip);
+            }
+            enforce_result.map(|_| ())
         }
-        let cmd = EnforceCommand {
-            decision_id: Uuid::new_v4(),
-            policy_version: 1,
-            source: "mesh".into(),
-            actor: format!("mesh:{}", delta.dot.node_id),
-            timestamp_utc: (now_ms / 1000) as i64,
-            ttl_seconds: 0,
-            reason: "mesh_purge".into(),
-            ip: delta.ip,
-            cidr: None,
-            action: EnforceAction::Unblock,
-            evidence_source: ramshield_types::EvidenceSource::FleetSignals,
-        };
-        if self.enforce(cmd).await.is_ok() {
-            self.mesh_applied_ips.remove(&delta.ip);
-        }
-    }
 }

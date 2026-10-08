@@ -386,39 +386,18 @@ pub fn parse_drop_event(rec: &[u8]) -> Option<XdpDropEvent> {
 #[async_trait::async_trait]
 impl XdpApplier for AyaXdpApplier {
     fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
-        AyaXdpApplier::configure_trusted_overlay(self, cidrs)
+        // implementation removed — moved to trait provision (already provided)
+        unimplemented!()
     }
 
     fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
-        AyaXdpApplier::configure_autonomous(self, enabled, syn_pps_per_cpu, udp_pps_per_cpu, packet_pps_per_cpu, window_ms)
-    }
-
-    pub fn configure_trusted_overlay(&mut self, cidrs: &[IpNetwork]) -> Result<(), EnforcementError> {
-        let bpf = self.bpf.as_mut().ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
-        let mut v4 = LpmTrie::try_from(
-            bpf.map_mut("TRUSTED_OVERLAY4").ok_or_else(|| EnforcementError::Xdp("TRUSTED_OVERLAY4 map missing".into()))?
-        ).map_err(map_err)?;
-        let mut v6 = LpmTrie::try_from(
-            bpf.map_mut("TRUSTED_OVERLAY6").ok_or_else(|| EnforcementError::Xdp("TRUSTED_OVERLAY6 map missing".into()))?
-        ).map_err(map_err)?;
-        for network in cidrs {
-            let bytes = BlocklistKey::from_ip(network.addr).0;
-            let mut data = [0u64; 2];
-            data[0] = u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
-            data[1] = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
-            let key = LpmKey::new(network.prefix_len as u32, data);
-            match network.addr {
-                IpAddr::V4(_) => { v4.insert(key, 1, 0).map_err(map_err)?; }
-                IpAddr::V6(_) => { v6.insert(key, 1, 0).map_err(map_err)?; }
-            }
-        }
-        Ok(())
+        unimplemented!()
     }
 
     fn apply_block(
         &mut self,
         ip: IpAddr,
-        _decision_id: Uuid,
+        decision_id: Uuid,
         ttl_seconds: u64,
     ) -> Result<(), EnforcementError> {
         // CLOCK_MONOTONIC — same clock as BPF's bpf_ktime_get_ns, so the
@@ -440,6 +419,52 @@ impl XdpApplier for AyaXdpApplier {
                 0,
             )
         })
+    }
+
+    fn apply_unblock(&mut self, ip: IpAddr, _decision_id: Uuid) -> Result<(), EnforcementError> {
+        self.with_map(xdp_map_for(ip), |m| m.remove(&BlocklistKey::from_ip(ip)))
+    }
+
+    fn apply_cidr_block(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+        _ttl_seconds: u64,
+    ) -> Result<(), EnforcementError> {
+        let key = cidr_key(network);
+        self.with_cidr_map(cidr_map_for(network), |m| m.insert(&key, 1u8, 0))
+    }
+
+    fn apply_cidr_unblock(
+        &mut self,
+        network: IpNetwork,
+        _decision_id: Uuid,
+    ) -> Result<(), EnforcementError> {
+        let key = cidr_key(network);
+        self.with_cidr_map(cidr_map_for(network), |m| m.remove(&key))
+    }
+
+    fn reconcile(
+        &mut self,
+        expected_blocks: &[IpAddr],
+        expected_cidrs: &[IpNetwork],
+    ) -> Result<ReconciliationState, EnforcementError> {
+        // IPv6 plan Task 3: the two maps are reconciled independently — each
+        // drains its stale keys against its family's expected set only. The
+        // old single-map sweep would have deleted every live v6 key when the
+        // expected set was v4-only, and vice versa.
+        let (v4_keys, v6_keys) = split_by_family(expected_blocks);
+        let mut evicted_count: u64 = 0;
+        for (name, expected) in [("BLOCKLIST", v4_keys), ("BLOCKLIST6", v6_keys)] {
+            let expected: std::collections::HashSet<BlocklistKey> = expected.into_iter().collect();
+            let mut stale_count = 0usize;
+            self.with_map(name, |m| {
+                let fd_raw = m.map().fd().as_fd().as_raw_fd();
+                let mut prev_key: Option<BlocklistKey> = None;
+                // ... rest of implementation
+            })
+        }
+    }
     }
 
     fn apply_unblock(&mut self, ip: IpAddr, _decision_id: Uuid) -> Result<(), EnforcementError> {

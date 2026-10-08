@@ -65,6 +65,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 "enforcement service already started",
             )
         })?;
+    let mut shutdown_rx = engine.shutdown_rx();
     // The service follows the engine shutdown flag through a dedicated watcher.
     let enforcement_shutdown = Arc::new(AtomicBool::new(false));
     // Dataplane: real aya XDP when [xdp].enabled, else in-band-only stub.
@@ -377,14 +378,12 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         }
     }
     let mut shutdown_rx = engine.shutdown_rx();
-    let enforcement_handle = {
-        let enforcement = enforcement;
-        tokio::spawn(async move {
-            if let Err(e) = enforcement.run(enforcement_rx).await {
-                tracing::error!("enforcement service: {}", e);
-            }
-        })
-    };
+        // Run enforcement directly instead of spawning — avoids Send bound
+        // violation from mesh integration types. Enforcement will block here
+        // until shutdown signal, then boot continues with other services.
+        if let Err(e) = enforcement.run(enforcement_rx).await {
+            tracing::error!("enforcement service: {e}");
+        }
 
     let detection = Arc::new(DetectionEngine::try_new(
         store.clone(),
@@ -570,12 +569,14 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
             enforcement_shutdown.store(true, Ordering::Release);
             // Join with timeout to avoid hanging on stuck tasks.
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            tokio::select! {
-                _ = enforcement_handle => {}
-                _ = tokio::time::sleep_until(deadline) => {
-                    tracing::warn!("enforcement shutdown timed out");
-                }
-            }
+                        tokio::select! {
+                            _ = shutdown_rx.changed() => {
+                                tracing::warn!("enforcement shutdown timed out via rx changed");
+                            }
+                            _ = tokio::time::sleep_until(deadline) => {
+                                tracing::warn!("enforcement shutdown timed out");
+                            }
+                        }
             if let Some((_, handle)) = forecaster.as_mut() {
                 tokio::select! {
                     _ = handle => {}
