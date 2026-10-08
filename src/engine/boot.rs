@@ -377,12 +377,15 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         }
     }
     let mut shutdown_rx = engine.shutdown_rx();
-        // Run enforcement directly instead of spawning — avoids Send bound
-        // violation from mesh integration types. Enforcement will block here
-        // until shutdown signal, then boot continues with other services.
+    // Spawn the enforcement actor and keep the JoinHandle. Do not await run()
+    // here — that starved detection, native ingest, SYNPROXY, and IPC.
+    // Crash is observed in the main select below (Gotcha C).
+    let mut enforcement_handle = tokio::spawn(async move {
         if let Err(e) = enforcement.run(enforcement_rx).await {
-            tracing::error!("enforcement service: {e}");
+            tracing::error!("enforcement actor: {e}");
         }
+    });
+
 
     let detection = Arc::new(DetectionEngine::try_new(
         store.clone(),
@@ -494,6 +497,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
 
     // Periodic checkpoint loop: snapshot state every CHECKPOINT_INTERVAL.
     if let Some(wal) = pipeline_wal {
+        let engine = engine.clone();
         std::mem::drop(tokio::spawn(async move {
             let interval = std::time::Duration::from_secs(300);
             let mut tick = tokio::time::interval(interval);
@@ -561,7 +565,14 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     }
 
     // Graceful shutdown: wait for signal, then join tasks.
+    // Gotcha C: a detached actor fails silently — select against the
+    // enforcement JoinHandle so a crash becomes FATAL, not a hang.
     tokio::select! {
+        res = &mut enforcement_handle => {
+            tracing::error!(result = ?res, "enforcement actor terminated unexpectedly");
+            engine.pipeline_failed.store(true, Ordering::Release);
+            return Err(std::io::Error::other("enforcement actor terminated; pipeline FATAL"));
+        }
         _ = server.start() => {}
         _ = shutdown_rx.changed() => {
             tracing::info!("pipeline: shutdown signal received, draining...");

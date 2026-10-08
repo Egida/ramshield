@@ -1113,3 +1113,26 @@ proptest::proptest! {
         })?;
     }
 }
+
+#[cfg(test)]
+mod send_assert {
+    use super::*;
+    fn assert_send<T: Send>() {}
+    #[test]
+    fn run_send() {
+        fn fut_is_send<F: Send>(_f: F) {}
+        let store = Arc::new(Store::new(16));
+        store.traffic.ram_limit_mb.store(512, std::sync::atomic::Ordering::Relaxed);
+        let svc = EnforcementService::new(
+            store,
+            Arc::new(Metrics::new()),
+            Box::new(RecordingApplier::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (_, rx) = mpsc::channel(1);
+        fut_is_send(svc.run(rx));
+        // Also assert the struct itself is Send
+        assert_send::<EnforcementService>();
+    }
+}
+

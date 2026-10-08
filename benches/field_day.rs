@@ -216,6 +216,22 @@ impl ramshield_enforcement::XdpApplier for NullApplier {
             evicted_count: 0,
         })
     }
+    fn configure_trusted_overlay(
+        &mut self,
+        _: &[ramshield_types::IpNetwork],
+    ) -> Result<(), ramshield_types::EnforcementError> {
+        Ok(())
+    }
+    fn configure_autonomous(
+        &mut self,
+        _: bool,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: u64,
+    ) -> Result<(), ramshield_types::EnforcementError> {
+        Ok(())
+    }
 }
 
 fn enf_block_cmd(ip: IpAddr, ttl: u64, id: uuid::Uuid) -> ramshield_types::EnforceCommand {

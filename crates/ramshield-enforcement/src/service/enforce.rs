@@ -288,6 +288,10 @@ impl EnforcementService {
                 // Domain split: a CIDR unblock is a prefix release and MUST NOT
                 // clear IpRecord/blocked_ips/drops/IP-TTL/mesh state for
                 // cmd.ip. Only the explicit-IP path touches IP state.
+                // Mesh deltas are collected under the barrier (CRDT mutation is
+                // store-side); gossip IO happens after drop so the std mutex
+                // never lives across .await (P0-A: run() future must be Send).
+                let mut pending_unban_deltas = Vec::new();
                 if let Some(network) = cmd.cidr {
                     self.cidr_expirations.remove(&network);
                     if let Some(shared) = &self.checkpoint_shared {
@@ -316,11 +320,7 @@ impl EnforcementService {
                         let deltas = mesh.record_unban(cmd.ip);
                         self.metrics.inc_mesh_record_unban();
                         if cmd.source != "mesh" {
-                            if let Some(handle) = &self.mesh_handle {
-                                for delta in deltas {
-                                    handle.broadcast(ramshield_mesh::MeshMessage::Unblock(delta)).await;
-                                }
-                            }
+                            pending_unban_deltas = deltas;
                         }
                     }
                     if cmd.source != "mesh" {
@@ -331,6 +331,15 @@ impl EnforcementService {
                     self.detach_expiration(cmd.ip);
                     if let Some(shared) = &self.checkpoint_shared {
                         shared.remove_ip_expiration(&cmd.ip);
+                    }
+                }
+                // Barrier protects WAL+store only; mesh IO and XDP stay outside.
+                drop(_ckpt_guard);
+                if !pending_unban_deltas.is_empty() {
+                    if let Some(handle) = &self.mesh_handle {
+                        for delta in pending_unban_deltas {
+                            handle.broadcast(ramshield_mesh::MeshMessage::Unblock(delta)).await;
+                        }
                     }
                 }
                 let xdp_applied = match cmd.cidr {
