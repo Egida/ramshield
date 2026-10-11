@@ -320,11 +320,13 @@ impl MeshHandle {
 
     async fn note_peer_success(&self, peer: SocketAddr) {
         let now = self.sync_epoch.elapsed();
-        if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
-            if state.delivery_failed {
+        let mut states = self.sync_states.lock().await;
+        match states.get_mut(&peer) {
+            Some(state) if state.delivery_failed => {
                 state.delivery_failed = false;
                 state.planner.condition(SyncCondition::PeerReconnected, now);
             }
+            _ => {}
         }
     }
 
