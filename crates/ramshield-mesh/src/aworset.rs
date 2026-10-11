@@ -56,6 +56,42 @@ pub struct AworsetSnapshot {
     pub unblocks: Vec<ClusterUnblockDelta>,
 }
 
+impl AworsetSnapshot {
+    /// Reject malformed checkpoint state rather than silently dropping dots
+    /// or accepting impossible origin identities during recovery.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let mut block_keys = std::collections::HashSet::new();
+        for delta in &self.blocks {
+            if delta.ip.is_unspecified()
+                || delta.dot.node_id == 0
+                || delta.dot.counter == 0
+                || delta.dot.incarnation.is_nil()
+                || (delta.expires_at_ms != u64::MAX
+                    && delta.expires_at_ms < delta.created_at_ms)
+            {
+                return Err("invalid active mesh dot in checkpoint");
+            }
+            if !block_keys.insert((delta.ip, delta.dot.node_id, delta.dot.incarnation)) {
+                return Err("duplicate active mesh key in checkpoint");
+            }
+        }
+        let mut unblock_keys = std::collections::HashSet::new();
+        for delta in &self.unblocks {
+            if delta.ip.is_unspecified()
+                || delta.dot.node_id == 0
+                || delta.dot.counter == 0
+                || delta.dot.incarnation.is_nil()
+            {
+                return Err("invalid mesh tombstone in checkpoint");
+            }
+            if !unblock_keys.insert((delta.ip, delta.dot.node_id, delta.dot.incarnation)) {
+                return Err("duplicate mesh tombstone key in checkpoint");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
     pub key: String,
