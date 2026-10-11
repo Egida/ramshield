@@ -154,7 +154,7 @@ impl EnforcementService {
 
                     let read_wal = peer_wal.clone();
                     let page = tokio::task::spawn_blocking(move || {
-                        read_wal.replay_with_lsn_page(cursor, 128)
+                        read_wal.replay_with_lsn_page(cursor, 16)
                     })
                     .await;
                     let (records, _has_more) = match page {
