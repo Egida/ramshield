@@ -18,8 +18,10 @@
 - [x] Old ban after unban is rejected; a genuinely newer ban after unban is accepted (same process).
 - [x] HLC physical-time advance cannot reuse a dot counter (64-bit process-local operation counter).
 - [ ] Restart/incarnation changes cannot collide with old dots. **Known blocker:** the operation counter is process-local; durable incarnation/counter recovery is not implemented.
-- [ ] Expiry and purge cannot resurrect stale state after a peer is offline.
-- [ ] Tombstone GC has a causal-stability/epoch/repair argument, not only a timer.
+- [x] Regression: explicit-unban high-water mark survives the former GC horizon and rejects a replay.
+- [x] Regression: an expired active entry is converted to a high-water mark before pruning.
+- [ ] Expiry and purge cannot resurrect stale state after a peer is offline in every delivery ordering; requires multi-peer/offline convergence tests.
+- [ ] Tombstone GC has a causal-stability/epoch/repair argument, not only a timer. **Current safe fallback:** timer-only deletion is removed; high-water marks are retained indefinitely, so bounded-memory GC is still blocked.
 - [ ] Property-style merge permutations converge to the same state.
 
 ## Stage C — anti-entropy completeness (release-blocking)

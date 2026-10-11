@@ -10,16 +10,8 @@ use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Dot = u64;
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
@@ -122,8 +114,10 @@ pub struct AworsetBlocklist {
     node_id: u32,
     hlc: Hlc,
     pub(crate) entries: DashMap<(IpAddr, u32), (u64, u64, u64)>,
+    /// Per-key high-water marks. These are deliberately retained until a
+    /// causal-stability/peer-acknowledgement protocol exists; timer-only GC can
+    /// resurrect an old ban from a disconnected peer.
     pub(crate) tombstones: DashMap<(IpAddr, u32), u64>,
-    tombstone_times: DashMap<(IpAddr, u32), u64>,
     next_dot_counter: AtomicU64,
 }
 
@@ -134,7 +128,6 @@ impl AworsetBlocklist {
             hlc: Hlc::new(),
             entries: DashMap::new(),
             tombstones: DashMap::new(),
-            tombstone_times: DashMap::new(),
             next_dot_counter: AtomicU64::new(0),
         }
     }
@@ -225,25 +218,33 @@ impl AworsetBlocklist {
         self.entries.is_empty()
     }
 
-    /// Drop entries whose ban has expired (GC pass on the 250ms tick).
+    /// Prune expired active entries while preserving a per-key high-water mark.
     ///
-    /// F6-fix (audit /tmp/oo Frontier 2): entries are pruned only after
-    /// TOMBSTONE_HORIZON_MS past expiry, not at the exact expiry ms.
-    /// Premature deletion + delayed gossip = resurrection: a peer's stale
-    /// ban delta arriving after local pruning is treated as NEW and
-    /// re-bans the IP. The horizon must exceed max network delay + clock
-    /// skew across the fleet.
+    /// An elapsed timer is not proof that every disconnected peer has observed
+    /// a removal. Therefore this method never deletes tombstones/high-water
+    /// marks. Expired entries are converted into watermarks after the horizon,
+    /// so delayed/replayed deltas cannot recreate old state. This intentionally
+    /// favors convergence safety over bounded tombstone memory until a peer-ack
+    /// or epoch-based causal-stability protocol is implemented.
     pub fn purge_expired(&self, now_ms: u64) {
         const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
-        self.entries
-            .retain(|_, (_, _, exp)| now_ms.saturating_sub(*exp) < TOMBSTONE_HORIZON_MS);
-        self.tombstone_times.retain(|key, created| {
-            let keep = now_ms.saturating_sub(*created) < TOMBSTONE_HORIZON_MS;
-            if !keep {
-                self.tombstones.remove(key);
-            }
-            keep
-        });
+        let expired: Vec<((IpAddr, u32), u64)> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let (_, _, expires_at_ms) = *entry.value();
+                (now_ms.saturating_sub(expires_at_ms) >= TOMBSTONE_HORIZON_MS)
+                    .then_some((*entry.key(), entry.value().0))
+            })
+            .collect();
+
+        for (key, counter) in expired {
+            self.entries.remove(&key);
+            self.tombstones
+                .entry(key)
+                .and_modify(|existing| *existing = (*existing).max(counter))
+                .or_insert(counter);
+        }
     }
 
     /// Local unblock: create a tombstone delta for the observed local dot.
@@ -264,7 +265,6 @@ impl AworsetBlocklist {
                 .entry(key)
                 .and_modify(|existing| *existing = (*existing).max(counter))
                 .or_insert(counter);
-            self.tombstone_times.insert(key, now_ms());
             deltas.push(ClusterUnblockDelta {
                 ip,
                 dot: ClusterDot { node_id, counter },
@@ -290,9 +290,6 @@ impl AworsetBlocklist {
                 changed = true;
                 delta.dot.counter
             });
-        if changed {
-            self.tombstone_times.insert(key, now_ms());
-        }
         // ponytail: avoid let-chains; drop the DashMap guard before remove.
         if self
             .entries
@@ -339,6 +336,14 @@ impl AworsetBlocklist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
 
     #[test]
     fn basic_operations() {
@@ -395,6 +400,41 @@ mod tests {
         assert_eq!(
             finite.expires_at_ms.saturating_sub(finite.created_at_ms),
             60_000
+        );
+    }
+
+    #[test]
+    fn explicit_unban_watermark_survives_gc_horizon_and_rejects_replay() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 61]);
+        let old_ban = sender.record_ban(ip, 60_000, 1);
+        assert!(receiver.merge_delta(&old_ban));
+        let unban = receiver.record_unban(ip);
+        assert_eq!(unban.len(), 1);
+
+        receiver.purge_expired(now_ms().saturating_add(86_400_001));
+        assert!(!receiver.merge_delta(&old_ban));
+        assert!(!receiver.is_blocked(&ip, now_ms()));
+    }
+
+    #[test]
+    fn expired_entry_becomes_watermark_before_it_is_pruned() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 62]);
+        let old_ban = sender.record_ban(ip, 1, 1);
+        assert!(receiver.merge_delta(&old_ban));
+
+        receiver.purge_expired(old_ban.expires_at_ms.saturating_add(86_400_000));
+        assert!(receiver.entries.is_empty());
+        assert_eq!(
+            receiver.tombstones.get(&(ip, sender.node_id)).map(|v| *v),
+            Some(old_ban.dot.counter)
+        );
+        assert!(
+            !receiver.merge_delta(&old_ban),
+            "expired stale delta must not return"
         );
     }
 
