@@ -695,23 +695,31 @@ mod tests {
     #[test]
     fn checkpoint_roundtrip_preserves_concurrent_dots_and_tombstones() {
         let source = AworsetBlocklist::new(7);
+        let peer = AworsetBlocklist::new(8);
         let ip = IpAddr::from([192, 0, 2, 79]);
         let first = source.record_ban(ip, 60_000, 1);
-        let second = source.record_ban(ip, 60_000, 2);
-        let tombstone = source.record_unban(ip).into_iter().next().unwrap();
-        assert_eq!(tombstone.dot, first.dot);
-        assert!(!source.is_blocked(&ip, now_ms().saturating_add(1)));
+        let concurrent = peer.record_ban(ip, 60_000, 2);
+        assert!(source.merge_delta(&concurrent));
+        let tombstone = ClusterUnblockDelta {
+            ip,
+            dot: first.dot,
+        };
+        assert!(source.merge_unblock_delta(&tombstone));
+        assert!(source.is_blocked(&ip, now_ms()));
 
         let snapshot = source.export_snapshot();
         let restored = AworsetBlocklist::new(9);
         restored.restore_snapshot(&snapshot);
         assert_eq!(restored.export_snapshot(), snapshot);
-        assert!(!restored.is_blocked(&ip, now_ms().saturating_add(1)));
+        assert!(
+            restored.is_blocked(&ip, now_ms()),
+            "origin 8's concurrent dot must survive origin 7's tombstone"
+        );
 
-        // A later operation from the same origin must still win over the
+        // A later operation from origin 7 must still win over its old
         // checkpointed tombstone watermark.
         let newer = source.record_ban(ip, 60_000, 3);
-        assert!(newer.dot.counter > second.dot.counter);
+        assert!(newer.dot.counter > first.dot.counter);
         let newer_snapshot = source.export_snapshot();
         restored.restore_snapshot(&newer_snapshot);
         assert!(restored.is_blocked(&ip, now_ms()));
