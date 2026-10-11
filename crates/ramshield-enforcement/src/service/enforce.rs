@@ -56,7 +56,7 @@ impl EnforcementService {
         // Reserve the exact CRDT mutation before writing the WAL, but do not
         // publish it to in-memory mesh state until the event is persisted.
         #[cfg(feature = "mesh")]
-        let prepared_mesh_block = if cmd.action == EnforceAction::Block
+        let prepared_mesh_block = if matches!(&cmd.action, EnforceAction::Block)
             && cmd.cidr.is_none()
             && cmd.source != "mesh"
         {
@@ -67,7 +67,7 @@ impl EnforcementService {
             None
         };
         #[cfg(feature = "mesh")]
-        let prepared_mesh_unblocks = if cmd.action == EnforceAction::Unblock
+        let prepared_mesh_unblocks = if matches!(&cmd.action, EnforceAction::Unblock)
             && cmd.cidr.is_none()
             && cmd.source != "mesh"
         {
