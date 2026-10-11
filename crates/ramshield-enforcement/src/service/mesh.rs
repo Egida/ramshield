@@ -797,7 +797,7 @@ mod wal_batch_integration_tests {
     use ramshield_types::Durability;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::net::TcpListener;
 
@@ -837,6 +837,7 @@ mod wal_batch_integration_tests {
         .await
         .unwrap();
         let store = Arc::new(Store::new(16));
+        store.traffic.ram_limit_mb.store(16, Ordering::Relaxed);
         let mut service = EnforcementService::new(
             store.clone(),
             Arc::new(Metrics::new()),
