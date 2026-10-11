@@ -39,12 +39,20 @@ fn xdp_capability_hint() -> String {
 }
 
 #[cfg(feature = "mesh")]
-fn restore_mesh_crdt_from_wal(mesh: &AworsetBlocklist, wal: &Wal) -> std::io::Result<()> {
+fn restore_mesh_crdt_from_wal(
+    mesh: &AworsetBlocklist,
+    wal: &Wal,
+    min_lsn: u64,
+) -> std::io::Result<()> {
     use ramshield_mesh::aworset::{ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
     use ramshield_storage::wal::{MeshMutationAction, WalEntry};
 
-    let entries = wal
-        .replay()
+    let replay = if min_lsn > 0 {
+        wal.replay_from(min_lsn)
+    } else {
+        wal.replay()
+    };
+    let entries = replay
         .map_err(|error| std::io::Error::other(format!("mesh WAL replay failed: {error}")))?;
     let mut restored = 0usize;
     for entry in entries {
@@ -306,6 +314,8 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     let mut pipeline_wal: Option<Arc<Wal>> = None;
     // Snapshot-derived CIDR/expiration seeds (None = no snapshot used).
     let mut snapshot_seed: Option<SnapshotRestore> = None;
+    #[cfg(feature = "mesh")]
+    let mut mesh_snapshot_seed: Option<ramshield_mesh::aworset::AworsetSnapshot> = None;
     // Crash-durable block state: open WAL, load snapshot if exists, replay tail.
     if cfg_snapshot.wal.enabled {
         let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback || cfg_snapshot.mesh.enabled;
@@ -334,6 +344,13 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                                 snap_lsn
                             );
                             snapshot_seed = Some(restore_from_snapshot(&store, &snap));
+                            #[cfg(feature = "mesh")]
+                            if let Some(mesh_state) = snap.mesh_state.as_ref() {
+                                if let Some(mesh) = mesh_blocklist.as_ref() {
+                                    mesh.restore_snapshot(mesh_state);
+                                }
+                                mesh_snapshot_seed = Some(mesh_state.clone());
+                            }
                             true
                         }
                         _ => {
@@ -348,32 +365,32 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     false
                 };
 
-                // Mesh snapshots currently contain only the effective IP
-                // projection, not per-origin CRDT dots/tombstones. Until that
-                // schema is extended, a pruned WAL cannot safely reconstruct
-                // mesh convergence state, even if IP recovery has a snapshot.
+                // Older checkpoints lack mesh provenance. If retention has
+                // removed history and no CRDT seed exists, fail closed rather
+                // than start with an incomplete anti-entropy state.
                 #[cfg(feature = "mesh")]
-                if mesh_blocklist.is_some() {
+                if mesh_blocklist.is_some() && mesh_snapshot_seed.is_none() {
                     let oldest = wal.oldest_lsn();
                     let mesh_history_pruned = match oldest {
                         Some(lsn) => lsn > 1,
                         None => snap_lsn > 0,
                     };
+                    if mesh_history_pruned && hard_wal {
+                        return Err(std::io::Error::other(format!(
+                            "mesh WAL history pruned (oldest_lsn={oldest:?}, snapshot_lsn={snap_lsn}) and checkpoint lacks CRDT provenance"
+                        )));
+                    }
                     if mesh_history_pruned {
-                        if hard_wal {
-                            return Err(std::io::Error::other(format!(
-                                "mesh WAL history pruned (oldest_lsn={oldest:?}, snapshot_lsn={snap_lsn}); refusing to start with incomplete CRDT provenance"
-                            )));
-                        }
                         tracing::warn!(
                             oldest_lsn = ?oldest,
-                            "mesh WAL history was pruned; CRDT recovery is partial until mesh state is included in checkpoints"
+                            "mesh WAL history was pruned without a CRDT checkpoint seed; recovery may be incomplete"
                         );
                     }
                 }
                 #[cfg(feature = "mesh")]
                 if let Some(mesh) = mesh_blocklist.as_ref() {
-                    restore_mesh_crdt_from_wal(mesh, &wal)?;
+                    let mesh_min_lsn = if mesh_snapshot_seed.is_some() { snap_lsn } else { 0 };
+                    restore_mesh_crdt_from_wal(mesh, &wal, mesh_min_lsn)?;
                 }
 
                 // Hard-WAL invariant (PATCH 9): snapshot present but the WAL
@@ -409,8 +426,27 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
 
                 let min_lsn = if snapshot_used { snap_lsn } else { 0u64 };
 
-                let restored_ttls =
-                    match replay_wal_into_store_seeded(&store, &wal, min_lsn, replay_seed) {
+                let replay_result = {
+                    #[cfg(feature = "mesh")]
+                    {
+                        if cfg_snapshot.mesh.enabled || mesh_snapshot_seed.is_some() {
+                            ramshield_enforcement::replay_wal_into_store_seeded_with_mesh(
+                                &store,
+                                &wal,
+                                min_lsn,
+                                replay_seed,
+                                mesh_snapshot_seed.as_ref(),
+                            )
+                        } else {
+                            replay_wal_into_store_seeded(&store, &wal, min_lsn, replay_seed)
+                        }
+                    }
+                    #[cfg(not(feature = "mesh"))]
+                    {
+                        replay_wal_into_store_seeded(&store, &wal, min_lsn, replay_seed)
+                    }
+                };
+                let restored_ttls = match replay_result {
                         Ok(r) => {
                             info!(
                                 "WAL replay: restored {} IP blocks (min_lsn={})",
