@@ -17,6 +17,15 @@ pub(crate) type BlockKey = (IpAddr, u32, Uuid);
 pub(crate) type BlockState = (u64, u64, u64, u8);
 type SnapshotKey = (IpAddr, u32, Uuid, u8);
 
+/// One bounded snapshot slice and the next caller-owned cursor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotPage {
+    pub blocks: Vec<ClusterBlockDelta>,
+    pub unblocks: Vec<ClusterUnblockDelta>,
+    pub next_cursor: usize,
+    pub total: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
     pub key: String,
@@ -332,6 +341,88 @@ impl AworsetBlocklist {
         }
         changed
     }
+    /// Return a bounded anti-entropy page for a caller-owned cursor.
+    ///
+    /// Unlike `snapshot`, this method does not share cursor state between
+    /// callers. A transport can therefore keep one cursor per peer and avoid
+    /// letting a fast peer advance another peer's repair position. The cursor
+    /// is an index into a deterministic sorted snapshot, not a durable
+    /// acknowledgement; concurrent mutations may cause duplicates or skips,
+    /// which periodic full rotations must repair.
+    pub fn snapshot_page(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> SnapshotPage {
+        enum SnapshotItem {
+            Block(ClusterBlockDelta),
+            Unblock(ClusterUnblockDelta),
+        }
+
+        let mut items: Vec<(SnapshotKey, SnapshotItem)> =
+            Vec::with_capacity(self.entries.len() + self.tombstones.len());
+        for entry in self.entries.iter() {
+            let key = *entry.key();
+            items.push((
+                (key.0, key.1, key.2, 0),
+                SnapshotItem::Block(ClusterBlockDelta {
+                    ip: key.0,
+                    dot: ClusterDot {
+                        node_id: key.1,
+                        incarnation: key.2,
+                        counter: entry.value().0,
+                    },
+                    created_at_ms: entry.value().1,
+                    expires_at_ms: entry.value().2,
+                    tier: entry.value().3,
+                }),
+            ));
+        }
+        for tombstone in self.tombstones.iter() {
+            let key = *tombstone.key();
+            items.push((
+                (key.0, key.1, key.2, 1),
+                SnapshotItem::Unblock(ClusterUnblockDelta {
+                    ip: key.0,
+                    dot: ClusterDot {
+                        node_id: key.1,
+                        incarnation: key.2,
+                        counter: *tombstone.value(),
+                    },
+                }),
+            ));
+        }
+        items.sort_unstable_by_key(|(key, _)| *key);
+
+        let total = items.len();
+        if total == 0 || limit == 0 {
+            return SnapshotPage {
+                blocks: Vec::new(),
+                unblocks: Vec::new(),
+                next_cursor: if total == 0 { 0 } else { cursor % total },
+                total,
+            };
+        }
+
+        let start = cursor % total;
+        let count = limit.min(total);
+        let next_cursor = (start + count) % total;
+        let mut blocks = Vec::with_capacity(count);
+        let mut unblocks = Vec::with_capacity(count);
+        for offset in 0..count {
+            match &items[(start + offset) % total].1 {
+                SnapshotItem::Block(block) => blocks.push(block.clone()),
+                SnapshotItem::Unblock(unblock) => unblocks.push(unblock.clone()),
+            }
+        }
+        SnapshotPage {
+            blocks,
+            unblocks,
+            next_cursor,
+            total,
+        }
+    }
+
     /// Return a bounded, rotating anti-entropy page.
     ///
     /// Items are sorted before paging so a stable state has deterministic order.
@@ -723,6 +814,32 @@ mod tests {
         }
         assert_eq!(observed_blocks.len(), EACH);
         assert_eq!(observed_tombstones.len(), EACH);
+    }
+
+    #[test]
+    fn snapshot_page_cursors_are_independent_and_bounded() {
+        let mesh = AworsetBlocklist::new(7);
+        for n in 0..5 {
+            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
+            mesh.record_ban(ip, 60_000, 1);
+        }
+
+        let peer_a_first = mesh.snapshot_page(0, 2);
+        let peer_b_first = mesh.snapshot_page(0, 2);
+        assert_eq!(peer_a_first, peer_b_first);
+        assert_eq!(peer_a_first.total, 5);
+        assert_eq!(peer_a_first.blocks.len() + peer_a_first.unblocks.len(), 2);
+        assert_eq!(peer_a_first.next_cursor, 2);
+
+        let peer_a_second = mesh.snapshot_page(peer_a_first.next_cursor, 2);
+        assert_eq!(peer_a_second.total, 5);
+        assert_eq!(peer_a_second.blocks.len() + peer_a_second.unblocks.len(), 2);
+        assert_ne!(
+            peer_a_first.blocks[0].ip,
+            peer_a_second.blocks[0].ip,
+            "advancing one peer cursor should select a different page"
+        );
+        assert_eq!(mesh.snapshot_page(0, 2), peer_b_first);
     }
 
     #[test]
