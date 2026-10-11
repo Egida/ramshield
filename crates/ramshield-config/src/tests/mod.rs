@@ -260,6 +260,7 @@ fn clear_env_vars() {
         "RAMSHIELD_DASHBOARD__ENABLED",
         "RAMSHIELD_DASHBOARD__HTTP_ADDR",
         "RAMSHIELD_FORECASTING__ENABLED",
+        "RAMSHIELD_SYNPROXY__PORTS",
     ];
     for k in &keys {
         unsafe {
@@ -467,5 +468,37 @@ fn env_override_invalid_value_is_rejected() {
         err.to_string().contains("RAMSHIELD_ENGINE__RAM_LIMIT_MB"),
         "{err}"
     );
+    clear_env_vars();
+}
+
+
+#[test]
+#[serial]
+fn env_override_invalid_synproxy_port_is_rejected() {
+    clear_env_vars();
+    unsafe {
+        std::env::set_var("RAMSHIELD_SYNPROXY__PORTS", "80,not-a-port,443");
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let err = Config::load(tmpfile)
+        .expect_err("malformed SYNPROXY port override must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("RAMSHIELD_SYNPROXY__PORTS"), "{message}");
+    assert!(message.contains("item 2"), "{message}");
+    clear_env_vars();
+}
+
+#[test]
+#[serial]
+fn env_override_blank_synproxy_ports_clears_defaults() {
+    clear_env_vars();
+    unsafe {
+        std::env::set_var("RAMSHIELD_SYNPROXY__PORTS", "  ");
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let cfg = Config::load(tmpfile).expect("blank list explicitly clears SYNPROXY ports");
+    assert!(cfg.synproxy.ports.is_empty());
     clear_env_vars();
 }
