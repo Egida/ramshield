@@ -139,7 +139,22 @@ impl Config {
             self.synproxy.enabled = v;
         }
         if let Ok(v) = std::env::var("RAMSHIELD_SYNPROXY__PORTS") {
-            self.synproxy.ports = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.trim().is_empty() {
+                self.synproxy.ports.clear();
+            } else {
+                self.synproxy.ports = v
+                    .split(',')
+                    .enumerate()
+                    .map(|(index, item)| {
+                        item.trim().parse::<u16>().map_err(|error| {
+                            anyhow::anyhow!(
+                                "invalid item {} for RAMSHIELD_SYNPROXY__PORTS: {error}",
+                                index + 1
+                            )
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+            }
         }
 
         // Upstream saturation/BGP escalation overrides
