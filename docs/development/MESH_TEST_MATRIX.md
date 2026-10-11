@@ -26,7 +26,8 @@
 
 ## Stage C — anti-entropy completeness (release-blocking)
 
-- [ ] More than 4,096 entries and tombstones; prove every item is visited over repeated sync.
+- [x] More than 4,096 active entries: repeated snapshots visit all 5,000 entries in stable-state regression coverage.
+- [x] More than 4,096 mixed active entries and tombstones: repeated snapshots visit all 2,500 of each kind in stable-state regression coverage.
 - [ ] Pagination progress is fair and deterministic, even while the map changes.
 - [ ] Multi-chunk state converges after loss, duplicate delivery, reordering, and reconnect.
 - [ ] Stale tombstones and later legitimate re-bans converge correctly.
