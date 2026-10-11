@@ -20,7 +20,9 @@ use ramshield_types::{
     BlockReason, EnforceAction, EnforceCommand, EnforceResult, EnforcementError, IpNetwork,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
+#[cfg(feature = "mesh")]
+use std::net::SocketAddr;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
