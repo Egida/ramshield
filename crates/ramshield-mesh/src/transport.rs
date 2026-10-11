@@ -382,9 +382,7 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
 
     match message {
         MeshMessage::Block(delta) => valid_block(delta),
-        MeshMessage::Unblock(delta) => {
-            delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil()
-        },
+        MeshMessage::Unblock(delta) => delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil(),
         MeshMessage::Sync { blocks, unblocks } => {
             blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
                 && blocks.iter().all(valid_block)
