@@ -79,6 +79,7 @@ async fn authenticated_block_crosses_real_tcp_transport() {
         ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 91)),
         dot: ClusterDot {
             node_id: 1,
+            incarnation: uuid::Uuid::new_v4(),
             counter: 1,
         },
         created_at_ms,
