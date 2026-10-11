@@ -1,10 +1,22 @@
 use super::enforce::PendingMeshMutation;
 use crate::*;
 use ramshield_mesh::transport::{MeshMessage, MeshMutationKind, ReplicatedMeshMutation};
-use tokio::task::JoinSet;
 
 /// Local processing status for a batch drained from the mesh transport.
 /// This is deliberately separate from the sender's socket-write report.
+struct WalPeerInFlight {
+    peer: std::net::SocketAddr,
+    peers: std::sync::Arc<std::sync::Mutex<ahash::AHashSet<std::net::SocketAddr>>>,
+}
+
+impl Drop for WalPeerInFlight {
+    fn drop(&mut self) {
+        if let Ok(mut peers) = self.peers.lock() {
+            peers.remove(&self.peer);
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MeshApplyReport {
     pub received: usize,
@@ -85,155 +97,174 @@ impl EnforcementService {
         Ok(())
     }
 
-    /// Replicate bounded pages of this node's durable WAL to each peer.
-    /// Cursor values are local WAL LSNs and advance only when the peer ACKs the
-    /// entire page after durable application. A retention gap falls back to a
-    /// full CRDT anti-entropy rotation, then tails from the current boundary.
+    /// Schedule bounded pages of this node's durable WAL to each peer.
+    /// Network waits and WAL directory scans run off the enforcement actor's
+    /// 250ms tick; each peer has at most one in-flight page.
     pub(crate) async fn replicate_mesh_wal(&mut self) {
         let (Some(wal), Some(handle)) = (self.wal.clone(), self.mesh_handle.clone()) else {
             return;
         };
-        let latest_lsn = wal.durable_lsn();
-        if latest_lsn == 0 {
-            return;
-        }
+        let cursors = self.mesh_wal_cursors.clone();
+        let inflight = self.mesh_wal_inflight.clone();
 
-        let mut tasks = JoinSet::new();
         for peer in handle.peers() {
-            let cursor = self.mesh_wal_cursors.get(&peer).copied().unwrap_or(0);
-            if cursor >= latest_lsn {
+            let inserted = inflight
+                .lock()
+                .map(|mut peers| peers.insert(peer))
+                .unwrap_or(false);
+            if !inserted {
                 continue;
             }
-
-            let oldest_lsn = wal.oldest_lsn();
-            let history_gap = match oldest_lsn {
-                Some(oldest) => cursor.saturating_add(1) < oldest,
-                None => cursor < latest_lsn,
-            };
-            if history_gap {
-                // The regular keyset anti-entropy path supplies current state;
-                // never pretend that a truncated WAL tail is a complete history.
-                handle.request_full_sync(peer).await;
-                self.mesh_wal_cursors.insert(peer, latest_lsn);
-                warn!(
-                    peer = %peer,
-                    cursor_lsn = cursor,
-                    oldest_lsn = ?oldest_lsn,
-                    boundary_lsn = latest_lsn,
-                    "mesh WAL cursor fell behind retention; requested full CRDT anti-entropy and reset tail boundary"
-                );
-                continue;
-            }
-
-            let (records, has_more) = match wal.replay_with_lsn_page(cursor, 128) {
-                Ok(page) => page,
-                Err(error) => {
-                    warn!(peer = %peer, error = %error, "mesh WAL page read failed");
-                    continue;
-                }
-            };
-            if records.is_empty() {
-                continue;
-            }
-            let start_lsn = records[0].0;
-            let end_lsn = records.last().map(|record| record.0).unwrap_or(cursor);
-            let mut mutations = Vec::new();
-            let mut invalid_event = false;
-            for (source_lsn, entry) in records {
-                if let WalEntry::MeshMutation {
-                    schema_version,
-                    origin_node_id,
-                    origin_incarnation,
-                    origin_counter,
-                    ip,
-                    action,
-                    created_at_ms,
-                    expires_at_ms,
-                    tier,
-                    ..
-                } = entry
-                {
-                    if schema_version != 1
-                        || origin_node_id == 0
-                        || origin_counter == 0
-                        || uuid::Uuid::parse_str(&origin_incarnation)
-                            .is_err_and(|_| true)
-                    {
-                        invalid_event = true;
-                        break;
-                    }
-                    let Ok(ip) = ip.parse() else {
-                        invalid_event = true;
-                        break;
-                    };
-                    mutations.push(ReplicatedMeshMutation {
-                        source_lsn,
-                        origin_node_id,
-                        origin_incarnation,
-                        origin_counter,
-                        ip,
-                        action: match action {
-                            ramshield_storage::wal::MeshMutationAction::Block => {
-                                MeshMutationKind::Block
-                            }
-                            ramshield_storage::wal::MeshMutationAction::Unblock => {
-                                MeshMutationKind::Unblock
-                            }
-                        },
-                        created_at_ms,
-                        expires_at_ms,
-                        tier,
-                    });
-                }
-            }
-            if invalid_event {
-                error!(
-                    peer = %peer,
-                    start_lsn,
-                    end_lsn,
-                    "invalid mesh WAL event blocks replication; refusing to advance peer cursor"
-                );
-                continue;
-            }
-
-            let message = MeshMessage::WalBatch {
-                source_node_id: handle.node_id(),
-                start_lsn,
-                end_lsn,
-                mutations,
-            };
+            let cursor = cursors
+                .lock()
+                .ok()
+                .and_then(|values| values.get(&peer).copied())
+                .unwrap_or(0);
+            let peer_wal = wal.clone();
             let peer_handle = handle.clone();
-            tasks.spawn(async move {
-                let result = peer_handle.send_wal_batch(peer, message).await;
-                (peer, end_lsn, has_more, result)
-            });
-        }
+            let peer_cursors = cursors.clone();
+            let peer_inflight = inflight.clone();
+            tokio::spawn(async move {
+                let _in_flight = WalPeerInFlight {
+                    peer,
+                    peers: peer_inflight,
+                };
+                let next_cursor = async {
+                    let latest_lsn = peer_wal.durable_lsn();
+                    if cursor >= latest_lsn {
+                        return None;
+                    }
 
-        while let Some(joined) = tasks.join_next().await {
-            match joined {
-                Ok((peer, end_lsn, _has_more, Ok(Some(ack_lsn)))) if ack_lsn == end_lsn => {
-                    self.mesh_wal_cursors.insert(peer, end_lsn);
-                }
-                Ok((peer, end_lsn, _, Ok(ack_lsn))) => {
-                    warn!(
-                        peer = %peer,
-                        expected_lsn = end_lsn,
-                        ack_lsn = ?ack_lsn,
-                        "mesh WAL acknowledgement did not match page boundary; cursor retained"
-                    );
-                }
-                Ok((peer, end_lsn, _, Err(error))) => {
-                    warn!(
-                        peer = %peer,
+                    let oldest_lsn = peer_wal.oldest_lsn();
+                    let history_gap = match oldest_lsn {
+                        Some(oldest) => cursor.saturating_add(1) < oldest,
+                        None => cursor < latest_lsn,
+                    };
+                    if history_gap {
+                        peer_handle.request_full_sync(peer).await;
+                        warn!(
+                            peer = %peer,
+                            cursor_lsn = cursor,
+                            oldest_lsn = ?oldest_lsn,
+                            boundary_lsn = latest_lsn,
+                            "mesh WAL cursor fell behind retention; requested full CRDT anti-entropy and reset tail boundary"
+                        );
+                        return Some(latest_lsn);
+                    }
+
+                    let read_wal = peer_wal.clone();
+                    let page = tokio::task::spawn_blocking(move || {
+                        read_wal.replay_with_lsn_page(cursor, 128)
+                    })
+                    .await;
+                    let (records, _has_more) = match page {
+                        Ok(Ok(page)) => page,
+                        Ok(Err(error)) => {
+                            warn!(peer = %peer, error = %error, "mesh WAL page read failed");
+                            return None;
+                        }
+                        Err(error) => {
+                            warn!(peer = %peer, error = %error, "mesh WAL page worker failed");
+                            return None;
+                        }
+                    };
+                    if records.is_empty() {
+                        return None;
+                    }
+                    let start_lsn = records[0].0;
+                    let end_lsn = records.last().map(|record| record.0).unwrap_or(cursor);
+                    let mut mutations = Vec::new();
+                    for (source_lsn, entry) in records {
+                        if let WalEntry::MeshMutation {
+                            schema_version,
+                            origin_node_id,
+                            origin_incarnation,
+                            origin_counter,
+                            ip,
+                            action,
+                            created_at_ms,
+                            expires_at_ms,
+                            tier,
+                            ..
+                        } = entry
+                        {
+                            if schema_version != 1
+                                || origin_node_id == 0
+                                || origin_counter == 0
+                                || uuid::Uuid::parse_str(&origin_incarnation).is_err()
+                            {
+                                error!(
+                                    peer = %peer,
+                                    source_lsn,
+                                    "invalid mesh WAL event blocks replication; peer cursor retained"
+                                );
+                                return None;
+                            }
+                            let Ok(ip) = ip.parse() else {
+                                error!(
+                                    peer = %peer,
+                                    source_lsn,
+                                    "invalid IP in mesh WAL event blocks replication; peer cursor retained"
+                                );
+                                return None;
+                            };
+                            mutations.push(ReplicatedMeshMutation {
+                                source_lsn,
+                                origin_node_id,
+                                origin_incarnation,
+                                origin_counter,
+                                ip,
+                                action: match action {
+                                    ramshield_storage::wal::MeshMutationAction::Block => {
+                                        MeshMutationKind::Block
+                                    }
+                                    ramshield_storage::wal::MeshMutationAction::Unblock => {
+                                        MeshMutationKind::Unblock
+                                    }
+                                },
+                                created_at_ms,
+                                expires_at_ms,
+                                tier,
+                            });
+                        }
+                    }
+
+                    let message = MeshMessage::WalBatch {
+                        source_node_id: peer_handle.node_id(),
+                        start_lsn,
                         end_lsn,
-                        error = %error,
-                        "mesh WAL page was not acknowledged; cursor retained for retry"
-                    );
+                        mutations,
+                    };
+                    match peer_handle.send_wal_batch(peer, message).await {
+                        Ok(Some(ack_lsn)) if ack_lsn == end_lsn => Some(end_lsn),
+                        Ok(ack_lsn) => {
+                            warn!(
+                                peer = %peer,
+                                expected_lsn = end_lsn,
+                                ack_lsn = ?ack_lsn,
+                                "mesh WAL acknowledgement did not match page boundary; cursor retained"
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            warn!(
+                                peer = %peer,
+                                end_lsn,
+                                error = %error,
+                                "mesh WAL page was not acknowledged; cursor retained for retry"
+                            );
+                            None
+                        }
+                    }
                 }
-                Err(error) => {
-                    warn!(error = %error, "mesh WAL replication task failed");
+                .await;
+
+                if let Some(next_lsn) = next_cursor {
+                    if let Ok(mut values) = peer_cursors.lock() {
+                        values.insert(peer, next_lsn);
+                    }
                 }
-            }
+            });
         }
     }
 
