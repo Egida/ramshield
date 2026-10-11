@@ -66,6 +66,34 @@ pub fn replay_wal_into_store_seeded(
                     blocked.remove(&ip);
                 }
             }
+            WalEntry::MeshMutation {
+                ip,
+                action,
+                created_at_ms,
+                expires_at_ms,
+                ts_ns,
+                ..
+            } => {
+                if let Ok(ip) = ip.parse() {
+                    match action {
+                        ramshield_storage::wal::MeshMutationAction::Block => {
+                            let deadline = expires_at_ms.or_else(|| {
+                                // Legacy/unknown expiry is treated as permanent only
+                                // when explicitly absent; never derive it from remote LSN.
+                                None
+                            });
+                            blocked.insert(
+                                ip,
+                                (BlockReason::from_reason_str("mesh_final").unwrap_or(BlockReason::Manual), created_at_ms.saturating_mul(1_000_000), deadline.map(|ms| ms.saturating_mul(1_000_000))),
+                            );
+                        }
+                        ramshield_storage::wal::MeshMutationAction::Unblock => {
+                            blocked.remove(&ip);
+                        }
+                    }
+                    let _ = ts_ns;
+                }
+            }
             _ => {} // Insert/Delete/Checkpoint: traffic data, not block state
         }
     }
