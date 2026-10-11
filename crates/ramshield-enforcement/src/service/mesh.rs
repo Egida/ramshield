@@ -252,6 +252,7 @@ impl EnforcementService {
             .as_millis() as u64;
         for received in messages {
             let mut ack_accepted = true;
+            let mut ack_lsn = None;
             match received.message.clone() {
                 MeshMessage::Block(delta) => {
                     let peer_node_id = delta.dot.node_id;
@@ -283,8 +284,64 @@ impl EnforcementService {
                         report.record(result, state_changed, peer_node_id, ip, "sync_unblock");
                     }
                 }
+                MeshMessage::WalBatch {
+                    start_lsn: _,
+                    end_lsn,
+                    mutations,
+                    ..
+                } => {
+                    for mutation in mutations {
+                        let incarnation = match Uuid::parse_str(&mutation.origin_incarnation) {
+                            Ok(incarnation) if !incarnation.is_nil() => incarnation,
+                            _ => {
+                                ack_accepted = false;
+                                continue;
+                            }
+                        };
+                        match mutation.action {
+                            MeshMutationKind::Block => {
+                                let delta = ramshield_mesh::aworset::ClusterBlockDelta {
+                                    ip: mutation.ip,
+                                    dot: ramshield_mesh::aworset::ClusterDot {
+                                        node_id: mutation.origin_node_id,
+                                        incarnation,
+                                        counter: mutation.origin_counter,
+                                    },
+                                    created_at_ms: mutation.created_at_ms,
+                                    expires_at_ms: mutation.expires_at_ms.unwrap_or(u64::MAX),
+                                    tier: mutation.tier,
+                                };
+                                let peer_node_id = delta.dot.node_id;
+                                let ip = delta.ip;
+                                let (state_changed, result) =
+                                    self.apply_mesh_block(delta, now_ms).await;
+                                ack_accepted &= mesh_ackable(&result, self.wal.is_some());
+                                report.record(result, state_changed, peer_node_id, ip, "wal_block");
+                            }
+                            MeshMutationKind::Unblock => {
+                                let delta = ramshield_mesh::aworset::ClusterUnblockDelta {
+                                    ip: mutation.ip,
+                                    dot: ramshield_mesh::aworset::ClusterDot {
+                                        node_id: mutation.origin_node_id,
+                                        incarnation,
+                                        counter: mutation.origin_counter,
+                                    },
+                                };
+                                let peer_node_id = delta.dot.node_id;
+                                let ip = delta.ip;
+                                let (state_changed, result) =
+                                    self.apply_mesh_unblock(delta, now_ms).await;
+                                ack_accepted &= mesh_ackable(&result, self.wal.is_some());
+                                report.record(result, state_changed, peer_node_id, ip, "wal_unblock");
+                            }
+                        }
+                    }
+                    if ack_accepted {
+                        ack_lsn = Some(end_lsn);
+                    }
+                }
             }
-            received.acknowledge(ack_accepted);
+            received.acknowledge_with_lsn(ack_accepted, ack_lsn);
         }
         // Notify only after processing a batch that changed the CRDT. A merge
         // still needs propagation if its later enforcement/XDP projection fails.
