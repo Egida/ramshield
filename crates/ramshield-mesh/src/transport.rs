@@ -240,9 +240,9 @@ impl MeshHandle {
 
     /// Send to configured peers and return one explicit outcome per peer.
     ///
-    /// A `Written` result only confirms that the frame was written to the TCP
-    /// socket. It is not an acknowledgement of remote authentication or application.
-    /// Concurrency is bounded before each task is spawned.
+    /// A `Written` result now means the peer returned an authenticated
+    /// application ACK after processing the frame. Concurrency is bounded
+    /// before each task is spawned.
     pub async fn broadcast(&self, body: MeshMessage) -> BroadcastReport {
         self.mark_all_sync(SyncCondition::LocalMutation).await;
         let mut tasks = JoinSet::new();
