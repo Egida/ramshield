@@ -13,7 +13,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, Semaphore, watch},
+    sync::{Mutex, Semaphore, oneshot, watch},
     task::JoinSet,
     time::MissedTickBehavior,
 };
@@ -30,6 +30,7 @@ const MAX_CONFIGURED_PEERS: usize = 256;
 const MAX_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PEER_WRITERS: usize = 64;
 const MAX_PEER_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_APPLICATION_ACK_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MeshMessage {
@@ -102,13 +103,42 @@ struct PeerSyncState {
     delivery_failed: bool,
 }
 
+struct IncomingFrame {
+    message: MeshMessage,
+    ack: oneshot::Sender<bool>,
+}
+
+pub struct ReceivedMeshMessage {
+    pub message: MeshMessage,
+    ack: Option<oneshot::Sender<bool>>,
+}
+
+impl ReceivedMeshMessage {
+    /// Complete the receive-side application handshake. True means the
+    /// mutation was durably accepted (or intentionally ignored as stale/policy
+    /// suppressed); false asks the sender to retry the page.
+    pub fn acknowledge(mut self, accepted: bool) {
+        if let Some(ack) = self.ack.take() {
+            let _ = ack.send(accepted);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AckEnvelope {
+    ts_ms: u64,
+    node_id: u32,
+    accepted: bool,
+    mac: String,
+}
+
 #[derive(Clone)]
 pub struct MeshHandle {
     node_id: u32,
     blocklist: Arc<AworsetBlocklist>,
     peers: Arc<Vec<SocketAddr>>,
     auth_key: Arc<Vec<u8>>,
-    incoming: Arc<Mutex<VecDeque<MeshMessage>>>,
+    incoming: Arc<Mutex<VecDeque<IncomingFrame>>>,
     readers: Arc<Semaphore>,
     writers: Arc<Semaphore>,
     shutdown_tx: watch::Sender<bool>,
@@ -291,9 +321,24 @@ impl MeshHandle {
 
         report
     }
+    /// Legacy drain API. Dropping each acknowledgement responder causes the
+    /// sender to retry; production application code should use drain_with_ack.
     pub async fn drain(&self) -> Vec<MeshMessage> {
         let mut q = self.incoming.lock().await;
-        q.drain(..).collect()
+        q.drain(..).map(|frame| frame.message).collect()
+    }
+
+    /// Drain incoming frames while retaining their acknowledgement handles.
+    /// A frame is not considered delivered until the caller acknowledges after
+    /// durable application.
+    pub async fn drain_with_ack(&self) -> Vec<ReceivedMeshMessage> {
+        let mut q = self.incoming.lock().await;
+        q.drain(..)
+            .map(|frame| ReceivedMeshMessage {
+                message: frame.message,
+                ack: Some(frame.ack),
+            })
+            .collect()
     }
 
     /// Call after drained remote messages have actually been merged into the
@@ -465,6 +510,38 @@ impl MeshHandle {
         let mut stream = TcpStream::connect(peer).await?;
         stream.write_all(&frame).await?;
         stream.write_all(b"\n").await?;
+
+        let ack_frame = read_bounded_frame_with_timeout(&mut stream, MAX_PEER_WRITE_TIMEOUT)
+            .await?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed connection before application ACK",
+                )
+            })?;
+        let ack_line = ack_frame
+            .strip_suffix(b"\n")
+            .unwrap_or(&ack_frame);
+        let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
+        let ack: AckEnvelope =
+            serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
+        let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted))
+            .map_err(std::io::Error::other)?;
+        if ack.node_id == self.node_id
+            || now_ms().abs_diff(ack.ts_ms) > MAX_CLOCK_SKEW_MS
+            || !verify(&self.auth_key, &ack_payload, &ack.mac)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "peer application ACK authentication failed",
+            ));
+        }
+        if !ack.accepted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "peer did not durably accept mesh frame; retry required",
+            ));
+        }
         Ok(())
     }
     async fn read_stream(&self, mut stream: TcpStream) {
@@ -510,18 +587,52 @@ impl MeshHandle {
             );
             return;
         }
+        let (ack_tx, ack_rx) = oneshot::channel();
         let mut q = self.incoming.lock().await;
         let overflow = q.len() >= MAX_INCOMING_QUEUE;
         if overflow {
-            // Prefer the newest authenticated state; anti-entropy will recover
-            // an older delta if it was displaced. Never allow mesh traffic to
-            // consume unbounded memory under a peer flood.
+            // Dropping the displaced frame's sender explicitly rejects it; its
+            // peer will retry instead of advancing a cursor over a lost event.
             q.pop_front();
         }
-        q.push_back(env.body);
+        q.push_back(IncomingFrame {
+            message: env.body,
+            ack: ack_tx,
+        });
         drop(q);
         if overflow {
             self.mark_all_sync(SyncCondition::QueueOverflow).await;
+        }
+
+        let accepted = tokio::select! {
+            result = tokio::time::timeout(MAX_APPLICATION_ACK_WAIT, ack_rx) => {
+                result.ok().and_then(Result::ok).unwrap_or(false)
+            }
+            changed = shutdown.changed() => {
+                let _ = changed;
+                return;
+            }
+        };
+        let ts_ms = now_ms();
+        let ack_payload = match serde_json::to_vec(&(ts_ms, self.node_id, accepted)) {
+            Ok(payload) => payload,
+            Err(_) => return,
+        };
+        let mac = match sign(&self.auth_key, &ack_payload) {
+            Ok(mac) => mac,
+            Err(_) => return,
+        };
+        let ack_frame = match serde_json::to_vec(&AckEnvelope {
+            ts_ms,
+            node_id: self.node_id,
+            accepted,
+            mac,
+        }) {
+            Ok(frame) => frame,
+            Err(_) => return,
+        };
+        if stream.write_all(&ack_frame).await.is_ok() {
+            let _ = stream.write_all(b"\n").await;
         }
     }
 }
