@@ -6,7 +6,7 @@ use sha2::Sha256;
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -32,6 +32,26 @@ const MAX_PEER_WRITERS: usize = 64;
 const MAX_PEER_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_APPLICATION_ACK_WAIT: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MeshMutationKind {
+    Block,
+    Unblock,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicatedMeshMutation {
+    /// LSN in the sending node's WAL, not the origin node's CRDT counter.
+    pub source_lsn: u64,
+    pub origin_node_id: u32,
+    pub origin_incarnation: String,
+    pub origin_counter: u64,
+    pub ip: IpAddr,
+    pub action: MeshMutationKind,
+    pub created_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+    pub tier: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MeshMessage {
     Block(ClusterBlockDelta),
@@ -39,6 +59,12 @@ pub enum MeshMessage {
     Sync {
         blocks: Vec<ClusterBlockDelta>,
         unblocks: Vec<ClusterUnblockDelta>,
+    },
+    WalBatch {
+        source_node_id: u32,
+        start_lsn: u64,
+        end_lsn: u64,
+        mutations: Vec<ReplicatedMeshMutation>,
     },
 }
 
@@ -103,23 +129,38 @@ struct PeerSyncState {
     delivery_failed: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AckResponse {
+    accepted: bool,
+    ack_lsn: Option<u64>,
+}
+
 struct IncomingFrame {
     message: MeshMessage,
-    ack: oneshot::Sender<bool>,
+    ack: oneshot::Sender<AckResponse>,
 }
 
 pub struct ReceivedMeshMessage {
     pub message: MeshMessage,
-    ack: Option<oneshot::Sender<bool>>,
+    ack: Option<oneshot::Sender<AckResponse>>,
 }
 
 impl ReceivedMeshMessage {
     /// Complete the receive-side application handshake. True means the
     /// mutation was durably accepted (or intentionally ignored as stale/policy
     /// suppressed); false asks the sender to retry the page.
-    pub fn acknowledge(mut self, accepted: bool) {
+    pub fn acknowledge(self, accepted: bool) {
+        self.acknowledge_with_lsn(accepted, None);
+    }
+
+    /// Acknowledge a WAL batch through the sender's local LSN. The LSN is
+    /// meaningful only to the sender and is never compared with receiver LSNs.
+    pub fn acknowledge_with_lsn(mut self, accepted: bool, ack_lsn: Option<u64>) {
         if let Some(ack) = self.ack.take() {
-            let _ = ack.send(accepted);
+            let _ = ack.send(AckResponse {
+                accepted,
+                ack_lsn: if accepted { ack_lsn } else { None },
+            });
         }
     }
 }
@@ -129,6 +170,7 @@ struct AckEnvelope {
     ts_ms: u64,
     node_id: u32,
     accepted: bool,
+    ack_lsn: Option<u64>,
     mac: String,
 }
 
@@ -236,6 +278,49 @@ impl MeshHandle {
     /// on this signal; outbound sends are bounded by their deadline.
     pub fn shutdown(&self) {
         self.shutdown_tx.send_replace(true);
+    }
+
+    /// Local node identity carried by authenticated WAL batches.
+    pub fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    /// Configured replication targets.
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.peers.as_ref().clone()
+    }
+
+    /// Request a full CRDT anti-entropy rotation for a peer after its WAL
+    /// history fell behind retention.
+    pub async fn request_full_sync(&self, peer: SocketAddr) {
+        let now = self.sync_epoch.elapsed();
+        if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
+            state.cursor = None;
+            state.planner.condition(SyncCondition::LocalMutation, now);
+        }
+    }
+
+    /// Send a WAL batch and return the sender-local LSN durably acknowledged
+    /// by the receiver.
+    pub async fn send_wal_batch(
+        &self,
+        peer: SocketAddr,
+        body: MeshMessage,
+    ) -> std::io::Result<Option<u64>> {
+        let _permit = self
+            .writers
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        tokio::time::timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to_ack(peer, body))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "mesh WAL batch acknowledgement timed out",
+                )
+            })?
     }
 
     /// Send to configured peers and return one explicit outcome per peer.
@@ -490,6 +575,14 @@ impl MeshHandle {
         (page.next_cursor, true)
     }
     async fn send_to(&self, peer: SocketAddr, body: MeshMessage) -> std::io::Result<()> {
+        self.send_to_ack(peer, body).await.map(|_| ())
+    }
+
+    async fn send_to_ack(
+        &self,
+        peer: SocketAddr,
+        body: MeshMessage,
+    ) -> std::io::Result<Option<u64>> {
         let ts_ms = now_ms();
         let payload =
             serde_json::to_vec(&(ts_ms, self.node_id, &body)).map_err(std::io::Error::other)?;
@@ -522,8 +615,13 @@ impl MeshHandle {
         let ack_line = ack_frame.strip_suffix(b"\n").unwrap_or(&ack_frame);
         let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
         let ack: AckEnvelope = serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
-        let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted))
-            .map_err(std::io::Error::other)?;
+        let ack_payload = serde_json::to_vec(&(
+            ack.ts_ms,
+            ack.node_id,
+            ack.accepted,
+            ack.ack_lsn,
+        ))
+        .map_err(std::io::Error::other)?;
         if ack.node_id == self.node_id
             || now_ms().abs_diff(ack.ts_ms) > MAX_CLOCK_SKEW_MS
             || !verify(&self.auth_key, &ack_payload, &ack.mac)
@@ -539,7 +637,7 @@ impl MeshHandle {
                 "peer did not durably accept mesh frame; retry required",
             ));
         }
-        Ok(())
+        Ok(ack.ack_lsn)
     }
     async fn read_stream(&self, mut stream: TcpStream) {
         let mut shutdown = self.shutdown_tx.subscribe();
@@ -577,6 +675,13 @@ impl MeshHandle {
         if env.node_id == self.node_id {
             return;
         }
+        if matches!(
+            &env.body,
+            MeshMessage::WalBatch { source_node_id, .. } if *source_node_id != env.node_id
+        ) {
+            warn!(node_id = env.node_id, "mesh WAL batch source identity does not match authenticated envelope");
+            return;
+        }
         if !valid_message(&env.body, now_ms()) {
             warn!(
                 node_id = env.node_id,
@@ -601,9 +706,12 @@ impl MeshHandle {
             self.mark_all_sync(SyncCondition::QueueOverflow).await;
         }
 
-        let accepted = tokio::select! {
+        let ack_response = tokio::select! {
             result = tokio::time::timeout(MAX_APPLICATION_ACK_WAIT, ack_rx) => {
-                result.ok().and_then(Result::ok).unwrap_or(false)
+                result.ok().and_then(Result::ok).unwrap_or(AckResponse {
+                    accepted: false,
+                    ack_lsn: None,
+                })
             }
             changed = shutdown.changed() => {
                 let _ = changed;
@@ -611,7 +719,12 @@ impl MeshHandle {
             }
         };
         let ts_ms = now_ms();
-        let ack_payload = match serde_json::to_vec(&(ts_ms, self.node_id, accepted)) {
+        let ack_payload = match serde_json::to_vec(&(
+            ts_ms,
+            self.node_id,
+            ack_response.accepted,
+            ack_response.ack_lsn,
+        )) {
             Ok(payload) => payload,
             Err(_) => return,
         };
@@ -622,7 +735,8 @@ impl MeshHandle {
         let ack_frame = match serde_json::to_vec(&AckEnvelope {
             ts_ms,
             node_id: self.node_id,
-            accepted,
+            accepted: ack_response.accepted,
+            ack_lsn: ack_response.ack_lsn,
             mac,
         }) {
             Ok(frame) => frame,
@@ -677,6 +791,29 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
                 && unblocks
                     .iter()
                     .all(|delta| delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil())
+        }
+        MeshMessage::WalBatch {
+            source_node_id,
+            start_lsn,
+            end_lsn,
+            mutations,
+        } => {
+            *source_node_id != 0
+                && *start_lsn > 0
+                && *end_lsn >= *start_lsn
+                && mutations.len() <= MAX_SYNC_FRAME_ENTRIES
+                && mutations.windows(2).all(|pair| pair[0].source_lsn < pair[1].source_lsn)
+                && mutations.iter().all(|mutation| {
+                    mutation.source_lsn >= *start_lsn
+                        && mutation.source_lsn <= *end_lsn
+                        && mutation.origin_node_id != 0
+                        && mutation.origin_counter > 0
+                        && uuid::Uuid::parse_str(&mutation.origin_incarnation)
+                            .is_ok_and(|id| !id.is_nil())
+                        && !mutation.ip.is_unspecified()
+                        && (mutation.action == MeshMutationKind::Unblock
+                            || mutation.expires_at_ms.is_none_or(|expiry| expiry >= mutation.created_at_ms))
+                })
         }
     }
 }
