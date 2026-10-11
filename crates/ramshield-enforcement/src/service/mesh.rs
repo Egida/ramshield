@@ -62,6 +62,13 @@ impl EnforcementService {
         let Some(wal) = self.wal.as_ref() else {
             return Ok(());
         };
+        // Keep incoming append+fsync inside the checkpoint barrier. Otherwise a
+        // snapshot could capture pre-merge state and its tail could start after
+        // this durable event, losing the mutation on restart.
+        let checkpoint_arc = self.checkpoint_shared.clone();
+        let _checkpoint_guard = checkpoint_arc
+            .as_ref()
+            .map(|shared| shared.barrier.lock().unwrap_or_else(|e| e.into_inner()));
         let ts_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
