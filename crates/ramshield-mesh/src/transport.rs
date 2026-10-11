@@ -519,12 +519,9 @@ impl MeshHandle {
                     "peer closed connection before application ACK",
                 )
             })?;
-        let ack_line = ack_frame
-            .strip_suffix(b"\n")
-            .unwrap_or(&ack_frame);
+        let ack_line = ack_frame.strip_suffix(b"\n").unwrap_or(&ack_frame);
         let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
-        let ack: AckEnvelope =
-            serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
+        let ack: AckEnvelope = serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
         let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted))
             .map_err(std::io::Error::other)?;
         if ack.node_id == self.node_id
@@ -877,7 +874,10 @@ mod frame_tests {
             .await
             .expect("node B should apply node A's state");
             let report = sender.await.expect("sender task");
-            assert!(report.all_written(), "node A should receive an application ACK");
+            assert!(
+                report.all_written(),
+                "node A should receive an application ACK"
+            );
 
             let ip_b = IpAddr::V6(Ipv6Addr::from(0xdef01234u128));
             blocklist_b.record_ban(ip_b, 60_000, 2);
