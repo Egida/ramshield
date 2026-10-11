@@ -80,6 +80,8 @@ These commits are progress, not a feature acceptance decision. The latest record
 
 - [ ] **M-011: Fair pagination beyond 4,096 entries.** Ensure every live entry and tombstone is eventually visited, rather than repeatedly sampling an arbitrary prefix of concurrent maps.
 
+- [ ] **M-014: Condition-driven anti-entropy prototype.** A separate policy state machine now models coalesced mutation sync, reconnect/overflow/failure triggers, bounded retry backoff, and periodic repair. It is not wired into transport; see [`CONDITION_DRIVEN_SYNC_PROTOTYPE.md`](CONDITION_DRIVEN_SYNC_PROTOTYPE.md). Integrate only after per-peer fairness, lost-wakeup, loss/reconnect, and bounded-resource acceptance tests pass.
+
 - [ ] **M-012: End-to-end convergence under large state.** Test multiple pages/chunks, repeated sync, loss/reconnect, tombstones, state exceeding a page and the configured maximum, and eventual convergence.
 
 - [ ] **M-013: Frame-boundary tests.** Exact maximum, one byte over, delimiter split across reads, clean EOF, partial EOF, malformed JSON, and oversized input must have deterministic expected outcomes.
