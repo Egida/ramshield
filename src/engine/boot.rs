@@ -417,6 +417,9 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                             vec![]
                         }
                     };
+                #[cfg(feature = "mesh")]
+                enforcement.refresh_mesh_applied_ips();
+
                 // CIDR recovery is seeded from the snapshot exactly like IP
                 // recovery. This is required for the invariant:
                 // full WAL replay == snapshot + WAL tail replay. In particular,
