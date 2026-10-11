@@ -615,12 +615,8 @@ impl MeshHandle {
         let ack_line = ack_frame.strip_suffix(b"\n").unwrap_or(&ack_frame);
         let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
         let ack: AckEnvelope = serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
-        let ack_payload = serde_json::to_vec(&(
-            ack.ts_ms,
-            ack.node_id,
-            ack.accepted,
-            ack.ack_lsn,
-        ))
+        let ack_payload =
+            serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted, ack.ack_lsn))
         .map_err(std::io::Error::other)?;
         if ack.node_id == self.node_id
             || now_ms().abs_diff(ack.ts_ms) > MAX_CLOCK_SKEW_MS
@@ -679,7 +675,10 @@ impl MeshHandle {
             &env.body,
             MeshMessage::WalBatch { source_node_id, .. } if *source_node_id != env.node_id
         ) {
-            warn!(node_id = env.node_id, "mesh WAL batch source identity does not match authenticated envelope");
+            warn!(
+                node_id = env.node_id,
+                "mesh WAL batch source identity does not match authenticated envelope"
+            );
             return;
         }
         if !valid_message(&env.body, now_ms()) {
@@ -802,7 +801,9 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
                 && *start_lsn > 0
                 && *end_lsn >= *start_lsn
                 && mutations.len() <= MAX_SYNC_FRAME_ENTRIES
-                && mutations.windows(2).all(|pair| pair[0].source_lsn < pair[1].source_lsn)
+                && mutations
+                    .windows(2)
+                    .all(|pair| pair[0].source_lsn < pair[1].source_lsn)
                 && mutations.iter().all(|mutation| {
                     mutation.source_lsn >= *start_lsn
                         && mutation.source_lsn <= *end_lsn
@@ -812,7 +813,9 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
                             .is_ok_and(|id| !id.is_nil())
                         && !mutation.ip.is_unspecified()
                         && (mutation.action == MeshMutationKind::Unblock
-                            || mutation.expires_at_ms.is_none_or(|expiry| expiry >= mutation.created_at_ms))
+                            || mutation
+                                .expires_at_ms
+                                .is_none_or(|expiry| expiry >= mutation.created_at_ms))
                 })
         }
     }
