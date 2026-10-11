@@ -375,13 +375,16 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
     let latest_creation = now_ms.saturating_add(MAX_CLOCK_SKEW_MS);
     let valid_block = |delta: &ClusterBlockDelta| {
         delta.dot.node_id != 0
+            && !delta.dot.incarnation.is_nil()
             && (delta.created_at_ms == 0 || delta.created_at_ms <= latest_creation)
             && (delta.expires_at_ms == u64::MAX || delta.expires_at_ms >= delta.created_at_ms)
     };
 
     match message {
         MeshMessage::Block(delta) => valid_block(delta),
-        MeshMessage::Unblock(delta) => delta.dot.node_id != 0,
+        MeshMessage::Unblock(delta) => {
+            delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil()
+        },
         MeshMessage::Sync { blocks, unblocks } => {
             blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
                 && blocks.iter().all(valid_block)
@@ -661,6 +664,7 @@ mod frame_tests {
             ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
             dot: ClusterDot {
                 node_id: 7,
+                incarnation: uuid::Uuid::new_v4(),
                 counter: 1,
             },
             created_at_ms: u64::MAX,
@@ -677,6 +681,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
                 dot: ClusterDot {
                     node_id: 7,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: counter as u64,
                 },
                 created_at_ms: 0,
@@ -700,6 +705,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 7,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: ip as u64,
                 },
                 created_at_ms: u64::MAX,
@@ -712,6 +718,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 8,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: ip as u64,
                 },
             })
@@ -740,6 +747,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(u128::MAX)),
                 dot: ClusterDot {
                     node_id: u32::MAX,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: u64::MAX,
                 },
                 created_at_ms: u64::MAX,
