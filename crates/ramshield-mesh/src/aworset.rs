@@ -405,8 +405,8 @@ impl AworsetBlocklist {
         }
 
         let start = cursor % total;
-        let count = limit.min(total);
-        let next_cursor = (start + count) % total;
+        let count = limit.min(total - start);
+        let next_cursor = if start + count >= total { 0 } else { start + count };
         let mut blocks = Vec::with_capacity(count);
         let mut unblocks = Vec::with_capacity(count);
         for offset in 0..count {
