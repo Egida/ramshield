@@ -225,7 +225,7 @@ impl EnforcementService {
         let changed = mesh.needs_merge_unblock(&delta);
         let still_blocked = mesh.would_be_blocked_after_unblock(&delta, now_ms);
         let locally_applied = self.mesh_applied_ips.contains(&delta.ip);
-        if changed && still_blocked {
+        if changed && (still_blocked || !locally_applied) {
             return match self.persist_and_merge_unblock_only(&delta) {
                 Ok(()) => (true, Ok(MeshApplyOutcome::Ignored)),
                 Err(error) => (false, Err(error)),
