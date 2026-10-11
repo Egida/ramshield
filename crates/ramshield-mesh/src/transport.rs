@@ -511,7 +511,7 @@ mod frame_tests {
     use super::{
         Envelope, MAX_CONFIGURED_PEERS, MAX_FRAME, MAX_SYNC_FRAME_ENTRIES, MeshHandle, MeshMessage,
         PeerSendOutcome, chunk_sync, push_frame_bytes, read_bounded_frame,
-        read_bounded_frame_with_timeout, valid_message, validate_bind_args, with_timeout,
+        read_bounded_frame_with_timeout, now_ms, valid_message, validate_bind_args, with_timeout,
     };
     use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
     use std::time::Duration;
