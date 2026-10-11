@@ -112,6 +112,56 @@ async fn authenticated_block_crosses_real_tcp_transport() {
 }
 
 #[tokio::test]
+async fn negative_application_ack_is_not_reported_as_written() {
+    let receiver_addr = free_addr().await;
+    let receiver = MeshHandle::bind(
+        2,
+        Arc::new(AworsetBlocklist::new(2)),
+        receiver_addr,
+        Vec::new(),
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind receiver");
+    let sender = MeshHandle::bind(
+        1,
+        Arc::new(AworsetBlocklist::new(1)),
+        free_addr().await,
+        vec![receiver_addr],
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind sender");
+
+    let created_at_ms = now_ms();
+    let delta = ClusterBlockDelta {
+        ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 92)),
+        dot: ClusterDot {
+            node_id: 1,
+            incarnation: uuid::Uuid::new_v4(),
+            counter: 1,
+        },
+        created_at_ms,
+        expires_at_ms: created_at_ms + 60_000,
+        tier: 2,
+    };
+    let sender_task = {
+        let sender = sender.clone();
+        tokio::spawn(async move { sender.broadcast(MeshMessage::Block(delta)).await })
+    };
+    let received = wait_for_one(&receiver).await;
+    for frame in received {
+        frame.acknowledge(false);
+    }
+    let report = sender_task.await.expect("sender task");
+    assert_eq!(report.written_count(), 0);
+    assert!(!report.all_written());
+
+    sender.shutdown();
+    receiver.shutdown();
+}
+
+#[tokio::test]
 async fn invalid_hmac_frame_never_enters_receive_queue() {
     let receiver_addr = free_addr().await;
     let receiver = MeshHandle::bind(
