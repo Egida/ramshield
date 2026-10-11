@@ -842,6 +842,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_page_covers_large_mixed_state_exactly_once() {
+        const EACH: usize = 2_500;
+        const LIMIT: usize = 4_096;
+        let mesh = AworsetBlocklist::new(7);
+        let block_incarnation = Uuid::new_v4();
+        let tombstone_incarnation = Uuid::new_v4();
+        let mut expected_blocks = std::collections::HashSet::new();
+        let mut expected_tombstones = std::collections::HashSet::new();
+
+        for n in 0..EACH {
+            let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
+            mesh.entries.insert(
+                (block_ip, 7, block_incarnation),
+                (n as u64 + 1, 0, u64::MAX, 2),
+            );
+            expected_blocks.insert(block_ip);
+
+            let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
+            mesh.tombstones
+                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
+            expected_tombstones.insert(tombstone_ip);
+        }
+
+        let first = mesh.snapshot_page(0, LIMIT);
+        assert_eq!(first.total, EACH * 2);
+        assert_eq!(first.blocks.len() + first.unblocks.len(), LIMIT);
+        assert_eq!(first.next_cursor, LIMIT);
+
+        let second = mesh.snapshot_page(first.next_cursor, LIMIT);
+        assert_eq!(second.total, EACH * 2);
+        assert_eq!(second.blocks.len() + second.unblocks.len(), EACH * 2 - LIMIT);
+        assert_eq!(second.next_cursor, 0);
+
+        let observed_blocks: std::collections::HashSet<_> = first
+            .blocks
+            .into_iter()
+            .chain(second.blocks)
+            .map(|delta| delta.ip)
+            .collect();
+        let observed_tombstones: std::collections::HashSet<_> = first
+            .unblocks
+            .into_iter()
+            .chain(second.unblocks)
+            .map(|delta| delta.ip)
+            .collect();
+
+        assert_eq!(observed_blocks, expected_blocks);
+        assert_eq!(observed_tombstones, expected_tombstones);
+    }
+
+    #[test]
     fn snapshot_carries_active_dot_and_tombstone() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
