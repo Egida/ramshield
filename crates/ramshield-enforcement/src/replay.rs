@@ -46,8 +46,7 @@ pub fn replay_wal_into_store_seeded_with_mesh(
                 incarnation: delta.dot.incarnation.to_string(),
                 counter: delta.dot.counter,
                 created_at_ms: delta.created_at_ms,
-                expires_at_ms: (delta.expires_at_ms != u64::MAX)
-                    .then_some(delta.expires_at_ms),
+                expires_at_ms: (delta.expires_at_ms != u64::MAX).then_some(delta.expires_at_ms),
                 tier: delta.tier,
             })
             .collect(),
@@ -485,7 +484,7 @@ mod mesh_wal_replay_tests {
         }
         wal.sync().unwrap();
 
-        let (touched, active) = replay_mesh_state(&wal, 1_800_000_000_000_000_000).unwrap();
+        let (touched, active) = replay_mesh_state(&wal, 0, None, 1_800_000_000_000_000_000).unwrap();
         assert!(touched.contains(&ip));
         assert!(
             active.contains_key(&ip),
