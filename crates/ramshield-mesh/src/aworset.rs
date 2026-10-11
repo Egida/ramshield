@@ -450,7 +450,10 @@ mod tests {
         receiver.purge_expired(old_ban.expires_at_ms.saturating_add(86_400_000));
         assert!(receiver.entries.is_empty());
         assert_eq!(
-            receiver.tombstones.get(&(ip, sender.node_id, old_ban.dot.incarnation)).map(|v| *v),
+            receiver
+                .tombstones
+                .get(&(ip, sender.node_id, old_ban.dot.incarnation))
+                .map(|v| *v),
             Some(old_ban.dot.counter)
         );
         assert!(
@@ -580,7 +583,10 @@ mod tests {
             !receiver.merge_delta(&old),
             "reordered stale delta must be ignored"
         );
-        let entry = receiver.entries.get(&(ip, sender.node_id, old.dot.incarnation)).unwrap();
+        let entry = receiver
+            .entries
+            .get(&(ip, sender.node_id, old.dot.incarnation))
+            .unwrap();
         assert_eq!(entry.value().0, newer.dot.counter);
         assert_eq!(entry.value().2, newer.expires_at_ms);
     }
