@@ -389,7 +389,11 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 }
                 #[cfg(feature = "mesh")]
                 if let Some(mesh) = mesh_blocklist.as_ref() {
-                    let mesh_min_lsn = if mesh_snapshot_seed.is_some() { snap_lsn } else { 0 };
+                    let mesh_min_lsn = if mesh_snapshot_seed.is_some() {
+                        snap_lsn
+                    } else {
+                        0
+                    };
                     restore_mesh_crdt_from_wal(mesh, &wal, mesh_min_lsn)?;
                 }
 
@@ -447,24 +451,24 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                     }
                 };
                 let restored_ttls = match replay_result {
-                        Ok(r) => {
-                            info!(
-                                "WAL replay: restored {} IP blocks (min_lsn={})",
-                                r.len(),
-                                min_lsn
-                            );
-                            r
+                    Ok(r) => {
+                        info!(
+                            "WAL replay: restored {} IP blocks (min_lsn={})",
+                            r.len(),
+                            min_lsn
+                        );
+                        r
+                    }
+                    Err(e) => {
+                        tracing::error!("WAL replay: {}", e);
+                        if hard_wal {
+                            return Err(std::io::Error::other(format!(
+                                "WAL replay failed (allow_volatile_fallback=false): {e}"
+                            )));
                         }
-                        Err(e) => {
-                            tracing::error!("WAL replay: {}", e);
-                            if hard_wal {
-                                return Err(std::io::Error::other(format!(
-                                    "WAL replay failed (allow_volatile_fallback=false): {e}"
-                                )));
-                            }
-                            vec![]
-                        }
-                    };
+                        vec![]
+                    }
+                };
                 #[cfg(feature = "mesh")]
                 enforcement.refresh_mesh_applied_ips();
 
