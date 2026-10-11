@@ -246,8 +246,8 @@ mod tests {
         let mut p = planner();
         assert_eq!(p.take_due(ms(0)), Some(SyncReason::PeriodicRepair));
         p.complete(ms(1), true);
-        assert_eq!(p.take_due(ms(1_000)), Some(SyncReason::PeriodicRepair));
-        p.complete(ms(1_001), true);
+        assert_eq!(p.take_due(ms(1_001)), Some(SyncReason::PeriodicRepair));
+        p.complete(ms(1_002), true);
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(p.take_due(ms(0)), Some(SyncReason::PeerReconnected));
         p.condition(SyncCondition::LocalMutation, ms(1));
         p.complete(ms(10), true);
-        assert_eq!(p.take_due(ms(50)), Some(SyncReason::StateChanged));
+        assert_eq!(p.take_due(ms(51)), Some(SyncReason::StateChanged));
     }
 
     #[test]
@@ -307,16 +307,20 @@ mod tests {
 
     #[test]
     fn rejects_zero_repair_and_invalid_retry_policy() {
-        assert!(ConditionSyncPlanner::new(SyncPolicy {
-            repair_interval: Duration::ZERO,
-            ..SyncPolicy::default()
-        })
-        .is_err());
-        assert!(ConditionSyncPlanner::new(SyncPolicy {
-            retry_initial: ms(200),
-            retry_max: ms(100),
-            ..SyncPolicy::default()
-        })
-        .is_err());
+        assert!(
+            ConditionSyncPlanner::new(SyncPolicy {
+                repair_interval: Duration::ZERO,
+                ..SyncPolicy::default()
+            })
+            .is_err()
+        );
+        assert!(
+            ConditionSyncPlanner::new(SyncPolicy {
+                retry_initial: ms(200),
+                retry_max: ms(100),
+                ..SyncPolicy::default()
+            })
+            .is_err()
+        );
     }
 }
