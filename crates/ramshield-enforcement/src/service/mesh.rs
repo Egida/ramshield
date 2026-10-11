@@ -274,10 +274,7 @@ impl EnforcementService {
     }
 }
 
-fn mesh_ackable(
-    result: &Result<MeshApplyOutcome, EnforcementError>,
-    has_wal: bool,
-) -> bool {
+fn mesh_ackable(result: &Result<MeshApplyOutcome, EnforcementError>, has_wal: bool) -> bool {
     match result {
         Ok(MeshApplyOutcome::Ignored) => true,
         Ok(MeshApplyOutcome::Applied) => has_wal,
