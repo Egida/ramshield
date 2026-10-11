@@ -108,7 +108,7 @@ impl Default for Aworset {
 
 /// IP-keyed blocklist CRDT: operation dots per (ip, node), ordered by the
 /// per-node operation counter. HLC physical time is retained separately for
-/// TTL calculation. Internal map is DashMap<(IpAddr, node_id),
+/// TTL calculation. Internal map is DashMap<(IpAddr, node_id, incarnation),
 /// (operation_counter, created_at_ms, expires_at_ms)>.
 pub struct AworsetBlocklist {
     node_id: u32,
@@ -228,7 +228,7 @@ impl AworsetBlocklist {
     /// or epoch-based causal-stability protocol is implemented.
     pub fn purge_expired(&self, now_ms: u64) {
         const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
-        let expired: Vec<((IpAddr, u32), u64)> = self
+        let expired: Vec<((IpAddr, u32, Uuid), u64)> = self
             .entries
             .iter()
             .filter_map(|entry| {
@@ -267,7 +267,11 @@ impl AworsetBlocklist {
                 .or_insert(counter);
             deltas.push(ClusterUnblockDelta {
                 ip,
-                dot: ClusterDot { node_id, counter },
+                dot: ClusterDot {
+                    node_id,
+                    incarnation,
+                    counter,
+                },
             });
         }
         deltas
@@ -429,7 +433,7 @@ mod tests {
         receiver.purge_expired(old_ban.expires_at_ms.saturating_add(86_400_000));
         assert!(receiver.entries.is_empty());
         assert_eq!(
-            receiver.tombstones.get(&(ip, sender.node_id)).map(|v| *v),
+            receiver.tombstones.get(&(ip, sender.node_id, old_ban.dot.incarnation)).map(|v| *v),
             Some(old_ban.dot.counter)
         );
         assert!(
@@ -492,7 +496,7 @@ mod tests {
                 .iter()
                 .map(|entry| (*entry.key(), *entry.value()))
                 .collect();
-            state.sort_by_key(|(key, value)| (key.0, key.1, value.0));
+            state.sort_by_key(|(key, value)| (key.0, key.1, key.2, value.0));
             state
         };
         assert_eq!(normalize(&left), normalize(&right));
@@ -518,7 +522,7 @@ mod tests {
             !receiver.merge_delta(&old),
             "reordered stale delta must be ignored"
         );
-        let entry = receiver.entries.get(&(ip, sender.node_id)).unwrap();
+        let entry = receiver.entries.get(&(ip, sender.node_id, old.dot.incarnation)).unwrap();
         assert_eq!(entry.value().0, newer.dot.counter);
         assert_eq!(entry.value().2, newer.expires_at_ms);
     }
