@@ -29,7 +29,9 @@ pub struct StateCursor {
 }
 
 /// Distinguishes a live block from a tombstone for the same CRDT key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum StateKind {
     Block,
     Unblock,
@@ -868,7 +870,10 @@ mod tests {
         assert_eq!(peer_a_first.total, 5);
         assert_eq!(peer_a_first.blocks.len() + peer_a_first.unblocks.len(), 2);
         assert!(peer_a_first.has_more);
-        let peer_a_cursor = peer_a_first.next_cursor.clone().expect("second page exists");
+        let peer_a_cursor = peer_a_first
+            .next_cursor
+            .clone()
+            .expect("second page exists");
 
         let peer_a_second = mesh.snapshot_page(Some(&peer_a_cursor), 2);
         assert_eq!(peer_a_second.total, 5);
@@ -907,9 +912,12 @@ mod tests {
                 kind: StateKind::Block,
             } > cursor
         }));
-        assert!(second.blocks.iter().any(|delta| {
-            delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128))
-        }));
+        assert!(
+            second
+                .blocks
+                .iter()
+                .any(|delta| { delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128)) })
+        );
         assert!(!second.blocks.iter().any(|delta| delta.ip == last_first_ip));
         assert!(!second.has_more);
         assert!(second.next_cursor.is_none());
