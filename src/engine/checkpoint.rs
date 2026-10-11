@@ -413,12 +413,8 @@ mod tests {
         let mesh_state = mesh.export_snapshot();
 
         let store = Store::new(16);
-        let snapshot = build_snapshot_with_mesh(
-            &store,
-            &CheckpointState::default(),
-            99,
-            mesh_state.clone(),
-        );
+        let snapshot =
+            build_snapshot_with_mesh(&store, &CheckpointState::default(), 99, mesh_state.clone());
         let encoded = serde_json::to_vec(&snapshot).unwrap();
         let decoded: CheckpointSnapshot = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded.mesh_state, Some(mesh_state.clone()));
