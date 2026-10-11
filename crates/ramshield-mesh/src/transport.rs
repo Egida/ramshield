@@ -275,7 +275,8 @@ impl MeshHandle {
                             debug!(peer = %peer, "mesh outbound send cancelled");
                         }
                         PeerSendOutcome::Failed { message } => {
-                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed)
+                                .await;
                             warn!(peer = %peer, error = %message, "mesh outbound send failed");
                         }
                     }
