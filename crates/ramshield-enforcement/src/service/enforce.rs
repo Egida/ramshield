@@ -20,7 +20,7 @@ pub(crate) enum PendingMeshMutation {
 }
 
 impl PendingMeshMutation {
-    fn to_wal_entry(&self, ts_ns: u64) -> WalEntry {
+    pub(crate) fn to_wal_entry(&self, ts_ns: u64) -> WalEntry {
         match self {
             Self::Block {
                 ip,
@@ -104,6 +104,8 @@ impl EnforcementService {
         cmd: EnforceCommand,
         incoming_mesh_mutation: Option<PendingMeshMutation>,
     ) -> Result<EnforceResult, EnforcementError> {
+        #[cfg(not(feature = "mesh"))]
+        let _ = &incoming_mesh_mutation;
         // Idempotent replay: return what actually happened the first time —
         // a fabricated `xdp_applied: true` would hide a dataplane failure
         // from every retry consumer.
