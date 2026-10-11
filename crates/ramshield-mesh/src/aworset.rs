@@ -906,7 +906,9 @@ mod tests {
                 kind: StateKind::Block,
             } > cursor
         }));
-        assert!(second.blocks.iter().any(|delta| delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128))));
+        assert!(second.blocks.iter().any(|delta| {
+            delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128))
+        }));
         assert!(!second.blocks.iter().any(|delta| delta.ip == last_first_ip));
         assert!(!second.has_more);
         assert!(second.next_cursor.is_none());
