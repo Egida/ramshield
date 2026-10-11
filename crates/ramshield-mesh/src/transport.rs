@@ -3,18 +3,20 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
     net::SocketAddr,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore, watch},
     task::JoinSet,
+    time::MissedTickBehavior,
 };
+use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use tracing::{debug, warn};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -95,6 +97,11 @@ struct Envelope {
     body: MeshMessage,
     mac: String,
 }
+struct PeerSyncState {
+    planner: ConditionSyncPlanner,
+    cursor: usize,
+}
+
 #[derive(Clone)]
 pub struct MeshHandle {
     node_id: u32,
@@ -105,6 +112,8 @@ pub struct MeshHandle {
     readers: Arc<Semaphore>,
     writers: Arc<Semaphore>,
     shutdown_tx: watch::Sender<bool>,
+    sync_states: Arc<Mutex<HashMap<SocketAddr, PeerSyncState>>>,
+    sync_epoch: Instant,
 }
 
 impl MeshHandle {
@@ -116,6 +125,15 @@ impl MeshHandle {
         auth_key: Vec<u8>,
     ) -> std::io::Result<Self> {
         validate_bind_args(node_id, &peers, &auth_key)?;
+        let sync_states = peers
+            .iter()
+            .copied()
+            .map(|peer| {
+                ConditionSyncPlanner::new(SyncPolicy::default())
+                    .map(|planner| (peer, PeerSyncState { planner, cursor: 0 }))
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+            })
+            .collect::<std::io::Result<HashMap<_, _>>>()?;
         let listener = TcpListener::bind(listen).await?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = Self {
@@ -127,6 +145,8 @@ impl MeshHandle {
             readers: Arc::new(Semaphore::new(MAX_PEER_READERS)),
             writers: Arc::new(Semaphore::new(MAX_PEER_WRITERS)),
             shutdown_tx,
+            sync_states: Arc::new(Mutex::new(sync_states)),
+            sync_epoch: Instant::now(),
         };
         let accept_handle = handle.clone();
         let mut listener_shutdown = shutdown_rx.clone();
@@ -158,7 +178,8 @@ impl MeshHandle {
         let sync_handle = handle.clone();
         let mut sync_shutdown = shutdown_rx;
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(ANTI_ENTROPY_MS));
+            let mut tick = tokio::time::interval(Duration::from_millis(25));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = tick.tick() => sync_handle.broadcast_sync().await,
@@ -184,6 +205,7 @@ impl MeshHandle {
     /// socket. It is not an acknowledgement of remote authentication or application.
     /// Concurrency is bounded before each task is spawned.
     pub async fn broadcast(&self, body: MeshMessage) -> BroadcastReport {
+        self.mark_all_sync(SyncCondition::LocalMutation).await;
         let mut tasks = JoinSet::new();
         let mut report = BroadcastReport::default();
 
@@ -230,14 +252,19 @@ impl MeshHandle {
             match joined {
                 Ok((peer, outcome)) => {
                     match &outcome {
-                        PeerSendOutcome::Written => {}
+                        PeerSendOutcome::Written => {
+                            self.note_peer_success(peer).await;
+                        }
                         PeerSendOutcome::TimedOut => {
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
                             warn!(peer = %peer, "mesh outbound send timed out");
                         }
                         PeerSendOutcome::Cancelled => {
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
                             debug!(peer = %peer, "mesh outbound send cancelled");
                         }
                         PeerSendOutcome::Failed { message } => {
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
                             warn!(peer = %peer, error = %message, "mesh outbound send failed");
                         }
                     }
@@ -256,16 +283,90 @@ impl MeshHandle {
         let mut q = self.incoming.lock().await;
         q.drain(..).collect()
     }
+
+    /// Call after drained remote messages have actually been merged into the
+    /// local CRDT. Draining alone is not treated as application success.
+    pub async fn notify_remote_state_applied(&self) {
+        self.mark_all_sync(SyncCondition::RemoteStateApplied).await;
+    }
+
+    async fn mark_all_sync(&self, condition: SyncCondition) {
+        let now = self.sync_epoch.elapsed();
+        let mut states = self.sync_states.lock().await;
+        for state in states.values_mut() {
+            state.planner.condition(condition, now);
+        }
+    }
+
+    async fn condition_peer(&self, peer: SocketAddr, condition: SyncCondition) {
+        let now = self.sync_epoch.elapsed();
+        if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
+            state.planner.condition(condition, now);
+        }
+    }
+
+    async fn note_peer_success(&self, peer: SocketAddr) {
+        let now = self.sync_epoch.elapsed();
+        if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
+            if state.planner.consecutive_failures() > 0 {
+                state.planner.condition(SyncCondition::PeerReconnected, now);
+            }
+        }
+    }
+
     async fn broadcast_sync(&self) {
-        let (blocks, unblocks) = self.blocklist.snapshot(MAX_SYNC_ENTRIES);
-        for message in chunk_sync(&blocks, &unblocks) {
-            let report = self.broadcast(message).await;
-            if !report.all_written() {
-                warn!(
-                    written = report.written_count(),
-                    failed = report.failed_count(),
-                    "mesh anti-entropy sync was not delivered to every configured peer"
-                );
+        let now = self.sync_epoch.elapsed();
+        let due_peers: Vec<SocketAddr> = {
+            let mut states = self.sync_states.lock().await;
+            states
+                .iter_mut()
+                .filter_map(|(peer, state)| state.planner.take_due(now).map(|_| *peer))
+                .collect()
+        };
+
+        for peer in due_peers {
+            let cursor = self
+                .sync_states
+                .lock()
+                .await
+                .get(&peer)
+                .map(|state| state.cursor)
+                .unwrap_or(0);
+            let page = self.blocklist.snapshot_page(cursor, MAX_SYNC_ENTRIES);
+            let mut success = true;
+            let mut shutdown = self.shutdown_tx.subscribe();
+
+            for message in chunk_sync(&page.blocks, &page.unblocks) {
+                if *shutdown.borrow() {
+                    success = false;
+                    break;
+                }
+                let send_result = tokio::select! {
+                    result = with_timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to(peer, message)) => result,
+                    changed = shutdown.changed() => {
+                        let _ = changed;
+                        Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown"))
+                    }
+                };
+                if let Err(error) = send_result {
+                    success = false;
+                    warn!(peer = %peer, error = %error, "condition-driven mesh sync page failed");
+                    break;
+                }
+            }
+
+            let completed_at = self.sync_epoch.elapsed();
+            let mut states = self.sync_states.lock().await;
+            if let Some(state) = states.get_mut(&peer) {
+                state.planner.complete(completed_at, success);
+                if success {
+                    state.cursor = page.next_cursor;
+                    if page.next_cursor != 0 {
+                        // Continue large snapshots promptly, but coalesce page
+                        // work so this remains bounded by the scheduler tick.
+                        state.planner.condition(SyncCondition::LocalMutation, completed_at);
+                    }
+                }
             }
         }
     }
@@ -336,13 +437,18 @@ impl MeshHandle {
             return;
         }
         let mut q = self.incoming.lock().await;
-        if q.len() >= MAX_INCOMING_QUEUE {
+        let overflow = q.len() >= MAX_INCOMING_QUEUE;
+        if overflow {
             // Prefer the newest authenticated state; anti-entropy will recover
             // an older delta if it was displaced. Never allow mesh traffic to
             // consume unbounded memory under a peer flood.
             q.pop_front();
         }
         q.push_back(env.body);
+        drop(q);
+        if overflow {
+            self.mark_all_sync(SyncCondition::QueueOverflow).await;
+        }
     }
 }
 /// Validate the public library boundary as well as the higher-level config.
