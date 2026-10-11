@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use uuid::Uuid;
 
 pub type Dot = u64;
+pub(crate) type BlockKey = (IpAddr, u32, Uuid);
+pub(crate) type BlockState = (u64, u64, u64, u8);
+type SnapshotKey = (IpAddr, u32, Uuid, u8);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
@@ -118,11 +121,11 @@ pub struct AworsetBlocklist {
     node_id: u32,
     incarnation: Uuid,
     hlc: Hlc,
-    pub(crate) entries: DashMap<(IpAddr, u32, Uuid), (u64, u64, u64, u8)>,
+    pub(crate) entries: DashMap<BlockKey, BlockState>,
     /// Per-key high-water marks. These are deliberately retained until a
     /// causal-stability/peer-acknowledgement protocol exists; timer-only GC can
     /// resurrect an old ban from a disconnected peer.
-    pub(crate) tombstones: DashMap<(IpAddr, u32, Uuid), u64>,
+    pub(crate) tombstones: DashMap<BlockKey, u64>,
     next_dot_counter: AtomicU64,
     snapshot_cursor: AtomicUsize,
 }
@@ -346,7 +349,7 @@ impl AworsetBlocklist {
             return (Vec::new(), Vec::new());
         }
 
-        let mut items: Vec<((IpAddr, u32, Uuid, u8), SnapshotItem)> =
+        let mut items: Vec<(SnapshotKey, SnapshotItem)> =
             Vec::with_capacity(self.entries.len() + self.tombstones.len());
         for entry in self.entries.iter() {
             let key = *entry.key();
