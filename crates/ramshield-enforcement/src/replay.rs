@@ -469,7 +469,8 @@ mod mesh_wal_replay_tests {
 
     #[test]
     fn checkpoint_seed_plus_wal_tail_preserves_other_origin_dot() {
-        let dir = std::env::temp_dir().join(format!("ramshield-mesh-tail-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ramshield-mesh-tail-{}", uuid::Uuid::new_v4()));
         let dir_string = dir.to_string_lossy().into_owned();
         let wal = Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap();
         let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 103));
@@ -477,14 +478,8 @@ mod mesh_wal_replay_tests {
         let origin_b = uuid::Uuid::new_v4();
         let created_at_ms = 1_800_000_000_000;
 
-        wal.append(&event(
-            ip,
-            11,
-            origin_a,
-            1,
-            MeshMutationAction::Unblock,
-        ))
-        .unwrap();
+        wal.append(&event(ip, 11, origin_a, 1, MeshMutationAction::Unblock))
+            .unwrap();
         wal.sync().unwrap();
 
         let seed = MeshReplaySeed {
