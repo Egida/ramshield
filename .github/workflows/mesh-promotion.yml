@@ -173,13 +173,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: mesh-candidate-${{ github.sha }}
-      - name: Verify candidate identity and git cleanliness
+      - name: Verify candidate identity and tracked-worktree cleanliness
         shell: bash
         run: |
           set -euo pipefail
           test "$(cat candidate.sha)" = "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test -z "$(git status --porcelain)"
+          # candidate.sha is an expected untracked file downloaded from DEV.
+          # Check tracked files only so the receipt cannot fail on its own artifact.
+          test -z "$(git status --porcelain --untracked-files=no)"
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
@@ -223,3 +225,16 @@ jobs:
           path: promotion-receipt/receipt.txt
           if-no-files-found: error
           retention-days: 90
+      - name: Always summarize PROD outcome
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## PROD qualification outcome"
+            echo "- Candidate SHA: $GITHUB_SHA"
+            echo "- Job result: ${{ job.status }}"
+            echo "- Production mesh enablement: NOT performed"
+            if [[ "${{ job.status }}" != "success" ]]; then
+              echo "- Action: inspect the first failed step above; do not promote this candidate."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
