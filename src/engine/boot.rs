@@ -346,6 +346,11 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                             snapshot_seed = Some(restore_from_snapshot(&store, &snap));
                             #[cfg(feature = "mesh")]
                             if let Some(mesh_state) = snap.mesh_state.as_ref() {
+                                mesh_state.validate().map_err(|error| {
+                                    std::io::Error::other(format!(
+                                        "invalid mesh checkpoint state: {error}"
+                                    ))
+                                })?;
                                 if let Some(mesh) = mesh_blocklist.as_ref() {
                                     mesh.restore_snapshot(mesh_state);
                                 }
