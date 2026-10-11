@@ -501,3 +501,27 @@ fn env_override_blank_synproxy_ports_clears_defaults() {
     assert!(cfg.synproxy.ports.is_empty());
     clear_env_vars();
 }
+
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn env_override_non_unicode_synproxy_ports_is_rejected() {
+    use std::os::unix::ffi::OsStringExt;
+
+    clear_env_vars();
+    unsafe {
+        std::env::set_var(
+            "RAMSHIELD_SYNPROXY__PORTS",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let err =
+        Config::load(tmpfile).expect_err("non-UTF-8 SYNPROXY port override must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("RAMSHIELD_SYNPROXY__PORTS"), "{message}");
+    assert!(message.contains("not valid UTF-8"), "{message}");
+    clear_env_vars();
+}

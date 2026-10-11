@@ -138,7 +138,7 @@ impl Config {
         if let Some(v) = parse::<bool>("RAMSHIELD_SYNPROXY__ENABLED")? {
             self.synproxy.enabled = v;
         }
-        if let Ok(v) = std::env::var("RAMSHIELD_SYNPROXY__PORTS") {
+        if let Some(v) = parse::<String>("RAMSHIELD_SYNPROXY__PORTS")? {
             if v.trim().is_empty() {
                 self.synproxy.ports.clear();
             } else {
