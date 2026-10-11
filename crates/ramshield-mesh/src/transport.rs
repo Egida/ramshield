@@ -677,7 +677,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
                 dot: ClusterDot {
                     node_id: 7,
-                    counter: counter as u32,
+                    counter: counter as u64,
                 },
                 created_at_ms: 0,
                 expires_at_ms: u64::MAX,
@@ -700,7 +700,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 7,
-                    counter: ip as u32,
+                    counter: ip as u64,
                 },
                 created_at_ms: u64::MAX,
                 expires_at_ms: u64::MAX,
@@ -712,7 +712,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 8,
-                    counter: ip as u32,
+                    counter: ip as u64,
                 },
             })
             .collect();
@@ -740,7 +740,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(u128::MAX)),
                 dot: ClusterDot {
                     node_id: u32::MAX,
-                    counter: u32::MAX,
+                    counter: u64::MAX,
                 },
                 created_at_ms: u64::MAX,
                 expires_at_ms: u64::MAX,
