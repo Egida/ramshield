@@ -793,8 +793,16 @@ mod wal_batch_integration_tests {
     use ramshield_mesh::transport::{MeshHandle, MeshMessage, MeshMutationKind, ReplicatedMeshMutation};
     use ramshield_storage::wal::{MeshMutationAction, Wal, WalEntry};
     use ramshield_types::Durability;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::net::TcpListener;
+
+    async fn free_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }
 
     #[tokio::test]
     async fn wal_batch_is_durable_and_projected_before_positive_ack() {
@@ -808,7 +816,7 @@ mod wal_batch_integration_tests {
         );
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 111));
         let origin_incarnation = uuid::Uuid::new_v4();
-        let receiver_addr = "127.0.0.1:0".parse().unwrap();
+        let receiver_addr = free_addr().await;
         let receiver_blocklist = Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(2));
         let receiver = MeshHandle::bind(
             2,
@@ -819,7 +827,7 @@ mod wal_batch_integration_tests {
         )
         .await
         .unwrap();
-        let listen_addr = receiver.local_addr();
+        let listen_addr = receiver_addr;
         let sender = MeshHandle::bind(
             1,
             Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(1)),
