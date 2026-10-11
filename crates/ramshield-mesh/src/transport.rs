@@ -847,7 +847,7 @@ mod frame_tests {
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     for received in b.drain_with_ack().await {
-                        match received.message {
+                        match received.message.clone() {
                             MeshMessage::Block(delta) => {
                                 blocklist_b.merge_delta(&delta);
                             }
@@ -888,7 +888,7 @@ mod frame_tests {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     for received in a.drain_with_ack().await {
-                        match received.message {
+                        match received.message.clone() {
                             MeshMessage::Block(delta) => {
                                 blocklist_a.merge_delta(&delta);
                             }
