@@ -39,10 +39,7 @@ fn xdp_capability_hint() -> String {
 }
 
 #[cfg(feature = "mesh")]
-fn restore_mesh_crdt_from_wal(
-    mesh: &AworsetBlocklist,
-    wal: &Wal,
-) -> std::io::Result<()> {
+fn restore_mesh_crdt_from_wal(mesh: &AworsetBlocklist, wal: &Wal) -> std::io::Result<()> {
     use ramshield_mesh::aworset::{ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
     use ramshield_storage::wal::{MeshMutationAction, WalEntry};
 
@@ -105,7 +102,10 @@ fn restore_mesh_crdt_from_wal(
         }
         restored += 1;
     }
-    tracing::info!(restored, "mesh CRDT state reconstructed from WAL origin dots");
+    tracing::info!(
+        restored,
+        "mesh CRDT state reconstructed from WAL origin dots"
+    );
     Ok(())
 }
 
