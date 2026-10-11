@@ -146,9 +146,9 @@ impl EnforcementService {
             && cmd.cidr.is_none()
             && cmd.source != "mesh"
         {
-            self.mesh_blocklist.as_ref().map(|mesh| {
-                mesh.prepare_ban(cmd.ip, cmd.ttl_seconds.saturating_mul(1000), 2)
-            })
+            self.mesh_blocklist
+                .as_ref()
+                .map(|mesh| mesh.prepare_ban(cmd.ip, cmd.ttl_seconds.saturating_mul(1000), 2))
         } else {
             None
         };
@@ -169,10 +169,11 @@ impl EnforcementService {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         #[cfg(feature = "mesh")]
-        let mesh_wal_entries: Vec<WalEntry> =
-            if let Some(mutation) = incoming_mesh_mutation.as_ref() {
-                vec![mutation.to_wal_entry(now_ns)]
-            } else if cmd.source != "mesh" && cmd.cidr.is_none() {
+        let mesh_wal_entries: Vec<WalEntry> = if let Some(mutation) =
+            incoming_mesh_mutation.as_ref()
+        {
+            vec![mutation.to_wal_entry(now_ns)]
+        } else if cmd.source != "mesh" && cmd.cidr.is_none() {
             if let Some(delta) = prepared_mesh_block.as_ref() {
                 vec![WalEntry::MeshMutation {
                     schema_version: 1,
@@ -182,8 +183,7 @@ impl EnforcementService {
                     ip: delta.ip.to_string(),
                     action: ramshield_storage::wal::MeshMutationAction::Block,
                     created_at_ms: delta.created_at_ms,
-                    expires_at_ms: (delta.expires_at_ms != u64::MAX)
-                        .then_some(delta.expires_at_ms),
+                    expires_at_ms: (delta.expires_at_ms != u64::MAX).then_some(delta.expires_at_ms),
                     tier: delta.tier,
                     signature: None,
                     ts_ns: now_ns,
@@ -306,16 +306,14 @@ impl EnforcementService {
                         incarnation,
                         counter,
                     } => {
-                        mesh.merge_unblock_delta(
-                            &ramshield_mesh::aworset::ClusterUnblockDelta {
-                                ip: *ip,
-                                dot: ramshield_mesh::aworset::ClusterDot {
-                                    node_id: *node_id,
-                                    incarnation: *incarnation,
-                                    counter: *counter,
-                                },
+                        mesh.merge_unblock_delta(&ramshield_mesh::aworset::ClusterUnblockDelta {
+                            ip: *ip,
+                            dot: ramshield_mesh::aworset::ClusterDot {
+                                node_id: *node_id,
+                                incarnation: *incarnation,
+                                counter: *counter,
                             },
-                        );
+                        });
                     }
                 }
             }
@@ -497,13 +495,9 @@ impl EnforcementService {
                 if cmd.cidr.is_none() && cmd.source != "mesh" {
                     self.mesh_operator_suppressions.remove(&cmd.ip);
                     if let Some(mesh) = &self.mesh_blocklist {
-                        let delta = prepared_mesh_block
-                            .clone()
-                            .unwrap_or_else(|| mesh.record_ban(
-                                cmd.ip,
-                                cmd.ttl_seconds.saturating_mul(1000),
-                                2,
-                            ));
+                        let delta = prepared_mesh_block.clone().unwrap_or_else(|| {
+                            mesh.record_ban(cmd.ip, cmd.ttl_seconds.saturating_mul(1000), 2)
+                        });
                         self.metrics.inc_mesh_record_ban();
                         if let Some(handle) = &self.mesh_handle {
                             let report = handle
