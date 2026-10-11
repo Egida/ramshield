@@ -12,6 +12,12 @@ on:
       - 'crates/ramshield-mesh/**'
       - 'crates/ramshield-enforcement/**'
       - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'scripts/**'
+      - 'config/**'
       - '.github/workflows/mesh-acceptance-watch.yml'
   pull_request:
     branches: [audit-branch]
@@ -21,6 +27,12 @@ on:
       - 'crates/ramshield-mesh/**'
       - 'crates/ramshield-enforcement/**'
       - 'src/**'
+      - 'tests/**'
+      - 'benches/**'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'scripts/**'
+      - 'config/**'
       - '.github/workflows/mesh-acceptance-watch.yml'
   schedule:
     - cron: '17 3 * * *'
@@ -167,9 +179,40 @@ jobs:
         run: cargo test --workspace --locked --all-features
       - name: All-feature strict Clippy
         run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+      - name: All-feature check
+        run: cargo check --workspace --locked --all-targets --all-features
+      - name: All-feature build
+        run: cargo build --workspace --locked --all-targets --all-features
       - name: Always summarize integration result
         if: always()
         run: echo "INTEGRATION result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  audit:
+    name: AUDIT — advisories, licenses, and dependency policy
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout frozen candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-29
+      - name: Verify frozen candidate SHA
+        run: test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit advisories and yanked crates
+        run: cargo audit --no-yanked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Check dependency advisories, licenses, bans, and sources
+        run: cargo deny check
 
   quality:
     name: QUALITY — formatting and whitespace
@@ -200,7 +243,7 @@ jobs:
   report:
     name: REPORT — consolidate lane outcomes
     if: always()
-    needs: [resolve, core, mesh, integration, quality]
+    needs: [resolve, core, mesh, integration, audit, quality]
     runs-on: ubuntu-latest
     steps:
       - name: Write acceptance report
@@ -215,6 +258,7 @@ jobs:
             echo "- CORE: ${{ needs.core.result }}"
             echo "- MESH: ${{ needs.mesh.result }}"
             echo "- INTEGRATION: ${{ needs.integration.result }}"
+            echo "- AUDIT: ${{ needs.audit.result }}"
             echo "- QUALITY: ${{ needs.quality.result }}"
             echo "- Production mesh enablement: NOT performed"
             echo
@@ -227,10 +271,11 @@ jobs:
           CORE_RESULT: ${{ needs.core.result }}
           MESH_RESULT: ${{ needs.mesh.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
         run: |
           set -euo pipefail
-          for result in "$CORE_RESULT" "$MESH_RESULT" "$INTEGRATION_RESULT" "$QUALITY_RESULT"; do
+          for result in "$CORE_RESULT" "$MESH_RESULT" "$INTEGRATION_RESULT" "$AUDIT_RESULT" "$QUALITY_RESULT"; do
             if [[ "$result" != "success" ]]; then
               echo "Acceptance FAILED: one or more required lanes did not succeed." >&2
               exit 1
