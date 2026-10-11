@@ -12,12 +12,12 @@
 
 ## Stage B — CRDT correctness (release-blocking)
 
-- [ ] Add/remove/re-add for the same IP and node.
+- [x] Add/remove/re-add for the same IP and node (same-process operation sequence).
 - [ ] Concurrent bans from different nodes; merge order independence.
 - [ ] Duplicate and reordered deltas are idempotent.
-- [ ] Old ban after unban is rejected; a genuinely newer ban after unban is accepted.
-- [ ] HLC physical-time advance cannot reuse a dot counter.
-- [ ] Restart/incarnation changes cannot collide with old dots.
+- [x] Old ban after unban is rejected; a genuinely newer ban after unban is accepted (same process).
+- [x] HLC physical-time advance cannot reuse a dot counter (64-bit process-local operation counter).
+- [ ] Restart/incarnation changes cannot collide with old dots. **Known blocker:** the operation counter is process-local; durable incarnation/counter recovery is not implemented.
 - [ ] Expiry and purge cannot resurrect stale state after a peer is offline.
 - [ ] Tombstone GC has a causal-stability/epoch/repair argument, not only a timer.
 - [ ] Property-style merge permutations converge to the same state.
