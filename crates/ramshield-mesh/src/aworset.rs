@@ -145,7 +145,7 @@ impl AworsetBlocklist {
         // fails closed instead of wrapping and silently violating CRDT identity.
         let previous = self
             .next_dot_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
             .expect("mesh dot counter exhausted; refusing to emit a duplicate CRDT dot");
         let counter = previous + 1;
         let expires_at_ms = if ttl_ms == 0 {
