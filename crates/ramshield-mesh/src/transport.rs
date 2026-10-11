@@ -1,4 +1,4 @@
-use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterUnblockDelta};
+use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterUnblockDelta, StateCursor};
 use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ struct Envelope {
 }
 struct PeerSyncState {
     planner: ConditionSyncPlanner,
-    cursor: usize,
+    cursor: Option<StateCursor>,
     delivery_failed: bool,
 }
 
@@ -135,7 +135,7 @@ impl MeshHandle {
                             peer,
                             PeerSyncState {
                                 planner,
-                                cursor: 0,
+                                cursor: None,
                                 delivery_failed: false,
                             },
                         )
@@ -334,12 +334,15 @@ impl MeshHandle {
 
     async fn broadcast_sync(&self) {
         let now = self.sync_epoch.elapsed();
-        let due_peers: Vec<(SocketAddr, usize)> = {
+        let due_peers: Vec<(SocketAddr, Option<StateCursor>)> = {
             let mut states = self.sync_states.lock().await;
             states
                 .iter_mut()
                 .filter_map(|(peer, state)| {
-                    state.planner.take_due(now).map(|_| (*peer, state.cursor))
+                    state
+                        .planner
+                        .take_due(now)
+                        .map(|_| (*peer, state.cursor.clone()))
                 })
                 .collect()
         };
@@ -350,7 +353,7 @@ impl MeshHandle {
         // One bounded page task per due peer. The shared writer semaphore caps
         // active network work; a slow peer cannot serialize all other peers.
         let mut tasks = JoinSet::new();
-        for (peer, cursor) in due_peers.iter().copied() {
+        for (peer, cursor) in due_peers.iter().cloned() {
             let handle = self.clone();
             tasks.spawn(async move {
                 let (next_cursor, success) = handle.send_sync_page(peer, cursor).await;
@@ -370,7 +373,7 @@ impl MeshHandle {
                         state.delivery_failed = !success;
                         if success {
                             state.cursor = next_cursor;
-                            if next_cursor != 0 {
+                            if state.cursor.is_some() {
                                 state
                                     .planner
                                     .condition(SyncCondition::LocalMutation, completed_at);
@@ -399,11 +402,17 @@ impl MeshHandle {
         }
     }
 
-    async fn send_sync_page(&self, peer: SocketAddr, cursor: usize) -> (usize, bool) {
-        let page = self.blocklist.snapshot_page(cursor, MAX_SYNC_ENTRIES);
+    async fn send_sync_page(
+        &self,
+        peer: SocketAddr,
+        cursor: Option<StateCursor>,
+    ) -> (Option<StateCursor>, bool) {
+        let page = self
+            .blocklist
+            .snapshot_page(cursor.as_ref(), MAX_SYNC_ENTRIES);
         let messages = chunk_sync(&page.blocks, &page.unblocks);
         if messages.is_empty() {
-            return (page.next_cursor, true);
+            return (None, true);
         }
 
         let mut shutdown = self.shutdown_tx.subscribe();
