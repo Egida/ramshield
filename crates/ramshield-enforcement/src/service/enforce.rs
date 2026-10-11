@@ -183,6 +183,19 @@ impl EnforcementService {
             None
         };
 
+        // Once the event is durable, publish the exact same operation into
+        // the CRDT before touching projections. If a later store/XDP operation
+        // fails, WAL and mesh still agree and reconciliation can repair the projection.
+        #[cfg(feature = "mesh")]
+        if let Some(mesh) = &self.mesh_blocklist {
+            if let Some(delta) = prepared_mesh_block.as_ref() {
+                mesh.merge_delta(delta);
+            }
+            for delta in &prepared_mesh_unblocks {
+                mesh.merge_unblock_delta(delta);
+            }
+        }
+
         // Step 2: storage mutation.
         let now_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -354,9 +367,6 @@ impl EnforcementService {
                                 cmd.ttl_seconds.saturating_mul(1000),
                                 2,
                             ));
-                        if prepared_mesh_block.is_some() {
-                            mesh.merge_delta(&delta);
-                        }
                         self.metrics.inc_mesh_record_ban();
                         if let Some(handle) = &self.mesh_handle {
                             let report = handle
@@ -439,14 +449,12 @@ impl EnforcementService {
                         if let Some(mesh) = &self.mesh_blocklist {
                             if cmd.source != "mesh" {
                                 // These exact tombstones were included in the WAL batch
-                                // above; only now publish them into the CRDT.
-                                for delta in &prepared_mesh_unblocks {
-                                    mesh.merge_unblock_delta(delta);
-                                }
+                                // above and already committed to the CRDT after durability.
                                 pending_unban_deltas = prepared_mesh_unblocks.clone();
                             } else {
-                                let deltas = mesh.record_unban(cmd.ip);
-                                pending_unban_deltas = deltas;
+                                // The incoming tombstone was already merged by
+                                // apply_mesh_unblock; do not originate or rebroadcast it.
+                                let _ = mesh;
                             }
                             self.metrics.inc_mesh_record_unban();
                         }
