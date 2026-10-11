@@ -328,3 +328,70 @@ pub fn replay_wal_cidrs_seeded(
     }
     Ok((restored, final_cidrs))
 }
+
+#[cfg(test)]
+mod mesh_wal_replay_tests {
+    use super::replay_mesh_state;
+    use ramshield_storage::wal::{MeshMutationAction, Wal, WalEntry};
+    use ramshield_types::Durability;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn event(
+        ip: IpAddr,
+        node_id: u32,
+        incarnation: uuid::Uuid,
+        counter: u64,
+        action: MeshMutationAction,
+    ) -> WalEntry {
+        WalEntry::MeshMutation {
+            schema_version: 1,
+            origin_node_id: node_id,
+            origin_incarnation: incarnation.to_string(),
+            origin_counter: counter,
+            ip: ip.to_string(),
+            action,
+            created_at_ms: 1_800_000_000_000,
+            expires_at_ms: None,
+            tier: 2,
+            signature: None,
+            ts_ns: 1_800_000_000_000_000_000,
+        }
+    }
+
+    #[test]
+    fn unblock_only_removes_the_matching_origin_dot() {
+        let dir = std::env::temp_dir().join(format!("ramshield-mesh-replay-{}", uuid::Uuid::new_v4()));
+        let dir_string = dir.to_string_lossy().into_owned();
+        let wal = Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
+        let origin_a = uuid::Uuid::new_v4();
+        let origin_b = uuid::Uuid::new_v4();
+
+        for entry in [
+            event(ip, 11, origin_a, 1, MeshMutationAction::Block),
+            event(ip, 22, origin_b, 1, MeshMutationAction::Block),
+            event(ip, 11, origin_a, 1, MeshMutationAction::Unblock),
+        ] {
+            wal.append(&entry).unwrap();
+        }
+        wal.sync().unwrap();
+
+        let (touched, active) = replay_mesh_state(&wal, 1_800_000_000_000_000_000).unwrap();
+        assert!(touched.contains(&ip));
+        assert!(
+            active.contains_key(&ip),
+            "origin B's concurrent block must survive origin A's tombstone"
+        );
+
+        wal.append(&event(ip, 22, origin_b, 1, MeshMutationAction::Unblock))
+            .unwrap();
+        wal.sync().unwrap();
+        let (_, active) = replay_mesh_state(&wal, 1_800_000_000_000_000_000).unwrap();
+        assert!(
+            !active.contains_key(&ip),
+            "the IP becomes clear only after both active origin dots are removed"
+        );
+        drop(wal);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
