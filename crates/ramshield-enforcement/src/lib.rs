@@ -23,10 +23,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::IpAddr;
 #[cfg(feature = "mesh")]
 use std::net::SocketAddr;
-use std::sync::{
-    Arc, Mutex as StdMutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
+#[cfg(feature = "mesh")]
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
