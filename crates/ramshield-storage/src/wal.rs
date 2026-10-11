@@ -14,6 +14,15 @@ use ramwal::{
     Compression, Config, Durability as RamWalDurability, Error as RamWalError, Lsn, Wal as RamWal,
 };
 
+/// Semantic action carried by a replicated CRDT mutation.
+/// Kept in storage so WAL records preserve origin identity without making the
+/// storage crate depend on the mesh crate.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum MeshMutationAction {
+    Block,
+    Unblock,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum WalEntry {
     BlockIp {
@@ -44,6 +53,21 @@ pub enum WalEntry {
     },
     Delete {
         key: String,
+        ts_ns: u64,
+    },
+    /// Versioned source-of-truth event for a CRDT mutation. The origin dot survives forwarding and replay; local WAL LSN is only a local cursor.
+    MeshMutation {
+        schema_version: u16,
+        origin_node_id: u32,
+        origin_incarnation: String,
+        origin_counter: u64,
+        ip: String,
+        action: MeshMutationAction,
+        created_at_ms: u64,
+        expires_at_ms: Option<u64>,
+        tier: u8,
+        /// Optional detached signature; verification policy is enforced by the mesh layer.
+        signature: Option<String>,
         ts_ns: u64,
     },
     Checkpoint {
@@ -546,6 +570,26 @@ mod tests {
         assert!(matches!(&tail[1], WalEntry::BlockIp { ip, .. } if ip == "10.0.0.4"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mesh_mutation_wal_entry_roundtrips_origin_and_expiry() {
+        let entry = WalEntry::MeshMutation {
+            schema_version: 1,
+            origin_node_id: 17,
+            origin_incarnation: "9dff7b8e-9a2d-4bb3-8b9e-fd37b4d9d6a1".into(),
+            origin_counter: 42,
+            ip: "192.0.2.17".into(),
+            action: MeshMutationAction::Block,
+            created_at_ms: 1_800_000_000_000,
+            expires_at_ms: Some(1_800_000_060_000),
+            tier: 3,
+            signature: None,
+            ts_ns: 1_800_000_000_000_000_000,
+        };
+        let encoded = serde_json::to_vec(&entry).unwrap();
+        let decoded: WalEntry = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, entry);
     }
 
     #[test]
