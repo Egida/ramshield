@@ -440,7 +440,7 @@ pub fn replay_wal_cidrs_seeded(
 
 #[cfg(test)]
 mod mesh_wal_replay_tests {
-    use super::replay_mesh_state;
+    use super::{MeshReplayBlock, MeshReplaySeed, replay_mesh_state};
     use ramshield_storage::wal::{MeshMutationAction, Wal, WalEntry};
     use ramshield_types::Durability;
     use std::net::{IpAddr, Ipv4Addr};
@@ -465,6 +465,58 @@ mod mesh_wal_replay_tests {
             signature: None,
             ts_ns: 1_800_000_000_000_000_000,
         }
+    }
+
+    #[test]
+    fn checkpoint_seed_plus_wal_tail_preserves_other_origin_dot() {
+        let dir = std::env::temp_dir().join(format!("ramshield-mesh-tail-{}", uuid::Uuid::new_v4()));
+        let dir_string = dir.to_string_lossy().into_owned();
+        let wal = Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap();
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 103));
+        let origin_a = uuid::Uuid::new_v4();
+        let origin_b = uuid::Uuid::new_v4();
+        let created_at_ms = 1_800_000_000_000;
+
+        wal.append(&event(
+            ip,
+            11,
+            origin_a,
+            1,
+            MeshMutationAction::Unblock,
+        ))
+        .unwrap();
+        wal.sync().unwrap();
+
+        let seed = MeshReplaySeed {
+            blocks: vec![
+                MeshReplayBlock {
+                    ip,
+                    node_id: 11,
+                    incarnation: origin_a.to_string(),
+                    counter: 1,
+                    created_at_ms,
+                    expires_at_ms: None,
+                    tier: 1,
+                },
+                MeshReplayBlock {
+                    ip,
+                    node_id: 22,
+                    incarnation: origin_b.to_string(),
+                    counter: 1,
+                    created_at_ms,
+                    expires_at_ms: None,
+                    tier: 2,
+                },
+            ],
+            unblocks: Vec::new(),
+        };
+        let (touched, active) =
+            replay_mesh_state(&wal, 0, Some(&seed), 1_800_000_000_000_000_000).unwrap();
+        assert!(touched.contains(&ip));
+        assert_eq!(active.len(), 1);
+        assert!(active.contains_key(&ip));
+        drop(wal);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
