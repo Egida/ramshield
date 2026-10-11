@@ -1132,6 +1132,44 @@ mod frame_tests {
                 Some(11)
             );
 
+            let rejected = MeshMessage::WalBatch {
+                source_node_id: 1,
+                start_lsn: 12,
+                end_lsn: 12,
+                mutations: Vec::new(),
+            };
+            let rejected_sender = {
+                let a = a.clone();
+                tokio::spawn(async move { a.send_wal_batch(addr_b, rejected).await })
+            };
+            let mut rejection_seen = false;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for received in b.drain_with_ack().await {
+                        match received.message.clone() {
+                            MeshMessage::WalBatch { .. } => {
+                                received.acknowledge(false);
+                                rejection_seen = true;
+                            }
+                            _ => received.acknowledge(true),
+                        }
+                    }
+                    if rejection_seen {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("receiver should reject the WAL page");
+            assert!(
+                rejected_sender
+                    .await
+                    .expect("rejected WAL sender task")
+                    .is_err(),
+                "a negative application ACK must not advance the WAL cursor"
+            );
+
             a.shutdown();
             b.shutdown();
         });
