@@ -244,6 +244,28 @@ impl Wal {
         decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
     }
 
+    /// Replay records after an exclusive LSN, preserving each record's durable
+    /// position for replication cursors. The returned LSN belongs to this WAL
+    /// only; it must never be compared with another node's LSN.
+    ///
+    /// This rescans the directory so appends made after this handle was opened
+    /// are visible. Callers must establish a checkpoint/bootstrap path when
+    /// requested history has been removed by retention.
+    pub fn replay_with_lsn_from(&self, min_lsn_exclusive: u64) -> Result<Vec<(u64, WalEntry)>> {
+        let dir = self.guard.cfg.dir.clone();
+        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        report
+            .records
+            .iter()
+            .filter(|record| record.lsn.get() > min_lsn_exclusive)
+            .map(|record| {
+                serde_json::from_slice::<WalEntry>(&record.payload)
+                    .map(|entry| (record.lsn.get(), entry))
+                    .map_err(|error| RsError::Serde(error.to_string()))
+            })
+            .collect()
+    }
+
     /// Begin a checkpoint by reading the current WAL boundary. The caller is
     /// responsible for taking the application snapshot and then publishing
     /// this LSN with `finish_checkpoint`.
@@ -524,6 +546,42 @@ mod tests {
         assert!(matches!(&tail[1], WalEntry::BlockIp { ip, .. } if ip == "10.0.0.4"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wal_replay_with_lsn_preserves_replication_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Wal::open(
+            dir.path().to_str().unwrap(),
+            false,
+            Durability::Fsync,
+            64 * 1024 * 1024,
+            0,
+        )
+        .unwrap();
+
+        let first = wal
+            .append(&WalEntry::BlockIp {
+                ip: "192.0.2.1".into(),
+                reason: "replication-test".into(),
+                ttl_secs: None,
+                ts_ns: 1,
+            })
+            .unwrap();
+        let second = wal
+            .append(&WalEntry::UnblockIp {
+                ip: "192.0.2.1".into(),
+                ts_ns: 2,
+            })
+            .unwrap();
+        wal.sync().unwrap();
+
+        let all = wal.replay_with_lsn_from(0).unwrap();
+        assert_eq!(all.iter().map(|(lsn, _)| *lsn).collect::<Vec<_>>(), vec![first, second]);
+        let tail = wal.replay_with_lsn_from(first).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].0, second);
+        assert!(matches!(tail[0].1, WalEntry::UnblockIp { .. }));
     }
 
     #[test]
