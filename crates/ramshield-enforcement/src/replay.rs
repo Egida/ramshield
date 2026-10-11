@@ -159,21 +159,19 @@ pub fn replay_wal_into_store_seeded(
 /// Reconstruct the effective mesh IP projection from the full retained
 /// origin-dot history. Checkpoint snapshots currently do not carry CRDT
 /// provenance, so callers must refuse startup if retention has pruned history.
-fn replay_mesh_state(
-    wal: &Wal,
-    now_ns: u64,
-) -> anyhow::Result<(
+type MeshReplayProjection = (
     std::collections::HashSet<IpAddr>,
     std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)>,
-)> {
+);
+
+fn replay_mesh_state(wal: &Wal, now_ns: u64) -> anyhow::Result<MeshReplayProjection> {
     type MeshKey = (IpAddr, u32, String);
     type ActiveMeshDot = (u64, u64, Option<u64>, u8);
 
     let mut touched = std::collections::HashSet::new();
     let mut active: std::collections::HashMap<MeshKey, ActiveMeshDot> =
         std::collections::HashMap::new();
-    let mut tombstones: std::collections::HashMap<MeshKey, u64> =
-        std::collections::HashMap::new();
+    let mut tombstones: std::collections::HashMap<MeshKey, u64> = std::collections::HashMap::new();
 
     for entry in wal.replay()? {
         let WalEntry::MeshMutation {
@@ -192,13 +190,16 @@ fn replay_mesh_state(
             continue;
         };
         if schema_version != 1 || origin_node_id == 0 || origin_counter == 0 {
-            anyhow::bail!("unsupported or invalid mesh WAL event: schema={schema_version}, node={origin_node_id}, counter={origin_counter}");
+            anyhow::bail!(
+                "unsupported or invalid mesh WAL event: schema={schema_version}, node={origin_node_id}, counter={origin_counter}"
+            );
         }
         let ip: IpAddr = ip
             .parse()
             .map_err(|error| anyhow::anyhow!("invalid IP in mesh WAL event: {error}"))?;
-        let incarnation = uuid::Uuid::parse_str(&origin_incarnation)
-            .map_err(|error| anyhow::anyhow!("invalid origin incarnation in mesh WAL event: {error}"))?;
+        let incarnation = uuid::Uuid::parse_str(&origin_incarnation).map_err(|error| {
+            anyhow::anyhow!("invalid origin incarnation in mesh WAL event: {error}")
+        })?;
         if incarnation.is_nil() {
             anyhow::bail!("nil origin incarnation in mesh WAL event");
         }
@@ -235,10 +236,8 @@ fn replay_mesh_state(
         }
     }
 
-    let mut by_ip: std::collections::HashMap<
-        IpAddr,
-        (BlockReason, u64, Option<u64>),
-    > = std::collections::HashMap::new();
+    let mut by_ip: std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)> =
+        std::collections::HashMap::new();
     for ((ip, _, _), (_, since_ns, deadline_ns, _tier)) in active {
         if deadline_ns.is_some_and(|deadline| deadline <= now_ns) {
             continue;
