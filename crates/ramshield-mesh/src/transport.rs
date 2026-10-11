@@ -22,7 +22,6 @@ use tracing::{debug, warn};
 type HmacSha256 = Hmac<Sha256>;
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_CLOCK_SKEW_MS: u64 = 30_000;
-const ANTI_ENTROPY_MS: u64 = 2_000;
 const MAX_SYNC_ENTRIES: usize = 4096;
 const MAX_SYNC_FRAME_ENTRIES: usize = 128;
 const MAX_INCOMING_QUEUE: usize = 2048;
@@ -100,6 +99,7 @@ struct Envelope {
 struct PeerSyncState {
     planner: ConditionSyncPlanner,
     cursor: usize,
+    delivery_failed: bool,
 }
 
 #[derive(Clone)]
@@ -130,7 +130,16 @@ impl MeshHandle {
             .copied()
             .map(|peer| {
                 ConditionSyncPlanner::new(SyncPolicy::default())
-                    .map(|planner| (peer, PeerSyncState { planner, cursor: 0 }))
+                    .map(|planner| {
+                        (
+                            peer,
+                            PeerSyncState {
+                                planner,
+                                cursor: 0,
+                                delivery_failed: false,
+                            },
+                        )
+                    })
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
             })
             .collect::<std::io::Result<HashMap<_, _>>>()?;
@@ -301,6 +310,9 @@ impl MeshHandle {
     async fn condition_peer(&self, peer: SocketAddr, condition: SyncCondition) {
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
+            if condition == SyncCondition::DeliveryFailed {
+                state.delivery_failed = true;
+            }
             state.planner.condition(condition, now);
         }
     }
@@ -308,7 +320,8 @@ impl MeshHandle {
     async fn note_peer_success(&self, peer: SocketAddr) {
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
-            if state.planner.consecutive_failures() > 0 {
+            if state.delivery_failed {
+                state.delivery_failed = false;
                 state.planner.condition(SyncCondition::PeerReconnected, now);
             }
         }
@@ -359,6 +372,7 @@ impl MeshHandle {
             let mut states = self.sync_states.lock().await;
             if let Some(state) = states.get_mut(&peer) {
                 state.planner.complete(completed_at, success);
+                state.delivery_failed = !success;
                 if success {
                     state.cursor = page.next_cursor;
                     if page.next_cursor != 0 {
