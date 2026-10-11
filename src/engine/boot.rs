@@ -345,19 +345,23 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 // schema is extended, a pruned WAL cannot safely reconstruct
                 // mesh convergence state, even if IP recovery has a snapshot.
                 #[cfg(feature = "mesh")]
-                if mesh_blocklist.is_some()
-                    && let Some(oldest) = wal.oldest_lsn()
-                    && oldest > 1
-                {
-                    if hard_wal {
-                        return Err(std::io::Error::other(format!(
-                            "mesh WAL history pruned (oldest_lsn={oldest}); refusing to start with incomplete CRDT provenance"
-                        )));
+                if mesh_blocklist.is_some() {
+                    let oldest = wal.oldest_lsn();
+                    let mesh_history_pruned = match oldest {
+                        Some(lsn) => lsn > 1,
+                        None => snap_lsn > 0,
+                    };
+                    if mesh_history_pruned {
+                        if hard_wal {
+                            return Err(std::io::Error::other(format!(
+                                "mesh WAL history pruned (oldest_lsn={oldest:?}, snapshot_lsn={snap_lsn}); refusing to start with incomplete CRDT provenance"
+                            )));
+                        }
+                        tracing::warn!(
+                            oldest_lsn = ?oldest,
+                            "mesh WAL history was pruned; CRDT recovery is partial until mesh state is included in checkpoints"
+                        );
                     }
-                    tracing::warn!(
-                        oldest_lsn = oldest,
-                        "mesh WAL history was pruned; CRDT recovery is partial until mesh state is included in checkpoints"
-                    );
                 }
                 #[cfg(feature = "mesh")]
                 if let Some(mesh) = mesh_blocklist.as_ref() {
