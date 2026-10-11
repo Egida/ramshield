@@ -325,6 +325,11 @@ impl EnforcementService {
             }
         }
 
+        #[cfg(feature = "mesh")]
+        if !mesh_wal_entries.is_empty() {
+            self.mesh_projection_pending.insert(cmd.ip);
+        }
+
         // Step 2: storage mutation.
         let now_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -451,6 +456,10 @@ impl EnforcementService {
                     // The userspace Store projection succeeded; a later XDP
                     // failure must not make a peer tombstone look unapplied.
                     self.mesh_applied_ips.insert(cmd.ip);
+                }
+                #[cfg(feature = "mesh")]
+                if !mesh_wal_entries.is_empty() {
+                    self.mesh_projection_pending.remove(&cmd.ip);
                 }
                 drop(_ckpt_guard);
                 // Step 3: dataplane (barrier released — XDP stays outside).
@@ -599,6 +608,10 @@ impl EnforcementService {
                     }
                 }
                 // Barrier protects WAL+store only; mesh IO and XDP stay outside.
+                #[cfg(feature = "mesh")]
+                if !mesh_wal_entries.is_empty() {
+                    self.mesh_projection_pending.remove(&cmd.ip);
+                }
                 drop(_ckpt_guard);
                 #[cfg(feature = "mesh")]
                 if !pending_unban_deltas.is_empty() {
