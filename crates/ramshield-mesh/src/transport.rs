@@ -332,62 +332,108 @@ impl MeshHandle {
 
     async fn broadcast_sync(&self) {
         let now = self.sync_epoch.elapsed();
-        let due_peers: Vec<SocketAddr> = {
+        let due_peers: Vec<(SocketAddr, usize)> = {
             let mut states = self.sync_states.lock().await;
             states
                 .iter_mut()
-                .filter_map(|(peer, state)| state.planner.take_due(now).map(|_| *peer))
+                .filter_map(|(peer, state)| {
+                    state
+                        .planner
+                        .take_due(now)
+                        .map(|_| (*peer, state.cursor))
+                })
                 .collect()
         };
+        if due_peers.is_empty() {
+            return;
+        }
 
-        for peer in due_peers {
-            let cursor = self
-                .sync_states
-                .lock()
-                .await
-                .get(&peer)
-                .map(|state| state.cursor)
-                .unwrap_or(0);
-            let page = self.blocklist.snapshot_page(cursor, MAX_SYNC_ENTRIES);
-            let mut success = true;
-            let mut shutdown = self.shutdown_tx.subscribe();
+        // One bounded page task per due peer. The shared writer semaphore caps
+        // active network work; a slow peer cannot serialize all other peers.
+        let mut tasks = JoinSet::new();
+        for (peer, cursor) in due_peers.iter().copied() {
+            let handle = self.clone();
+            tasks.spawn(async move {
+                let (next_cursor, success) = handle.send_sync_page(peer, cursor).await;
+                (peer, next_cursor, success)
+            });
+        }
 
-            for message in chunk_sync(&page.blocks, &page.unblocks) {
-                if *shutdown.borrow() {
-                    success = false;
-                    break;
-                }
-                let send_result = tokio::select! {
-                    result = with_timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to(peer, message)) => result,
-                    changed = shutdown.changed() => {
-                        let _ = changed;
-                        Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown"))
+        let mut completed = Vec::with_capacity(due_peers.len());
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((peer, next_cursor, success)) => {
+                    completed.push(peer);
+                    let completed_at = self.sync_epoch.elapsed();
+                    let mut states = self.sync_states.lock().await;
+                    if let Some(state) = states.get_mut(&peer) {
+                        state.planner.complete(completed_at, success);
+                        state.delivery_failed = !success;
+                        if success {
+                            state.cursor = next_cursor;
+                            if next_cursor != 0 {
+                                state
+                                    .planner
+                                    .condition(SyncCondition::LocalMutation, completed_at);
+                            }
+                        }
                     }
-                };
-                if let Err(error) = send_result {
-                    success = false;
-                    warn!(peer = %peer, error = %error, "condition-driven mesh sync page failed");
-                    break;
                 }
-            }
-
-            let completed_at = self.sync_epoch.elapsed();
-            let mut states = self.sync_states.lock().await;
-            if let Some(state) = states.get_mut(&peer) {
-                state.planner.complete(completed_at, success);
-                state.delivery_failed = !success;
-                if success {
-                    state.cursor = page.next_cursor;
-                    if page.next_cursor != 0 {
-                        // Continue large snapshots promptly, but coalesce page
-                        // work so this remains bounded by the scheduler tick.
-                        state
-                            .planner
-                            .condition(SyncCondition::LocalMutation, completed_at);
-                    }
+                Err(error) => {
+                    warn!(error = %error, "condition-driven mesh sync task failed");
                 }
             }
         }
+
+        // A panicked/cancelled task must not leave its planner permanently
+        // in-flight. Treat missing task outcomes as failed delivery.
+        let completed_at = self.sync_epoch.elapsed();
+        let mut states = self.sync_states.lock().await;
+        for (peer, _) in due_peers {
+            if !completed.contains(&peer) {
+                if let Some(state) = states.get_mut(&peer) {
+                    state.planner.complete(completed_at, false);
+                    state.delivery_failed = true;
+                }
+            }
+        }
+    }
+
+    async fn send_sync_page(&self, peer: SocketAddr, cursor: usize) -> (usize, bool) {
+        let page = self.blocklist.snapshot_page(cursor, MAX_SYNC_ENTRIES);
+        let messages = chunk_sync(&page.blocks, &page.unblocks);
+        if messages.is_empty() {
+            return (page.next_cursor, true);
+        }
+
+        let mut shutdown = self.shutdown_tx.subscribe();
+        if *shutdown.borrow() {
+            return (cursor, false);
+        }
+        let permit = tokio::select! {
+            permit = self.writers.clone().acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return (cursor, false),
+            },
+            _ = shutdown.changed() => return (cursor, false),
+        };
+
+        for message in messages {
+            let send_result = tokio::select! {
+                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to(peer, message)) => result,
+                changed = shutdown.changed() => {
+                    let _ = changed;
+                    Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown"))
+                }
+            };
+            if let Err(error) = send_result {
+                warn!(peer = %peer, error = %error, "condition-driven mesh sync page failed");
+                drop(permit);
+                return (cursor, false);
+            }
+        }
+        drop(permit);
+        (page.next_cursor, true)
     }
     async fn send_to(&self, peer: SocketAddr, body: MeshMessage) -> std::io::Result<()> {
         let ts_ms = now_ms();
