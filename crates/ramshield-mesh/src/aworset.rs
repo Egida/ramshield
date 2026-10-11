@@ -700,10 +700,7 @@ mod tests {
         let first = source.record_ban(ip, 60_000, 1);
         let concurrent = peer.record_ban(ip, 60_000, 2);
         assert!(source.merge_delta(&concurrent));
-        let tombstone = ClusterUnblockDelta {
-            ip,
-            dot: first.dot,
-        };
+        let tombstone = ClusterUnblockDelta { ip, dot: first.dot };
         assert!(source.merge_unblock_delta(&tombstone));
         assert!(source.is_blocked(&ip, now_ms()));
 
