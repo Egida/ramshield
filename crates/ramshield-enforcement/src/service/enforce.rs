@@ -446,16 +446,14 @@ impl EnforcementService {
                     // live unblock activity. A CIDR unblock is NOT an IP unban.
                     #[cfg(feature = "mesh")]
                     {
-                        if let Some(mesh) = &self.mesh_blocklist {
+                        if self.mesh_blocklist.is_some() {
                             if cmd.source != "mesh" {
                                 // These exact tombstones were included in the WAL batch
                                 // above and already committed to the CRDT after durability.
                                 pending_unban_deltas = prepared_mesh_unblocks.clone();
-                            } else {
-                                // The incoming tombstone was already merged by
-                                // apply_mesh_unblock; do not originate or rebroadcast it.
-                                let _ = mesh;
                             }
+                            // Incoming mesh tombstones were already merged and must
+                            // not be re-originated or rebroadcast here.
                             self.metrics.inc_mesh_record_unban();
                         }
                         if cmd.source != "mesh" {
