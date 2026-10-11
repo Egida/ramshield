@@ -166,5 +166,22 @@ jobs:
             echo "- QUALITY: ${{ needs.quality.result }}"
             echo "- Production mesh enablement: NOT performed"
             echo
-            echo "A failed lane does not cancel independent lanes. Inspect the first failing step, fix the root cause, and rerun the affected workflow automatically on the next push."
+            echo "A failed lane does not cancel independent lanes. Inspect the first failing step, fix the root cause, and rerun on the next push."
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce acceptance result
+        if: always()
+        shell: bash
+        env:
+          CORE_RESULT: ${{ needs.core.result }}
+          MESH_RESULT: ${{ needs.mesh.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+        run: |
+          set -euo pipefail
+          for result in "$CORE_RESULT" "$MESH_RESULT" "$INTEGRATION_RESULT" "$QUALITY_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "Acceptance FAILED: one or more required lanes did not succeed." >&2
+              exit 1
+            fi
+          done
+          echo "Acceptance GREEN."
