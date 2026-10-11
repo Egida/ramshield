@@ -810,7 +810,7 @@ mod wal_batch_integration_tests {
     }
 
     #[tokio::test]
-    async fn wal_batch_is_durable_and_projected_before_positive_ack() {
+    async fn wal_batch_is_durable_before_ack_and_projection_retries() {
         let dir =
             std::env::temp_dir().join(format!("ramshield-mesh-batch-{}", uuid::Uuid::new_v4()));
         let dir_string = dir.to_string_lossy().into_owned();
@@ -840,7 +840,7 @@ mod wal_batch_integration_tests {
         .await
         .unwrap();
         let store = Arc::new(Store::new(16));
-        store.traffic.ram_limit_mb.store(16, Ordering::Relaxed);
+        store.traffic.ram_limit_mb.store(0, Ordering::Relaxed);
         let mut service = EnforcementService::new(
             store.clone(),
             Arc::new(Metrics::new()),
