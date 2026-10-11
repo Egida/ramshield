@@ -744,7 +744,10 @@ mod retry_tests {
         );
 
         assert_eq!(report.received, 3);
-        assert_eq!(report.applied, 1, "unexpected mesh apply report: {report:?}");
+        assert_eq!(
+            report.applied, 1,
+            "unexpected mesh apply report: {report:?}"
+        );
         assert_eq!(report.ignored, 1);
         assert_eq!(report.failed, 1);
         assert!(
