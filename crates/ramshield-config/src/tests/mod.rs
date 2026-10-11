@@ -471,7 +471,6 @@ fn env_override_invalid_value_is_rejected() {
     clear_env_vars();
 }
 
-
 #[test]
 #[serial]
 fn env_override_invalid_synproxy_port_is_rejected() {
@@ -481,8 +480,8 @@ fn env_override_invalid_synproxy_port_is_rejected() {
     }
     let tmpfile = "/tmp/ramshield_test_config.toml";
     std::fs::write(tmpfile, "").unwrap();
-    let err = Config::load(tmpfile)
-        .expect_err("malformed SYNPROXY port override must fail startup");
+    let err =
+        Config::load(tmpfile).expect_err("malformed SYNPROXY port override must fail startup");
     let message = err.to_string();
     assert!(message.contains("RAMSHIELD_SYNPROXY__PORTS"), "{message}");
     assert!(message.contains("item 2"), "{message}");
