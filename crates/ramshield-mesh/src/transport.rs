@@ -375,17 +375,20 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
     let latest_creation = now_ms.saturating_add(MAX_CLOCK_SKEW_MS);
     let valid_block = |delta: &ClusterBlockDelta| {
         delta.dot.node_id != 0
+            && !delta.dot.incarnation.is_nil()
             && (delta.created_at_ms == 0 || delta.created_at_ms <= latest_creation)
             && (delta.expires_at_ms == u64::MAX || delta.expires_at_ms >= delta.created_at_ms)
     };
 
     match message {
         MeshMessage::Block(delta) => valid_block(delta),
-        MeshMessage::Unblock(delta) => delta.dot.node_id != 0,
+        MeshMessage::Unblock(delta) => delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil(),
         MeshMessage::Sync { blocks, unblocks } => {
             blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
                 && blocks.iter().all(valid_block)
-                && unblocks.iter().all(|delta| delta.dot.node_id != 0)
+                && unblocks
+                    .iter()
+                    .all(|delta| delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil())
         }
     }
 }
@@ -507,7 +510,7 @@ fn now_ms() -> u64 {
 mod frame_tests {
     use super::{
         Envelope, MAX_CONFIGURED_PEERS, MAX_FRAME, MAX_SYNC_FRAME_ENTRIES, MeshHandle, MeshMessage,
-        PeerSendOutcome, chunk_sync, push_frame_bytes, read_bounded_frame,
+        PeerSendOutcome, chunk_sync, now_ms, push_frame_bytes, read_bounded_frame,
         read_bounded_frame_with_timeout, valid_message, validate_bind_args, with_timeout,
     };
     use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
@@ -661,6 +664,7 @@ mod frame_tests {
             ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
             dot: ClusterDot {
                 node_id: 7,
+                incarnation: uuid::Uuid::new_v4(),
                 counter: 1,
             },
             created_at_ms: u64::MAX,
@@ -671,12 +675,35 @@ mod frame_tests {
     }
 
     #[test]
+    fn rejects_missing_incarnation_in_block_and_unblock_messages() {
+        let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let now = now_ms();
+        let block = ClusterBlockDelta {
+            ip,
+            dot: ClusterDot {
+                node_id: 7,
+                incarnation: uuid::Uuid::nil(),
+                counter: 1,
+            },
+            created_at_ms: now,
+            expires_at_ms: now.saturating_add(60_000),
+            tier: 1,
+        };
+        assert!(!valid_message(&MeshMessage::Block(block.clone()), now));
+        assert!(!valid_message(
+            &MeshMessage::Unblock(ClusterUnblockDelta { ip, dot: block.dot }),
+            now
+        ));
+    }
+
+    #[test]
     fn rejects_sync_messages_over_entry_budget() {
         let blocks: Vec<_> = (0..=MAX_SYNC_FRAME_ENTRIES)
             .map(|counter| ClusterBlockDelta {
                 ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
                 dot: ClusterDot {
                     node_id: 7,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: counter as u64,
                 },
                 created_at_ms: 0,
@@ -700,6 +727,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 7,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: ip as u64,
                 },
                 created_at_ms: u64::MAX,
@@ -712,6 +740,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(ip)),
                 dot: ClusterDot {
                     node_id: 8,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: ip as u64,
                 },
             })
@@ -740,6 +769,7 @@ mod frame_tests {
                 ip: IpAddr::V6(Ipv6Addr::from(u128::MAX)),
                 dot: ClusterDot {
                     node_id: u32::MAX,
+                    incarnation: uuid::Uuid::new_v4(),
                     counter: u64::MAX,
                 },
                 created_at_ms: u64::MAX,
