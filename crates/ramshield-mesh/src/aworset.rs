@@ -146,7 +146,9 @@ impl AworsetBlocklist {
         // fails closed instead of wrapping and silently violating CRDT identity.
         let previous = self
             .next_dot_counter
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
             .expect("mesh dot counter exhausted; refusing to emit a duplicate CRDT dot");
         let counter = previous + 1;
         let expires_at_ms = if ttl_ms == 0 {
@@ -468,8 +470,14 @@ mod tests {
         newer.dot.counter = old.dot.counter + 1;
 
         assert!(receiver.merge_delta(&newer));
-        assert!(!receiver.merge_delta(&newer), "duplicate delta must be idempotent");
-        assert!(!receiver.merge_delta(&old), "reordered stale delta must be ignored");
+        assert!(
+            !receiver.merge_delta(&newer),
+            "duplicate delta must be idempotent"
+        );
+        assert!(
+            !receiver.merge_delta(&old),
+            "reordered stale delta must be ignored"
+        );
         let entry = receiver.entries.get(&(ip, sender.node_id)).unwrap();
         assert_eq!(entry.value().0, newer.dot.counter);
         assert_eq!(entry.value().2, newer.expires_at_ms);
