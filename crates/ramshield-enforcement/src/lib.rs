@@ -20,7 +20,7 @@ use ramshield_types::{
     BlockReason, EnforceAction, EnforceCommand, EnforceResult, EnforcementError, IpNetwork,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -106,6 +106,10 @@ pub struct EnforcementService {
     mesh_applied_ips: HashSet<IpAddr>,
     #[cfg(feature = "mesh")]
     mesh_operator_suppressions: HashSet<IpAddr>,
+    /// Per-peer cursor into this node's own WAL. Resetting to zero on restart
+    /// intentionally causes replay; origin-dot dedup makes that idempotent.
+    #[cfg(feature = "mesh")]
+    mesh_wal_cursors: HashMap<SocketAddr, u64>,
     /// Checkpoint coordination: barrier + absolute-deadline mirror. None =
     /// engine never attached one (standalone use, tests).
     checkpoint_shared: Option<Arc<CheckpointShared>>,
@@ -141,6 +145,8 @@ impl EnforcementService {
             mesh_applied_ips: HashSet::new(),
             #[cfg(feature = "mesh")]
             mesh_operator_suppressions: HashSet::new(),
+            #[cfg(feature = "mesh")]
+            mesh_wal_cursors: HashMap::new(),
             checkpoint_shared: None,
         }
     }
