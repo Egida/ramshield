@@ -604,6 +604,36 @@ mod tests {
     }
 
     #[test]
+    fn prepared_ban_is_not_visible_until_committed() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 77]);
+
+        let delta = mesh.prepare_ban(ip, 60_000, 2);
+        assert!(!mesh.is_blocked(&ip, delta.created_at_ms));
+        assert!(mesh.needs_merge_delta(&delta));
+
+        assert!(mesh.merge_delta(&delta));
+        assert!(mesh.is_blocked(&ip, delta.created_at_ms));
+        assert!(!mesh.needs_merge_delta(&delta));
+    }
+
+    #[test]
+    fn prepared_unblock_is_not_visible_until_committed() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 78]);
+        let ban = mesh.record_ban(ip, 60_000, 2);
+
+        let tombstones = mesh.prepare_unban(ip);
+        assert_eq!(tombstones.len(), 1);
+        assert!(mesh.is_blocked(&ip, ban.created_at_ms));
+        assert!(mesh.needs_merge_unblock(&tombstones[0]));
+
+        assert!(mesh.merge_unblock_delta(&tombstones[0]));
+        assert!(!mesh.is_blocked(&ip, ban.created_at_ms));
+        assert!(!mesh.needs_merge_unblock(&tombstones[0]));
+    }
+
+    #[test]
     fn ban_lifecycle() {
         let mesh = AworsetBlocklist::new(1);
         let ip = IpAddr::from([203, 0, 113, 195]);
