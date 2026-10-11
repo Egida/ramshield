@@ -87,6 +87,17 @@ jobs:
       - name: Record candidate SHA
         run: |
           echo "Candidate SHA: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify frozen candidate SHA
+        run: test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
+      - name: Install CI-matched bpf-linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \\
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
       - name: Workspace core tests
         run: cargo test --workspace --locked
       - name: Core-only strict Clippy
@@ -111,6 +122,8 @@ jobs:
           toolchain: nightly-2026-08-29
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Verify frozen candidate SHA
+        run: test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
       - name: Mesh crate tests
         run: cargo test --locked -p ramshield-mesh
       - name: Mesh crate all targets
@@ -144,6 +157,8 @@ jobs:
           tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
           sudo mv /tmp/bpf-linker /usr/local/bin/
           bpf-linker --version
+      - name: Verify frozen candidate SHA
+        run: test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
       - name: Mesh feature integration
         run: cargo test --workspace --locked --features mesh
       - name: Full feature integration
@@ -171,6 +186,8 @@ jobs:
         with:
           toolchain: nightly-2026-08-29
           components: rustfmt
+      - name: Verify frozen candidate SHA
+        run: test "$(git rev-parse HEAD)" = "${{ needs.resolve.outputs.candidate_sha }}"
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Diff whitespace
