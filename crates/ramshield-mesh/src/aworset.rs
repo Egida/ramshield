@@ -114,9 +114,10 @@ impl Default for Aworset {
     }
 }
 
-/// IP-keyed blocklist CRDT: ban dots per (ip, node), HLC-ordered so the
-/// highest counter per node wins on merge. Internal map is
-/// DashMap<(IpAddr, node_id), (seq, created_at_ms, expires_at_ms)>.
+/// IP-keyed blocklist CRDT: operation dots per (ip, node), ordered by the
+/// per-node operation counter. HLC physical time is retained separately for
+/// TTL calculation. Internal map is DashMap<(IpAddr, node_id),
+/// (operation_counter, created_at_ms, expires_at_ms)>.
 pub struct AworsetBlocklist {
     node_id: u32,
     hlc: Hlc,
