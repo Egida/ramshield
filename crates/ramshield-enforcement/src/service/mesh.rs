@@ -99,7 +99,7 @@ impl EnforcementService {
             .as_millis() as u64;
         for received in messages {
             let mut ack_accepted = true;
-            match received.message {
+            match received.message.clone() {
                 MeshMessage::Block(delta) => {
                     let peer_node_id = delta.dot.node_id;
                     let ip = delta.ip;
