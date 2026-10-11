@@ -11,6 +11,7 @@ on:
       - 'Cargo.lock'
       - 'crates/ramshield-mesh/**'
       - 'crates/ramshield-enforcement/**'
+      - 'crates/**'
       - 'src/**'
       - 'tests/**'
       - 'benches/**'
@@ -26,6 +27,7 @@ on:
       - 'Cargo.lock'
       - 'crates/ramshield-mesh/**'
       - 'crates/ramshield-enforcement/**'
+      - 'crates/**'
       - 'src/**'
       - 'tests/**'
       - 'benches/**'
@@ -105,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/bpf-linker.tar.zst \\
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
             https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
           tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
           sudo mv /tmp/bpf-linker /usr/local/bin/
