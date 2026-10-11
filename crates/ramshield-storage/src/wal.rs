@@ -666,6 +666,15 @@ mod tests {
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].0, second);
         assert!(matches!(tail[0].1, WalEntry::UnblockIp { .. }));
+
+        let (page, has_more) = wal.replay_with_lsn_page(0, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].0, first);
+        assert!(has_more);
+        let (page, has_more) = wal.replay_with_lsn_page(first, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].0, second);
+        assert!(!has_more);
     }
 
     #[test]
