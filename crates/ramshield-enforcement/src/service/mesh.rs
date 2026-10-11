@@ -589,7 +589,12 @@ impl EnforcementService {
             self.mesh_applied_ips.insert(delta.ip);
             self.mesh_projection_pending.remove(&delta.ip);
         }
-        (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
+        let state_changed = changed
+            && !matches!(
+                &enforce_result,
+                Err(EnforcementError::Wal(_) | EnforcementError::InvalidCommand(_))
+            );
+        (state_changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
 
     async fn apply_mesh_unblock(
@@ -650,7 +655,12 @@ impl EnforcementService {
             self.mesh_applied_ips.remove(&delta.ip);
             self.mesh_projection_pending.remove(&delta.ip);
         }
-        (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
+        let state_changed = changed
+            && !matches!(
+                &enforce_result,
+                Err(EnforcementError::Wal(_) | EnforcementError::InvalidCommand(_))
+            );
+        (state_changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
 }
 
