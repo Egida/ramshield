@@ -713,24 +713,12 @@ mod frame_tests {
 
             let blocklist_a = Arc::new(AworsetBlocklist::new(1));
             let blocklist_b = Arc::new(AworsetBlocklist::new(2));
-            let a = MeshHandle::bind(
-                1,
-                blocklist_a.clone(),
-                addr_a,
-                vec![addr_b],
-                vec![7; 32],
-            )
-            .await
-            .expect("bind node A");
-            let b = MeshHandle::bind(
-                2,
-                blocklist_b.clone(),
-                addr_b,
-                vec![addr_a],
-                vec![7; 32],
-            )
-            .await
-            .expect("bind node B");
+            let a = MeshHandle::bind(1, blocklist_a.clone(), addr_a, vec![addr_b], vec![7; 32])
+                .await
+                .expect("bind node A");
+            let b = MeshHandle::bind(2, blocklist_b.clone(), addr_b, vec![addr_a], vec![7; 32])
+                .await
+                .expect("bind node B");
 
             let ip_a = IpAddr::V6(Ipv6Addr::from(0xabcdu128));
             let delta_a = blocklist_a.record_ban(ip_a, 60_000, 1);
