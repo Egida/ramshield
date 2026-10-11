@@ -25,6 +25,53 @@ pub fn replay_wal_into_store_seeded(
     min_lsn: u64,
     seed: std::collections::HashMap<IpAddr, (String, u64, u64)>,
 ) -> anyhow::Result<Vec<(IpAddr, u64)>> {
+    replay_wal_into_store_seeded_internal(store, wal, min_lsn, seed, None)
+}
+
+#[cfg(feature = "mesh")]
+pub fn replay_wal_into_store_seeded_with_mesh(
+    store: &Arc<Store>,
+    wal: &Wal,
+    min_lsn: u64,
+    seed: std::collections::HashMap<IpAddr, (String, u64, u64)>,
+    mesh_seed: Option<&ramshield_mesh::aworset::AworsetSnapshot>,
+) -> anyhow::Result<Vec<(IpAddr, u64)>> {
+    let mesh_seed = mesh_seed.map(|snapshot| MeshReplaySeed {
+        blocks: snapshot
+            .blocks
+            .iter()
+            .map(|delta| MeshReplayBlock {
+                ip: delta.ip,
+                node_id: delta.dot.node_id,
+                incarnation: delta.dot.incarnation.to_string(),
+                counter: delta.dot.counter,
+                created_at_ms: delta.created_at_ms,
+                expires_at_ms: (delta.expires_at_ms != u64::MAX)
+                    .then_some(delta.expires_at_ms),
+                tier: delta.tier,
+            })
+            .collect(),
+        unblocks: snapshot
+            .unblocks
+            .iter()
+            .map(|delta| MeshReplayUnblock {
+                ip: delta.ip,
+                node_id: delta.dot.node_id,
+                incarnation: delta.dot.incarnation.to_string(),
+                counter: delta.dot.counter,
+            })
+            .collect(),
+    });
+    replay_wal_into_store_seeded_internal(store, wal, min_lsn, seed, mesh_seed)
+}
+
+fn replay_wal_into_store_seeded_internal(
+    store: &Arc<Store>,
+    wal: &Wal,
+    min_lsn: u64,
+    seed: std::collections::HashMap<IpAddr, (String, u64, u64)>,
+    mesh_seed: Option<MeshReplaySeed>,
+) -> anyhow::Result<Vec<(IpAddr, u64)>> {
     let entries = if min_lsn > 0 {
         wal.replay_from(min_lsn)?
     } else {
@@ -36,11 +83,11 @@ pub fn replay_wal_into_store_seeded(
         .unwrap_or(0);
 
     let seed_ips: Vec<IpAddr> = seed.keys().copied().collect();
-    // Mesh CRDT state is reconstructed from its origin-dot history, not from
-    // the aggregate IP projection. A per-IP unblock must never erase another
-    // origin's concurrent live dot. Full mesh history is required until the
-    // checkpoint format carries a mesh-state seed.
-    let (mesh_touched, mesh_active) = replay_mesh_state(wal, now_ns)?;
+    // Reconstruct mesh provenance from the checkpoint seed plus the WAL tail.
+    // Without a mesh seed, use the full retained WAL and let boot enforce that
+    // retention has not pruned required history.
+    let (mesh_touched, mesh_active) =
+        replay_mesh_state(wal, min_lsn, mesh_seed.as_ref(), now_ns)?;
     // Keep absolute deadlines throughout the fold. Converting a snapshot
     // deadline to whole seconds here loses precision and can resurrect a
     // nearly-expired block. Only convert to remaining seconds at the final
@@ -164,7 +211,37 @@ type MeshReplayProjection = (
     std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)>,
 );
 
-fn replay_mesh_state(wal: &Wal, now_ns: u64) -> anyhow::Result<MeshReplayProjection> {
+#[derive(Clone, Default)]
+struct MeshReplaySeed {
+    blocks: Vec<MeshReplayBlock>,
+    unblocks: Vec<MeshReplayUnblock>,
+}
+
+#[derive(Clone)]
+struct MeshReplayBlock {
+    ip: IpAddr,
+    node_id: u32,
+    incarnation: String,
+    counter: u64,
+    created_at_ms: u64,
+    expires_at_ms: Option<u64>,
+    tier: u8,
+}
+
+#[derive(Clone)]
+struct MeshReplayUnblock {
+    ip: IpAddr,
+    node_id: u32,
+    incarnation: String,
+    counter: u64,
+}
+
+fn replay_mesh_state(
+    wal: &Wal,
+    min_lsn: u64,
+    seed: Option<&MeshReplaySeed>,
+    now_ns: u64,
+) -> anyhow::Result<MeshReplayProjection> {
     type MeshKey = (IpAddr, u32, String);
     type ActiveMeshDot = (u64, u64, Option<u64>, u8);
 
@@ -173,7 +250,38 @@ fn replay_mesh_state(wal: &Wal, now_ns: u64) -> anyhow::Result<MeshReplayProject
         std::collections::HashMap::new();
     let mut tombstones: std::collections::HashMap<MeshKey, u64> = std::collections::HashMap::new();
 
-    for entry in wal.replay()? {
+    if let Some(seed) = seed {
+        for delta in &seed.unblocks {
+            let key = (delta.ip, delta.node_id, delta.incarnation.clone());
+            touched.insert(delta.ip);
+            tombstones
+                .entry(key)
+                .and_modify(|counter| *counter = (*counter).max(delta.counter))
+                .or_insert(delta.counter);
+        }
+        for delta in &seed.blocks {
+            let key = (delta.ip, delta.node_id, delta.incarnation.clone());
+            touched.insert(delta.ip);
+            if delta.counter > tombstones.get(&key).copied().unwrap_or(0) {
+                active.insert(
+                    key,
+                    (
+                        delta.counter,
+                        delta.created_at_ms.saturating_mul(1_000_000),
+                        delta.expires_at_ms.map(|ms| ms.saturating_mul(1_000_000)),
+                        delta.tier,
+                    ),
+                );
+            }
+        }
+    }
+
+    let entries = if seed.is_some() {
+        wal.replay_from(min_lsn)?
+    } else {
+        wal.replay()?
+    };
+    for entry in entries {
         let WalEntry::MeshMutation {
             schema_version,
             origin_node_id,
