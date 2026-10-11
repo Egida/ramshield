@@ -872,7 +872,10 @@ mod tests {
 
         let second = mesh.snapshot_page(first.next_cursor, LIMIT);
         assert_eq!(second.total, EACH * 2);
-        assert_eq!(second.blocks.len() + second.unblocks.len(), EACH * 2 - LIMIT);
+        assert_eq!(
+            second.blocks.len() + second.unblocks.len(),
+            EACH * 2 - LIMIT
+        );
         assert_eq!(second.next_cursor, 0);
 
         let observed_blocks: std::collections::HashSet<_> = first
