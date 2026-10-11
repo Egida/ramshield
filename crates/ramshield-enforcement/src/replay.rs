@@ -494,7 +494,7 @@ mod mesh_wal_replay_tests {
         wal.append(&event(ip, 22, origin_b, 1, MeshMutationAction::Unblock))
             .unwrap();
         wal.sync().unwrap();
-        let (_, active) = replay_mesh_state(&wal, 1_800_000_000_000_000_000).unwrap();
+        let (_, active) = replay_mesh_state(&wal, 0, None, 1_800_000_000_000_000_000).unwrap();
         assert!(
             !active.contains_key(&ip),
             "the IP becomes clear only after both active origin dots are removed"
