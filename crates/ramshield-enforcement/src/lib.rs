@@ -49,6 +49,8 @@ pub use replay::{
     replay_wal_cidrs, replay_wal_cidrs_from, replay_wal_cidrs_seeded, replay_wal_into_store,
     replay_wal_into_store_seeded,
 };
+#[cfg(feature = "mesh")]
+pub use replay::replay_wal_into_store_seeded_with_mesh;
 
 /// Sole writer. The command queue is bounded by the engine and this actor is
 /// the only component permitted to mutate BlockState or the XDP dataplane.
