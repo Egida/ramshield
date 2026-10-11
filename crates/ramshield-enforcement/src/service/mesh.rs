@@ -563,6 +563,7 @@ impl EnforcementService {
             action: EnforceAction::Block,
             evidence_source: ramshield_types::EvidenceSource::FleetSignals,
         };
+        self.mesh_projection_pending.insert(delta.ip);
         let enforce_result = if changed {
             self.enforce_mesh_mutation(
                 cmd,
@@ -586,6 +587,7 @@ impl EnforcementService {
             Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
         ) {
             self.mesh_applied_ips.insert(delta.ip);
+            self.mesh_projection_pending.remove(&delta.ip);
         }
         (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
@@ -625,6 +627,7 @@ impl EnforcementService {
             action: EnforceAction::Unblock,
             evidence_source: ramshield_types::EvidenceSource::FleetSignals,
         };
+        self.mesh_projection_pending.insert(delta.ip);
         let enforce_result = if changed {
             self.enforce_mesh_mutation(
                 cmd,
@@ -645,6 +648,7 @@ impl EnforcementService {
             Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
         ) {
             self.mesh_applied_ips.remove(&delta.ip);
+            self.mesh_projection_pending.remove(&delta.ip);
         }
         (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
