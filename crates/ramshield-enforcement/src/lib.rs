@@ -161,6 +161,29 @@ impl EnforcementService {
         self
     }
 
+    /// Reconcile the in-memory marker set after WAL recovery. The Store remains
+    /// the local enforcement projection; only active CRDT IPs that are actually
+    /// blocked in Store are marked applied.
+    #[cfg(feature = "mesh")]
+    pub fn refresh_mesh_applied_ips(&mut self) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let Some(mesh) = self.mesh_blocklist.as_ref() else {
+            return;
+        };
+        for ip in mesh.active_ips(now_ms) {
+            if matches!(
+                self.store.get(&ip),
+                Some(Value::IpRecord(record))
+                    if matches!(record.block_state, BlockState::Blocked { .. })
+            ) {
+                self.mesh_applied_ips.insert(ip);
+            }
+        }
+    }
+
     /// Attach the authenticated mesh transport.
     #[cfg(feature = "mesh")]
     pub fn with_mesh_handle(mut self, mesh_handle: ramshield_mesh::MeshHandle) -> Self {
