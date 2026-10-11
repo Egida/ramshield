@@ -120,6 +120,14 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     let cfg_arc = engine.config.load(); // Arc<Config>
     let cfg_snapshot = cfg_arc.as_ref().clone(); // owned Config clone
 
+    #[cfg(feature = "mesh")]
+    if cfg_snapshot.mesh.enabled && !cfg_snapshot.wal.enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mesh.enabled=true requires wal.enabled=true for durable replication acknowledgements",
+        ));
+    }
+
     // Use engine's shared store and metrics (shared with dashboard)
     let store = engine.store.clone();
     let metrics = engine.metrics.clone();
@@ -300,7 +308,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     let mut snapshot_seed: Option<SnapshotRestore> = None;
     // Crash-durable block state: open WAL, load snapshot if exists, replay tail.
     if cfg_snapshot.wal.enabled {
-        let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback;
+        let hard_wal = !cfg_snapshot.wal.allow_volatile_fallback || cfg_snapshot.mesh.enabled;
         match Wal::open(
             &cfg_snapshot.wal.dir,
             cfg_snapshot.wal.compress,
