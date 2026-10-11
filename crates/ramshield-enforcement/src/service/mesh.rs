@@ -594,7 +594,10 @@ impl EnforcementService {
                 &enforce_result,
                 Err(EnforcementError::Wal(_) | EnforcementError::InvalidCommand(_))
             );
-        (state_changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
+        (
+            state_changed,
+            enforce_result.map(|_| MeshApplyOutcome::Applied),
+        )
     }
 
     async fn apply_mesh_unblock(
