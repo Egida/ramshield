@@ -47,6 +47,47 @@ impl MeshApplyReport {
 }
 
 impl EnforcementService {
+    /// Persist the original mesh operation identity before allowing it into the
+    /// local CRDT. A local WAL LSN is not an origin counter and is never used
+    /// to rewrite the remote dot.
+    fn persist_mesh_mutation(
+        &mut self,
+        ip: std::net::IpAddr,
+        dot: ramshield_mesh::aworset::ClusterDot,
+        action: ramshield_storage::wal::MeshMutationAction,
+        created_at_ms: u64,
+        expires_at_ms: Option<u64>,
+        tier: u8,
+    ) -> Result<(), EnforcementError> {
+        let Some(wal) = self.wal.as_ref() else {
+            return Ok(());
+        };
+        let ts_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        let entry = ramshield_storage::wal::WalEntry::MeshMutation {
+            schema_version: 1,
+            origin_node_id: dot.node_id,
+            origin_incarnation: dot.incarnation.to_string(),
+            origin_counter: dot.counter,
+            ip: ip.to_string(),
+            action,
+            created_at_ms,
+            expires_at_ms,
+            tier,
+            signature: None,
+            ts_ns,
+        };
+        let lsn = wal
+            .append(&entry)
+            .map_err(|error| EnforcementError::Wal(error.to_string()))?;
+        wal.sync()
+            .map_err(|error| EnforcementError::Wal(error.to_string()))?;
+        self.last_wal_lsn = Some(lsn);
+        Ok(())
+    }
+
     pub(crate) async fn apply_mesh_messages(&mut self) -> MeshApplyReport {
         let mut report = MeshApplyReport::default();
         let Some(handle) = self.mesh_handle.clone() else {
@@ -115,15 +156,28 @@ impl EnforcementService {
         if delta.expires_at_ms <= now_ms {
             return (false, Ok(MeshApplyOutcome::Ignored));
         }
-        let Some(mesh) = &self.mesh_blocklist else {
+        let Some(mesh) = self.mesh_blocklist.clone() else {
             return (false, Ok(MeshApplyOutcome::Ignored));
         };
         if self.mesh_operator_suppressions.contains(&delta.ip) {
             return (false, Ok(MeshApplyOutcome::Ignored));
         }
-        // CRDT state can be merged before enforcement fails (e.g. WAL
-        // append or storage error). Retry an unchanged delta until its
-        // projection has succeeded; only skip duplicates already applied.
+        // Persist the original origin dot before merging. Repeated deliveries
+        // whose dot is already retained need no additional WAL record.
+        if mesh.needs_merge_delta(&delta) {
+            if let Err(error) = self.persist_mesh_mutation(
+                delta.ip,
+                delta.dot,
+                ramshield_storage::wal::MeshMutationAction::Block,
+                delta.created_at_ms,
+                (delta.expires_at_ms != u64::MAX).then_some(delta.expires_at_ms),
+                delta.tier,
+            ) {
+                return (false, Err(error));
+            }
+        }
+        // CRDT state can be merged before enforcement fails (e.g. storage or
+        // XDP projection error); retries repair the local projection.
         let changed = mesh.merge_delta(&delta);
         if should_skip_mesh_block(changed, self.mesh_applied_ips.contains(&delta.ip)) {
             return (changed, Ok(MeshApplyOutcome::Ignored));
@@ -165,11 +219,27 @@ impl EnforcementService {
         delta: ramshield_mesh::aworset::ClusterUnblockDelta,
         now_ms: u64,
     ) -> (bool, Result<MeshApplyOutcome, EnforcementError>) {
-        let Some(mesh) = &self.mesh_blocklist else {
+        let Some(mesh) = self.mesh_blocklist.clone() else {
             return (false, Ok(MeshApplyOutcome::Ignored));
         };
-        // As with blocks, retain retryability if the tombstone was
-        // merged but the local enforcement unblock failed.
+        // The tombstone must be durable before it can suppress a live dot.
+        if mesh.needs_merge_unblock(&delta) {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if let Err(error) = self.persist_mesh_mutation(
+                delta.ip,
+                delta.dot,
+                ramshield_storage::wal::MeshMutationAction::Unblock,
+                now_ms,
+                None,
+                0,
+            ) {
+                return (false, Err(error));
+            }
+        }
+        // As with blocks, retain retryability if the local enforcement unblock fails.
         let changed = mesh.merge_unblock_delta(&delta);
         let still_blocked = mesh.is_blocked(&delta.ip, now_ms);
         let locally_applied = self.mesh_applied_ips.contains(&delta.ip);
