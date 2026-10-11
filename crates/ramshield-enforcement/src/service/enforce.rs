@@ -1,5 +1,6 @@
 use crate::*;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum PendingMeshMutation {
     Block {
@@ -19,6 +20,7 @@ pub(crate) enum PendingMeshMutation {
     },
 }
 
+#[allow(dead_code)]
 impl PendingMeshMutation {
     pub(crate) fn to_wal_entry(&self, ts_ns: u64) -> WalEntry {
         match self {
@@ -91,6 +93,7 @@ impl EnforcementService {
         self.enforce_inner(cmd, None).await
     }
 
+    #[cfg(feature = "mesh")]
     pub(crate) async fn enforce_mesh_mutation(
         &mut self,
         cmd: EnforceCommand,
@@ -166,9 +169,10 @@ impl EnforcementService {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         #[cfg(feature = "mesh")]
-        let mesh_wal_entries: Vec<WalEntry> = if let Some(mutation) = incoming_mesh_mutation.as_ref() {
-            vec![mutation.to_wal_entry(now_ns)]
-        } else if cmd.source != "mesh" && cmd.cidr.is_none() {
+        let mesh_wal_entries: Vec<WalEntry> =
+            if let Some(mutation) = incoming_mesh_mutation.as_ref() {
+                vec![mutation.to_wal_entry(now_ns)]
+            } else if cmd.source != "mesh" && cmd.cidr.is_none() {
             if let Some(delta) = prepared_mesh_block.as_ref() {
                 vec![WalEntry::MeshMutation {
                     schema_version: 1,
