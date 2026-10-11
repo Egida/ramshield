@@ -15,14 +15,33 @@ use uuid::Uuid;
 pub type Dot = u64;
 pub(crate) type BlockKey = (IpAddr, u32, Uuid);
 pub(crate) type BlockState = (u64, u64, u64, u8);
-type SnapshotKey = (IpAddr, u32, Uuid, u8);
+/// Stable identity of an item in the deterministic anti-entropy ordering.
+///
+/// The cursor deliberately excludes the operation counter: counters can change
+/// while a page walk is in progress, but the identity key remains stable.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct StateCursor {
+    pub ip: IpAddr,
+    pub node_id: u32,
+    pub incarnation: Uuid,
+    pub kind: StateKind,
+}
 
-/// One bounded snapshot slice and the next caller-owned cursor.
+/// Distinguishes a live block from a tombstone for the same CRDT key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum StateKind {
+    Block,
+    Unblock,
+}
+
+/// One bounded snapshot page and its seek-based continuation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotPage {
     pub blocks: Vec<ClusterBlockDelta>,
     pub unblocks: Vec<ClusterUnblockDelta>,
-    pub next_cursor: usize,
+    /// Last included key when more items remain; None means this pass is complete.
+    pub next_cursor: Option<StateCursor>,
+    pub has_more: bool,
     pub total: usize,
 }
 
@@ -349,18 +368,23 @@ impl AworsetBlocklist {
     /// is an index into a deterministic sorted snapshot, not a durable
     /// acknowledgement; concurrent mutations may cause duplicates or skips,
     /// which periodic full rotations must repair.
-    pub fn snapshot_page(&self, cursor: usize, limit: usize) -> SnapshotPage {
+    pub fn snapshot_page(&self, cursor: Option<&StateCursor>, limit: usize) -> SnapshotPage {
         enum SnapshotItem {
             Block(ClusterBlockDelta),
             Unblock(ClusterUnblockDelta),
         }
 
-        let mut items: Vec<(SnapshotKey, SnapshotItem)> =
+        let mut items: Vec<(StateCursor, SnapshotItem)> =
             Vec::with_capacity(self.entries.len() + self.tombstones.len());
         for entry in self.entries.iter() {
             let key = *entry.key();
             items.push((
-                (key.0, key.1, key.2, 0),
+                StateCursor {
+                    ip: key.0,
+                    node_id: key.1,
+                    incarnation: key.2,
+                    kind: StateKind::Block,
+                },
                 SnapshotItem::Block(ClusterBlockDelta {
                     ip: key.0,
                     dot: ClusterDot {
@@ -377,7 +401,12 @@ impl AworsetBlocklist {
         for tombstone in self.tombstones.iter() {
             let key = *tombstone.key();
             items.push((
-                (key.0, key.1, key.2, 1),
+                StateCursor {
+                    ip: key.0,
+                    node_id: key.1,
+                    incarnation: key.2,
+                    kind: StateKind::Unblock,
+                },
                 SnapshotItem::Unblock(ClusterUnblockDelta {
                     ip: key.0,
                     dot: ClusterDot {
@@ -388,37 +417,45 @@ impl AworsetBlocklist {
                 }),
             ));
         }
-        items.sort_unstable_by_key(|(key, _)| *key);
+        items.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
         let total = items.len();
-        if total == 0 || limit == 0 {
+        if limit == 0 {
             return SnapshotPage {
-                blocks: Vec::new(),
-                unblocks: Vec::new(),
-                next_cursor: if total == 0 { 0 } else { cursor % total },
                 total,
+                ..SnapshotPage::default()
             };
         }
 
-        let start = cursor % total;
-        let count = limit.min(total - start);
-        let next_cursor = if start + count >= total {
-            0
-        } else {
-            start + count
+        let start = match cursor {
+            Some(cursor) => items.partition_point(|(key, _)| key <= cursor),
+            None => 0,
         };
+        let available = total.saturating_sub(start);
+        let count = limit.min(available);
+        let has_more = available > count;
+        let next_cursor = if has_more {
+            count
+                .checked_sub(1)
+                .and_then(|last| items.get(start + last))
+                .map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+
         let mut blocks = Vec::with_capacity(count);
         let mut unblocks = Vec::with_capacity(count);
-        for offset in 0..count {
-            match &items[(start + offset) % total].1 {
-                SnapshotItem::Block(block) => blocks.push(block.clone()),
-                SnapshotItem::Unblock(unblock) => unblocks.push(unblock.clone()),
+        for (_, item) in items.into_iter().skip(start).take(count) {
+            match item {
+                SnapshotItem::Block(block) => blocks.push(block),
+                SnapshotItem::Unblock(unblock) => unblocks.push(unblock),
             }
         }
         SnapshotPage {
             blocks,
             unblocks,
             next_cursor,
+            has_more,
             total,
         }
     }
@@ -824,21 +861,55 @@ mod tests {
             mesh.record_ban(ip, 60_000, 1);
         }
 
-        let peer_a_first = mesh.snapshot_page(0, 2);
-        let peer_b_first = mesh.snapshot_page(0, 2);
+        let peer_a_first = mesh.snapshot_page(None, 2);
+        let peer_b_first = mesh.snapshot_page(None, 2);
         assert_eq!(peer_a_first, peer_b_first);
         assert_eq!(peer_a_first.total, 5);
         assert_eq!(peer_a_first.blocks.len() + peer_a_first.unblocks.len(), 2);
-        assert_eq!(peer_a_first.next_cursor, 2);
+        assert!(peer_a_first.has_more);
+        let peer_a_cursor = peer_a_first.next_cursor.clone().expect("second page exists");
 
-        let peer_a_second = mesh.snapshot_page(peer_a_first.next_cursor, 2);
+        let peer_a_second = mesh.snapshot_page(Some(&peer_a_cursor), 2);
         assert_eq!(peer_a_second.total, 5);
         assert_eq!(peer_a_second.blocks.len() + peer_a_second.unblocks.len(), 2);
+        assert!(peer_a_second.has_more);
         assert_ne!(
             peer_a_first.blocks[0].ip, peer_a_second.blocks[0].ip,
             "advancing one peer cursor should select a different page"
         );
-        assert_eq!(mesh.snapshot_page(0, 2), peer_b_first);
+        assert_eq!(mesh.snapshot_page(None, 2), peer_b_first);
+    }
+
+    #[test]
+    fn snapshot_page_seek_survives_mutations_before_and_after_cursor() {
+        let mesh = AworsetBlocklist::new(7);
+        for n in 0..6 {
+            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
+            mesh.record_ban(ip, 60_000, 1);
+        }
+
+        let first = mesh.snapshot_page(None, 2);
+        let cursor = first.next_cursor.clone().expect("more items remain");
+        let last_first_ip = first.blocks.last().expect("first page has blocks").ip;
+
+        // Add one key on either side of the cursor, and remove an earlier key.
+        mesh.record_ban(IpAddr::V6(std::net::Ipv6Addr::from(0u128)), 60_000, 1);
+        mesh.record_ban(IpAddr::V6(std::net::Ipv6Addr::from(100u128)), 60_000, 1);
+        mesh.record_unban(IpAddr::V6(std::net::Ipv6Addr::from(0u128)));
+
+        let second = mesh.snapshot_page(Some(&cursor), 16);
+        assert!(second.blocks.iter().all(|delta| {
+            StateCursor {
+                ip: delta.ip,
+                node_id: delta.dot.node_id,
+                incarnation: delta.dot.incarnation,
+                kind: StateKind::Block,
+            } > cursor
+        }));
+        assert!(second.blocks.iter().any(|delta| delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128))));
+        assert!(!second.blocks.iter().any(|delta| delta.ip == last_first_ip));
+        assert!(!second.has_more);
+        assert!(second.next_cursor.is_none());
     }
 
     #[test]
@@ -865,18 +936,20 @@ mod tests {
             expected_tombstones.insert(tombstone_ip);
         }
 
-        let first = mesh.snapshot_page(0, LIMIT);
+        let first = mesh.snapshot_page(None, LIMIT);
         assert_eq!(first.total, EACH * 2);
         assert_eq!(first.blocks.len() + first.unblocks.len(), LIMIT);
-        assert_eq!(first.next_cursor, LIMIT);
+        assert!(first.has_more);
+        let cursor = first.next_cursor.clone().expect("second page exists");
 
-        let second = mesh.snapshot_page(first.next_cursor, LIMIT);
+        let second = mesh.snapshot_page(Some(&cursor), LIMIT);
         assert_eq!(second.total, EACH * 2);
         assert_eq!(
             second.blocks.len() + second.unblocks.len(),
             EACH * 2 - LIMIT
         );
-        assert_eq!(second.next_cursor, 0);
+        assert!(!second.has_more);
+        assert!(second.next_cursor.is_none());
 
         let observed_blocks: std::collections::HashSet<_> = first
             .blocks
