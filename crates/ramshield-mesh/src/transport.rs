@@ -389,11 +389,12 @@ impl MeshHandle {
         let completed_at = self.sync_epoch.elapsed();
         let mut states = self.sync_states.lock().await;
         for (peer, _) in due_peers {
-            if !completed.contains(&peer) {
-                if let Some(state) = states.get_mut(&peer) {
+            match (completed.contains(&peer), states.get_mut(&peer)) {
+                (false, Some(state)) => {
                     state.planner.complete(completed_at, false);
                     state.delivery_failed = true;
                 }
+                _ => {}
             }
         }
     }
