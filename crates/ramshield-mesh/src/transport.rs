@@ -1057,6 +1057,52 @@ mod frame_tests {
             .await
             .expect("condition-driven repair should converge node A with node B");
 
+            let incarnation = uuid::Uuid::new_v4();
+            let wal_batch = MeshMessage::WalBatch {
+                source_node_id: 1,
+                start_lsn: 10,
+                end_lsn: 11,
+                mutations: vec![ReplicatedMeshMutation {
+                    source_lsn: 11,
+                    origin_node_id: 1,
+                    origin_incarnation: incarnation.to_string(),
+                    origin_counter: 1,
+                    ip: IpAddr::V6(Ipv6Addr::from(0xfeed1234u128)),
+                    action: MeshMutationKind::Block,
+                    created_at_ms: now_ms(),
+                    expires_at_ms: None,
+                    tier: 2,
+                }],
+            };
+            let sender = {
+                let a = a.clone();
+                tokio::spawn(async move { a.send_wal_batch(addr_b, wal_batch).await })
+            };
+            let mut wal_ack_seen = false;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for received in b.drain_with_ack().await {
+                        match received.message.clone() {
+                            MeshMessage::WalBatch { end_lsn, .. } => {
+                                received.acknowledge_with_lsn(true, Some(end_lsn));
+                                wal_ack_seen = true;
+                            }
+                            _ => received.acknowledge(true),
+                        }
+                    }
+                    if wal_ack_seen {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("receiver should acknowledge the WAL page boundary");
+            assert_eq!(
+                sender.await.expect("WAL sender task").expect("WAL ACK"),
+                Some(11)
+            );
+
             a.shutdown();
             b.shutdown();
         });
