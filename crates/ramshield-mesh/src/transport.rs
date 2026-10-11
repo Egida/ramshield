@@ -842,13 +842,15 @@ mod frame_tests {
 
             let ip_a = IpAddr::V6(Ipv6Addr::from(0xabcdu128));
             let delta_a = blocklist_a.record_ban(ip_a, 60_000, 1);
-            let report = a.broadcast(MeshMessage::Block(delta_a)).await;
-            assert!(report.all_written(), "node A should deliver its mutation");
+            let sender = {
+                let a = a.clone();
+                tokio::spawn(async move { a.broadcast(MeshMessage::Block(delta_a)).await })
+            };
 
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    for message in b.drain().await {
-                        match message {
+                    for received in b.drain_with_ack().await {
+                        match received.message {
                             MeshMessage::Block(delta) => {
                                 blocklist_b.merge_delta(&delta);
                             }
@@ -864,6 +866,7 @@ mod frame_tests {
                                 }
                             }
                         }
+                        received.acknowledge(true);
                     }
                     if blocklist_b.is_blocked(&ip_a, now_ms()) {
                         break;
@@ -873,6 +876,8 @@ mod frame_tests {
             })
             .await
             .expect("node B should apply node A's state");
+            let report = sender.await.expect("sender task");
+            assert!(report.all_written(), "node A should receive an application ACK");
 
             let ip_b = IpAddr::V6(Ipv6Addr::from(0xdef01234u128));
             blocklist_b.record_ban(ip_b, 60_000, 2);
@@ -882,8 +887,8 @@ mod frame_tests {
 
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
-                    for message in a.drain().await {
-                        match message {
+                    for received in a.drain_with_ack().await {
+                        match received.message {
                             MeshMessage::Block(delta) => {
                                 blocklist_a.merge_delta(&delta);
                             }
@@ -899,6 +904,7 @@ mod frame_tests {
                                 }
                             }
                         }
+                        received.acknowledge(true);
                     }
                     if blocklist_a.is_blocked(&ip_b, now_ms()) {
                         break;
