@@ -268,6 +268,43 @@ impl Wal {
         decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
     }
 
+    /// Replay one bounded page after an exclusive LSN. The continuation is
+    /// the final local LSN in the returned records, including non-mesh records,
+    /// so callers can advance without confusing local positions across nodes.
+    pub fn replay_with_lsn_page(
+        &self,
+        min_lsn_exclusive: u64,
+        limit: usize,
+    ) -> Result<(Vec<(u64, WalEntry)>, bool)> {
+        if limit == 0 {
+            return Err(RsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WAL replay page limit must be non-zero",
+            )));
+        }
+        let dir = self.guard.cfg.dir.clone();
+        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        let mut selected: Vec<_> = report
+            .records
+            .iter()
+            .filter(|record| record.lsn.get() > min_lsn_exclusive)
+            .take(limit.saturating_add(1))
+            .collect();
+        let has_more = selected.len() > limit;
+        if has_more {
+            selected.pop();
+        }
+        let entries = selected
+            .into_iter()
+            .map(|record| {
+                serde_json::from_slice::<WalEntry>(&record.payload)
+                    .map(|entry| (record.lsn.get(), entry))
+                    .map_err(|error| RsError::Serde(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((entries, has_more))
+    }
+
     /// Replay records after an exclusive LSN, preserving each record's durable
     /// position for replication cursors. The returned LSN belongs to this WAL
     /// only; it must never be compared with another node's LSN.
