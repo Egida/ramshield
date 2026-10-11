@@ -790,7 +790,9 @@ mod retry_tests {
 mod wal_batch_integration_tests {
     use super::*;
     use crate::StubXdpApplier;
-    use ramshield_mesh::transport::{MeshHandle, MeshMessage, MeshMutationKind, ReplicatedMeshMutation};
+    use ramshield_mesh::transport::{
+        MeshHandle, MeshMessage, MeshMutationKind, ReplicatedMeshMutation,
+    };
     use ramshield_storage::wal::{MeshMutationAction, Wal, WalEntry};
     use ramshield_types::Durability;
     use std::net::SocketAddr;
@@ -806,14 +808,11 @@ mod wal_batch_integration_tests {
 
     #[tokio::test]
     async fn wal_batch_is_durable_and_projected_before_positive_ack() {
-        let dir = std::env::temp_dir().join(format!(
-            "ramshield-mesh-batch-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ramshield-mesh-batch-{}", uuid::Uuid::new_v4()));
         let dir_string = dir.to_string_lossy().into_owned();
-        let wal = Arc::new(
-            Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap(),
-        );
+        let wal =
+            Arc::new(Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap());
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 111));
         let origin_incarnation = uuid::Uuid::new_v4();
         let receiver_addr = free_addr().await;
@@ -885,13 +884,15 @@ mod wal_batch_integration_tests {
         .expect("service should process the WAL batch");
         assert_eq!(report.applied, 1);
         assert_eq!(sender_task.await.unwrap().unwrap(), Some(1));
-        assert!(receiver_blocklist.is_blocked(
-            &ip,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        ));
+        assert!(
+            receiver_blocklist.is_blocked(
+                &ip,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+            )
+        );
         assert!(matches!(
             store.get(&ip),
             Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
