@@ -615,9 +615,8 @@ impl MeshHandle {
         let ack_line = ack_frame.strip_suffix(b"\n").unwrap_or(&ack_frame);
         let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
         let ack: AckEnvelope = serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
-        let ack_payload =
-            serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted, ack.ack_lsn))
-        .map_err(std::io::Error::other)?;
+        let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted, ack.ack_lsn))
+            .map_err(std::io::Error::other)?;
         if ack.node_id == self.node_id
             || now_ms().abs_diff(ack.ts_ms) > MAX_CLOCK_SKEW_MS
             || !verify(&self.auth_key, &ack_payload, &ack.mac)
