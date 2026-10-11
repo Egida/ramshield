@@ -349,11 +349,7 @@ impl AworsetBlocklist {
     /// is an index into a deterministic sorted snapshot, not a durable
     /// acknowledgement; concurrent mutations may cause duplicates or skips,
     /// which periodic full rotations must repair.
-    pub fn snapshot_page(
-        &self,
-        cursor: usize,
-        limit: usize,
-    ) -> SnapshotPage {
+    pub fn snapshot_page(&self, cursor: usize, limit: usize) -> SnapshotPage {
         enum SnapshotItem {
             Block(ClusterBlockDelta),
             Unblock(ClusterUnblockDelta),
@@ -406,7 +402,11 @@ impl AworsetBlocklist {
 
         let start = cursor % total;
         let count = limit.min(total - start);
-        let next_cursor = if start + count >= total { 0 } else { start + count };
+        let next_cursor = if start + count >= total {
+            0
+        } else {
+            start + count
+        };
         let mut blocks = Vec::with_capacity(count);
         let mut unblocks = Vec::with_capacity(count);
         for offset in 0..count {
@@ -835,8 +835,7 @@ mod tests {
         assert_eq!(peer_a_second.total, 5);
         assert_eq!(peer_a_second.blocks.len() + peer_a_second.unblocks.len(), 2);
         assert_ne!(
-            peer_a_first.blocks[0].ip,
-            peer_a_second.blocks[0].ip,
+            peer_a_first.blocks[0].ip, peer_a_second.blocks[0].ip,
             "advancing one peer cursor should select a different page"
         );
         assert_eq!(mesh.snapshot_page(0, 2), peer_b_first);
