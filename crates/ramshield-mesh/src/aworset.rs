@@ -198,15 +198,17 @@ impl AworsetBlocklist {
         let mut inserted = false;
         self.entries
             .entry(key)
-            .and_modify(|(existing_seq, existing_created, existing_exp, existing_tier)| {
-                if delta.dot.counter > *existing_seq {
-                    *existing_seq = delta.dot.counter;
-                    *existing_created = delta.created_at_ms;
-                    *existing_exp = delta.expires_at_ms;
-                    *existing_tier = delta.tier;
-                    inserted = true;
-                }
-            })
+            .and_modify(
+                |(existing_seq, existing_created, existing_exp, existing_tier)| {
+                    if delta.dot.counter > *existing_seq {
+                        *existing_seq = delta.dot.counter;
+                        *existing_created = delta.created_at_ms;
+                        *existing_exp = delta.expires_at_ms;
+                        *existing_tier = delta.tier;
+                        inserted = true;
+                    }
+                },
+            )
             .or_insert_with(|| {
                 inserted = true;
                 (
