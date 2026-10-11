@@ -140,7 +140,7 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Diff whitespace
-        if: github.event_name != 'schedule'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000')
         run: git diff --check ${{ github.event.pull_request.base.sha || github.event.before }}...HEAD
       - name: Always summarize quality result
         if: always()
