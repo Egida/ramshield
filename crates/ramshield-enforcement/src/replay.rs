@@ -303,6 +303,9 @@ fn replay_mesh_state(
         let ip: IpAddr = ip
             .parse()
             .map_err(|error| anyhow::anyhow!("invalid IP in mesh WAL event: {error}"))?;
+        if ip.is_unspecified() {
+            anyhow::bail!("unspecified IP in mesh WAL event");
+        }
         let incarnation = uuid::Uuid::parse_str(&origin_incarnation).map_err(|error| {
             anyhow::anyhow!("invalid origin incarnation in mesh WAL event: {error}")
         })?;
