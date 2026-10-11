@@ -363,7 +363,13 @@ impl EnforcementService {
                                 let (state_changed, result) =
                                     self.apply_mesh_unblock(delta, now_ms).await;
                                 ack_accepted &= mesh_ackable(&result, self.wal.is_some());
-                                report.record(result, state_changed, peer_node_id, ip, "wal_unblock");
+                                report.record(
+                                    result,
+                                    state_changed,
+                                    peer_node_id,
+                                    ip,
+                                    "wal_unblock",
+                                );
                             }
                         }
                     }
