@@ -24,7 +24,7 @@ use std::net::IpAddr;
 #[cfg(feature = "mesh")]
 use std::net::SocketAddr;
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -111,7 +111,9 @@ pub struct EnforcementService {
     /// Per-peer cursor into this node's own WAL. Resetting to zero on restart
     /// intentionally causes replay; origin-dot dedup makes that idempotent.
     #[cfg(feature = "mesh")]
-    mesh_wal_cursors: HashMap<SocketAddr, u64>,
+    mesh_wal_cursors: Arc<StdMutex<HashMap<SocketAddr, u64>>>,
+    #[cfg(feature = "mesh")]
+    mesh_wal_inflight: Arc<StdMutex<HashSet<SocketAddr>>>,
     /// Checkpoint coordination: barrier + absolute-deadline mirror. None =
     /// engine never attached one (standalone use, tests).
     checkpoint_shared: Option<Arc<CheckpointShared>>,
@@ -148,7 +150,9 @@ impl EnforcementService {
             #[cfg(feature = "mesh")]
             mesh_operator_suppressions: HashSet::new(),
             #[cfg(feature = "mesh")]
-            mesh_wal_cursors: HashMap::new(),
+            mesh_wal_cursors: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(feature = "mesh")]
+            mesh_wal_inflight: Arc::new(StdMutex::new(HashSet::new())),
             checkpoint_shared: None,
         }
     }
