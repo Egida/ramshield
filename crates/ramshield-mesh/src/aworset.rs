@@ -250,6 +250,24 @@ impl AworsetBlocklist {
             .is_none_or(|entry| delta.dot.counter > entry.value().0)
     }
 
+    /// Whether another live origin dot would still block this IP after the
+    /// supplied tombstone is applied.
+    pub fn would_be_blocked_after_unblock(
+        &self,
+        delta: &ClusterUnblockDelta,
+        now_ms: u64,
+    ) -> bool {
+        self.entries.iter().any(|entry| {
+            if entry.key().0 != delta.ip || entry.value().2 <= now_ms {
+                return false;
+            }
+            let is_removed_dot = entry.key().1 == delta.dot.node_id
+                && entry.key().2 == delta.dot.incarnation
+                && entry.value().0 <= delta.dot.counter;
+            !is_removed_dot
+        })
+    }
+
     /// Whether applying an unblock delta would add a new tombstone or remove
     /// a still-live older dot.
     pub fn needs_merge_unblock(&self, delta: &ClusterUnblockDelta) -> bool {
