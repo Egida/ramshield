@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub type Dot = u64;
 pub(crate) type BlockKey = (IpAddr, u32, Uuid);
 pub(crate) type BlockState = (u64, u64, u64, u8);
+type SnapshotKey = (IpAddr, u32, Uuid, u8);
 /// Stable identity of an item in the deterministic anti-entropy ordering.
 ///
 /// The cursor deliberately excludes the operation counter: counters can change
