@@ -10,16 +10,8 @@ use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Dot = u64;
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
@@ -432,7 +424,10 @@ mod tests {
             receiver.tombstones.get(&(ip, sender.node_id)).map(|v| *v),
             Some(old_ban.dot.counter)
         );
-        assert!(!receiver.merge_delta(&old_ban), "expired stale delta must not return");
+        assert!(
+            !receiver.merge_delta(&old_ban),
+            "expired stale delta must not return"
+        );
     }
 
     #[test]
