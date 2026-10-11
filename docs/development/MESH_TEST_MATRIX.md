@@ -1,0 +1,60 @@
+# Mesh Test Matrix
+
+**Purpose:** make mesh feature acceptance evidence explicit. This matrix supplements, rather than replaces, the core production backlog.
+
+**Current candidate baseline:** `audit-branch` at `967f388513c4feff71db225207efff608c4f47d9`.
+
+## Stage A — executable transport tests
+
+- [x] Real TCP happy path: a configured sender broadcasts an authenticated block to a receiver and the receiver queues it.
+- [x] Invalid-MAC frame is rejected before it enters the receive queue.
+- [x] Existing unit coverage: frame cap and delimiter accounting, incomplete-frame timeout, sync chunk size, bind-argument validation, send timeout, listener socket release, invalid future creation time, and oversized sync rejection.
+
+## Stage B — CRDT correctness (release-blocking)
+
+- [ ] Add/remove/re-add for the same IP and node.
+- [ ] Concurrent bans from different nodes; merge order independence.
+- [ ] Duplicate and reordered deltas are idempotent.
+- [ ] Old ban after unban is rejected; a genuinely newer ban after unban is accepted.
+- [ ] HLC physical-time advance cannot reuse a dot counter.
+- [ ] Restart/incarnation changes cannot collide with old dots.
+- [ ] Expiry and purge cannot resurrect stale state after a peer is offline.
+- [ ] Tombstone GC has a causal-stability/epoch/repair argument, not only a timer.
+- [ ] Property-style merge permutations converge to the same state.
+
+## Stage C — anti-entropy completeness (release-blocking)
+
+- [ ] More than 4,096 entries and tombstones; prove every item is visited over repeated sync.
+- [ ] Pagination progress is fair and deterministic, even while the map changes.
+- [ ] Multi-chunk state converges after loss, duplicate delivery, reordering, and reconnect.
+- [ ] Stale tombstones and later legitimate re-bans converge correctly.
+- [ ] Sync repair remains effective after queue overflow.
+
+## Stage D — protocol and trust boundary
+
+- [ ] Invalid HMAC, truncated/invalid HMAC encoding, modified body, malformed JSON.
+- [ ] Replay of a previously valid envelope; duplicate semantics are explicit.
+- [ ] Self-origin, unknown node ID, counter extremes, invalid tier, invalid expiry, and timestamp boundaries.
+- [ ] Same-key node impersonation and key rotation are either prevented or documented as accepted trust assumptions.
+- [ ] Frame exactly at limit, one byte over, delimiter split across reads, clean EOF, partial EOF, CRLF, and multiple frames on one connection.
+- [ ] Reader/peer caps and malformed-frame floods remain bounded.
+
+## Stage E — overload, lifecycle, and service projection
+
+- [ ] Incoming queue saturation reports drops and then demonstrably repairs state.
+- [ ] Outbound semaphore saturation, stalled peers, permit release, and unreachable peers.
+- [ ] Shutdown while idle, blocked on a partial frame, broadcasting, and processing sync.
+- [ ] All mesh-owned tasks terminate; listener and sockets release; startup errors propagate.
+- [ ] Feature-off build and tests do not start mesh; mesh-feature startup failures are surfaced.
+- [ ] Service-level block/unblock, operator suppression, TTL, expiry, WAL/storage failure, XDP failure, and retry/reconciliation.
+- [ ] IP and CIDR semantics are explicit; current wire deltas are IP-only.
+
+## Stage F — performance and operations
+
+- [ ] Reproducible multi-node tests with 3+ peers, loss/reconnect, large state, and skew.
+- [ ] Throughput, convergence latency, memory at configured limits, and slow-peer behavior have baselines.
+- [ ] Threat model, key provisioning/rotation, network exposure, operational runbook, rollback, and known limitations reviewed.
+
+## Acceptance rule
+
+The feature stays optional and disabled in production until Stages B–F are closed or explicitly dispositioned by an independent reviewer, and the full feature-off/mesh/full/all-feature test matrix, formatting, strict Clippy, and relevant workspace checks pass on one exact SHA. A green unit-test run alone is not acceptance.
