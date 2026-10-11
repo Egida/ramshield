@@ -169,7 +169,25 @@ impl EnforcementService {
                         }
                     };
                     if records.is_empty() {
-                        return None;
+                        peer_handle.request_full_sync(peer).await;
+                        warn!(
+                            peer = %peer,
+                            cursor_lsn = cursor,
+                            boundary_lsn = latest_lsn,
+                            "mesh WAL page is empty despite an outstanding tail; requested CRDT anti-entropy"
+                        );
+                        return Some(latest_lsn);
+                    }
+                    if records[0].0 > cursor.saturating_add(1) {
+                        peer_handle.request_full_sync(peer).await;
+                        warn!(
+                            peer = %peer,
+                            cursor_lsn = cursor,
+                            first_lsn = records[0].0,
+                            boundary_lsn = latest_lsn,
+                            "mesh WAL page exposed a history gap; requested CRDT anti-entropy"
+                        );
+                        return Some(latest_lsn);
                     }
                     let start_lsn = records[0].0;
                     let end_lsn = records.last().map(|record| record.0).unwrap_or(cursor);
