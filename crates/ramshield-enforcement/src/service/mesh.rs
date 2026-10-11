@@ -886,7 +886,11 @@ mod wal_batch_integration_tests {
         })
         .await
         .expect("service should process the WAL batch");
-        assert_eq!(report.applied, 1);
+        assert_eq!(
+            report.applied, 0,
+            "Store projection should fail under a zero RAM budget: {report:?}"
+        );
+        assert_eq!(report.failed, 1, "report={report:?}");
         assert_eq!(sender_task.await.unwrap().unwrap(), Some(1));
         assert!(
             receiver_blocklist.is_blocked(
@@ -895,12 +899,17 @@ mod wal_batch_integration_tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64
-            )
+            ),
+            "the durable CRDT state must commit even when Store projection fails"
         );
-        assert!(matches!(
-            store.get(&ip),
-            Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
-        ));
+        assert!(
+            !matches!(
+                store.get(&ip),
+                Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+            ),
+            "the zero RAM budget should leave the Store projection pending"
+        );
+        assert!(service.mesh_projection_pending.contains(&ip));
         assert!(wal.replay().unwrap().iter().any(|entry| matches!(
             entry,
             WalEntry::MeshMutation {
@@ -911,6 +920,14 @@ mod wal_batch_integration_tests {
                 ..
             }
         )));
+
+        store.traffic.ram_limit_mb.store(16, Ordering::Relaxed);
+        service.reconcile_mesh_projection().await;
+        assert!(matches!(
+            store.get(&ip),
+            Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+        ));
+        assert!(!service.mesh_projection_pending.contains(&ip));
 
         sender.shutdown();
         receiver.shutdown();
