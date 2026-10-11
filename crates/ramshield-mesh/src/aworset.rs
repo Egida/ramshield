@@ -174,11 +174,13 @@ impl AworsetBlocklist {
         }
     }
 
-    /// Record a local ban. Returns the delta to broadcast to peers.
-    pub fn record_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
+    /// Prepare a local ban without publishing it into the CRDT.
+    ///
+    /// The caller can append this exact dot to the WAL first, then call
+    /// `merge_delta` to make it visible. A failed WAL append may leave a gap
+    /// in the local counter; gaps are safe, reusing a dot is not.
+    pub fn prepare_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
         let (created_at_ms, _) = self.hlc.tick(0, 0);
-        // Never reuse an operation dot when physical time advances. Exhaustion
-        // fails closed instead of wrapping and silently violating CRDT identity.
         let previous = self
             .next_dot_counter
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -192,23 +194,78 @@ impl AworsetBlocklist {
             created_at_ms.saturating_add(ttl_ms)
         };
 
-        let dot = ClusterDot {
-            node_id: self.node_id,
-            incarnation: self.incarnation,
-            counter,
-        };
-        self.entries.insert(
-            (ip, self.node_id, self.incarnation),
-            (counter, created_at_ms, expires_at_ms, tier),
-        );
-
         ClusterBlockDelta {
             ip,
-            dot,
+            dot: ClusterDot {
+                node_id: self.node_id,
+                incarnation: self.incarnation,
+                counter,
+            },
             created_at_ms,
             expires_at_ms,
             tier,
         }
+    }
+
+    /// Record a local ban immediately. WAL-first callers should use
+    /// `prepare_ban`, persist the returned delta, then merge it.
+    pub fn record_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
+        let delta = self.prepare_ban(ip, ttl_ms, tier);
+        self.merge_delta(&delta);
+        delta
+    }
+
+    /// Return tombstones for all currently observed dots without mutating state.
+    /// Persist these before applying them when the WAL is authoritative.
+    pub fn prepare_unban(&self, ip: IpAddr) -> Vec<ClusterUnblockDelta> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.key().0 == ip)
+            .map(|entry| ClusterUnblockDelta {
+                ip,
+                dot: ClusterDot {
+                    node_id: entry.key().1,
+                    incarnation: entry.key().2,
+                    counter: entry.value().0,
+                },
+            })
+            .collect()
+    }
+
+    /// Whether applying a block delta would add information not already retained.
+    pub fn needs_merge_delta(&self, delta: &ClusterBlockDelta) -> bool {
+        if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
+            return false;
+        }
+        let key = (delta.ip, delta.dot.node_id, delta.dot.incarnation);
+        if self
+            .tombstones
+            .get(&key)
+            .is_some_and(|counter| delta.dot.counter <= *counter)
+        {
+            return false;
+        }
+        self.entries
+            .get(&key)
+            .is_none_or(|entry| delta.dot.counter > entry.value().0)
+    }
+
+    /// Whether applying an unblock delta would add a new tombstone or remove
+    /// a still-live older dot.
+    pub fn needs_merge_unblock(&self, delta: &ClusterUnblockDelta) -> bool {
+        if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
+            return false;
+        }
+        let key = (delta.ip, delta.dot.node_id, delta.dot.incarnation);
+        let tombstone_is_newer = self
+            .tombstones
+            .get(&key)
+            .is_none_or(|counter| delta.dot.counter > *counter);
+        let removes_live_dot = self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.value().0 <= delta.dot.counter);
+        tombstone_is_newer || removes_live_dot
     }
 
     /// Absorb a peer delta. True if it changed local state.
@@ -307,28 +364,9 @@ impl AworsetBlocklist {
     /// Callers must gossip the returned delta; removing the local entry alone
     /// cannot make an AWORSet converge across peers.
     pub fn record_unban(&self, ip: IpAddr) -> Vec<ClusterUnblockDelta> {
-        let observed: Vec<(u32, Uuid, u64)> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.key().0 == ip)
-            .map(|entry| (entry.key().1, entry.key().2, entry.value().0))
-            .collect();
-        let mut deltas = Vec::with_capacity(observed.len());
-        for (node_id, incarnation, counter) in observed {
-            let key = (ip, node_id, incarnation);
-            self.entries.remove(&key);
-            self.tombstones
-                .entry(key)
-                .and_modify(|existing| *existing = (*existing).max(counter))
-                .or_insert(counter);
-            deltas.push(ClusterUnblockDelta {
-                ip,
-                dot: ClusterDot {
-                    node_id,
-                    incarnation,
-                    counter,
-                },
-            });
+        let deltas = self.prepare_unban(ip);
+        for delta in &deltas {
+            self.merge_unblock_delta(delta);
         }
         deltas
     }
