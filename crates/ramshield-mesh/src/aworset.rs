@@ -447,6 +447,31 @@ impl AworsetBlocklist {
         }
     }
 
+    /// Effective block TTL per IP, taking the longest-lived origin dot.
+    /// A zero TTL denotes at least one permanent active dot.
+    pub fn active_block_ttls(&self, now_ms: u64) -> Vec<(IpAddr, u64)> {
+        let mut deadlines = std::collections::HashMap::<IpAddr, u64>::new();
+        for entry in self.entries.iter().filter(|entry| entry.value().2 > now_ms) {
+            deadlines
+                .entry(entry.key().0)
+                .and_modify(|deadline| *deadline = (*deadline).max(entry.value().2))
+                .or_insert(entry.value().2);
+        }
+        let mut blocks: Vec<_> = deadlines
+            .into_iter()
+            .map(|(ip, deadline)| {
+                let ttl_secs = if deadline == u64::MAX {
+                    0
+                } else {
+                    deadline.saturating_sub(now_ms).saturating_add(999) / 1000
+                };
+                (ip, ttl_secs)
+            })
+            .collect();
+        blocks.sort_by_key(|(ip, _)| *ip);
+        blocks
+    }
+
     /// Current unexpired IPs represented by at least one active origin dot.
     pub fn active_ips(&self, now_ms: u64) -> std::collections::HashSet<IpAddr> {
         self.entries
