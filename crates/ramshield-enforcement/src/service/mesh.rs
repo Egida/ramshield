@@ -9,6 +9,7 @@ pub(crate) struct MeshApplyReport {
     pub applied: usize,
     pub ignored: usize,
     pub failed: usize,
+    pub state_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,11 +22,13 @@ impl MeshApplyReport {
     fn record(
         &mut self,
         result: Result<MeshApplyOutcome, EnforcementError>,
+        state_changed: bool,
         peer_node_id: u32,
         ip: std::net::IpAddr,
         action: &'static str,
     ) {
         self.received += 1;
+        self.state_changed |= state_changed;
         match result {
             Ok(MeshApplyOutcome::Applied) => self.applied += 1,
             Ok(MeshApplyOutcome::Ignored) => self.ignored += 1,
@@ -62,30 +65,35 @@ impl EnforcementService {
                 MeshMessage::Block(delta) => {
                     let peer_node_id = delta.dot.node_id;
                     let ip = delta.ip;
-                    let result = self.apply_mesh_block(delta, now_ms).await;
-                    report.record(result, peer_node_id, ip, "block");
+                    let (state_changed, result) = self.apply_mesh_block(delta, now_ms).await;
+                    report.record(result, state_changed, peer_node_id, ip, "block");
                 }
                 MeshMessage::Unblock(delta) => {
                     let peer_node_id = delta.dot.node_id;
                     let ip = delta.ip;
-                    let result = self.apply_mesh_unblock(delta, now_ms).await;
-                    report.record(result, peer_node_id, ip, "unblock");
+                    let (state_changed, result) = self.apply_mesh_unblock(delta, now_ms).await;
+                    report.record(result, state_changed, peer_node_id, ip, "unblock");
                 }
                 MeshMessage::Sync { blocks, unblocks } => {
                     for delta in blocks {
                         let peer_node_id = delta.dot.node_id;
                         let ip = delta.ip;
-                        let result = self.apply_mesh_block(delta, now_ms).await;
-                        report.record(result, peer_node_id, ip, "sync_block");
+                        let (state_changed, result) = self.apply_mesh_block(delta, now_ms).await;
+                        report.record(result, state_changed, peer_node_id, ip, "sync_block");
                     }
                     for delta in unblocks {
                         let peer_node_id = delta.dot.node_id;
                         let ip = delta.ip;
-                        let result = self.apply_mesh_unblock(delta, now_ms).await;
-                        report.record(result, peer_node_id, ip, "sync_unblock");
+                        let (state_changed, result) = self.apply_mesh_unblock(delta, now_ms).await;
+                        report.record(result, state_changed, peer_node_id, ip, "sync_unblock");
                     }
                 }
             }
+        }
+        // Notify only after processing a batch that changed the CRDT. A merge
+        // still needs propagation if its later enforcement/XDP projection fails.
+        if report.state_changed {
+            handle.notify_remote_state_applied().await;
         }
         if report.failed > 0 {
             tracing::warn!(
@@ -103,22 +111,22 @@ impl EnforcementService {
         &mut self,
         delta: ramshield_mesh::aworset::ClusterBlockDelta,
         now_ms: u64,
-    ) -> Result<MeshApplyOutcome, EnforcementError> {
+    ) -> (bool, Result<MeshApplyOutcome, EnforcementError>) {
         if delta.expires_at_ms <= now_ms {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (false, Ok(MeshApplyOutcome::Ignored));
         }
         let Some(mesh) = &self.mesh_blocklist else {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (false, Ok(MeshApplyOutcome::Ignored));
         };
         if self.mesh_operator_suppressions.contains(&delta.ip) {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (false, Ok(MeshApplyOutcome::Ignored));
         }
         // CRDT state can be merged before enforcement fails (e.g. WAL
         // append or storage error). Retry an unchanged delta until its
         // projection has succeeded; only skip duplicates already applied.
         let changed = mesh.merge_delta(&delta);
         if should_skip_mesh_block(changed, self.mesh_applied_ips.contains(&delta.ip)) {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (changed, Ok(MeshApplyOutcome::Ignored));
         }
         let remaining_ms = delta.expires_at_ms.saturating_sub(now_ms);
         let ttl = if delta.expires_at_ms == u64::MAX {
@@ -127,7 +135,7 @@ impl EnforcementService {
             remaining_ms.saturating_add(999) / 1000
         };
         if delta.expires_at_ms != u64::MAX && ttl == 0 {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (changed, Ok(MeshApplyOutcome::Ignored));
         }
         let cmd = EnforceCommand {
             decision_id: Uuid::new_v4(),
@@ -149,24 +157,24 @@ impl EnforcementService {
         if enforce_result.is_ok() {
             self.mesh_applied_ips.insert(delta.ip);
         }
-        enforce_result.map(|_| MeshApplyOutcome::Applied)
+        (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
 
     async fn apply_mesh_unblock(
         &mut self,
         delta: ramshield_mesh::aworset::ClusterUnblockDelta,
         now_ms: u64,
-    ) -> Result<MeshApplyOutcome, EnforcementError> {
+    ) -> (bool, Result<MeshApplyOutcome, EnforcementError>) {
         let Some(mesh) = &self.mesh_blocklist else {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (false, Ok(MeshApplyOutcome::Ignored));
         };
         // As with blocks, retain retryability if the tombstone was
         // merged but the local enforcement unblock failed.
-        mesh.merge_unblock_delta(&delta);
+        let changed = mesh.merge_unblock_delta(&delta);
         let still_blocked = mesh.is_blocked(&delta.ip, now_ms);
         let locally_applied = self.mesh_applied_ips.contains(&delta.ip);
         if should_skip_mesh_unblock(still_blocked, locally_applied) {
-            return Ok(MeshApplyOutcome::Ignored);
+            return (changed, Ok(MeshApplyOutcome::Ignored));
         }
         let cmd = EnforceCommand {
             decision_id: Uuid::new_v4(),
@@ -188,7 +196,7 @@ impl EnforcementService {
         if enforce_result.is_ok() {
             self.mesh_applied_ips.remove(&delta.ip);
         }
-        enforce_result.map(|_| MeshApplyOutcome::Applied)
+        (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
     }
 }
 
@@ -244,10 +252,11 @@ mod retry_tests {
         let mut report = MeshApplyReport::default();
         let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
 
-        report.record(Ok(MeshApplyOutcome::Applied), 7, ip, "block");
-        report.record(Ok(MeshApplyOutcome::Ignored), 7, ip, "duplicate");
+        report.record(Ok(MeshApplyOutcome::Applied), false, 7, ip, "block");
+        report.record(Ok(MeshApplyOutcome::Ignored), false, 7, ip, "duplicate");
         report.record(
             Err(EnforcementError::Xdp("test projection failure".into())),
+            true,
             7,
             ip,
             "block",
@@ -257,6 +266,7 @@ mod retry_tests {
         assert_eq!(report.applied, 1);
         assert_eq!(report.ignored, 1);
         assert_eq!(report.failed, 1);
+        assert!(report.state_changed, "a CRDT merge must trigger repair even if projection fails");
     }
 
     #[test]
