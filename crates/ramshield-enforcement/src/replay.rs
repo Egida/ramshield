@@ -82,7 +82,12 @@ pub fn replay_wal_into_store_seeded(
                             let deadline = expires_at_ms;
                             blocked.insert(
                                 ip,
-                                (BlockReason::from_reason_str("mesh_final").unwrap_or(BlockReason::ManualBlock), created_at_ms.saturating_mul(1_000_000), deadline.map(|ms| ms.saturating_mul(1_000_000))),
+                                (
+                                    BlockReason::from_reason_str("mesh_final")
+                                        .unwrap_or(BlockReason::ManualBlock),
+                                    created_at_ms.saturating_mul(1_000_000),
+                                    deadline.map(|ms| ms.saturating_mul(1_000_000)),
+                                ),
                             );
                         }
                         ramshield_storage::wal::MeshMutationAction::Unblock => {
