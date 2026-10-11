@@ -1,0 +1,170 @@
+name: Mesh Acceptance Watch
+
+# Automatic evidence collection for mesh acceptance. This workflow never deploys
+# or enables mesh. Each lane runs independently so one failure does not cancel
+# the remaining diagnostics.
+on:
+  push:
+    branches: [audit-branch, 'mesh/**', 'automation/mesh-acceptance-watch-**']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/ramshield-mesh/**'
+      - 'crates/ramshield-enforcement/**'
+      - 'src/**'
+      - '.github/workflows/mesh-acceptance-watch.yml'
+  pull_request:
+    branches: [audit-branch]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/ramshield-mesh/**'
+      - 'crates/ramshield-enforcement/**'
+      - 'src/**'
+      - '.github/workflows/mesh-acceptance-watch.yml'
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mesh-acceptance-watch-${{ github.event_name == 'schedule' && 'nightly-audit-branch' || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  TOOLCHAIN: nightly-2026-08-29
+
+jobs:
+  core:
+    name: CORE — feature-off regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'audit-branch' || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-29
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Record candidate SHA
+        run: |
+          echo "Candidate SHA: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Workspace core tests
+        run: cargo test --workspace --locked
+      - name: Core-only strict Clippy
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - name: Always summarize core result
+        if: always()
+        run: echo "CORE result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  mesh:
+    name: MESH — isolated crate and all targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'audit-branch' || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-29
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Mesh crate tests
+        run: cargo test --locked -p ramshield-mesh
+      - name: Mesh crate all targets
+        run: cargo test --locked -p ramshield-mesh --all-targets
+      - name: Always summarize mesh result
+        if: always()
+        run: echo "MESH result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  integration:
+    name: INTEGRATION — mesh/full/all-feature matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'audit-branch' || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-29
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install CI-matched bpf-linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.1/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C /tmp
+          sudo mv /tmp/bpf-linker /usr/local/bin/
+          bpf-linker --version
+      - name: Mesh feature integration
+        run: cargo test --workspace --locked --features mesh
+      - name: Full feature integration
+        run: cargo test --workspace --locked --features full
+      - name: All-feature integration
+        run: cargo test --workspace --locked --all-features
+      - name: All-feature strict Clippy
+        run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+      - name: Always summarize integration result
+        if: always()
+        run: echo "INTEGRATION result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  quality:
+    name: QUALITY — formatting and whitespace
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'audit-branch' || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-08-29
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Diff whitespace
+        if: github.event_name != 'schedule'
+        run: git diff --check ${{ github.event.pull_request.base.sha || github.event.before }}...HEAD
+      - name: Always summarize quality result
+        if: always()
+        run: echo "QUALITY result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: REPORT — consolidate lane outcomes
+    if: always()
+    needs: [core, mesh, integration, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write acceptance report
+        shell: bash
+        run: |
+          {
+            echo "# Mesh acceptance watch"
+            echo "- Event: ${{ github.event_name }}"
+            echo "- Requested SHA: ${{ github.sha }}"
+            echo "- Candidate: ${{ github.event_name == 'schedule' && 'audit-branch HEAD checked out by each lane' || github.sha }}"
+            echo "- CORE: ${{ needs.core.result }}"
+            echo "- MESH: ${{ needs.mesh.result }}"
+            echo "- INTEGRATION: ${{ needs.integration.result }}"
+            echo "- QUALITY: ${{ needs.quality.result }}"
+            echo "- Production mesh enablement: NOT performed"
+            echo
+            echo "A failed lane does not cancel independent lanes. Inspect the first failing step, fix the root cause, and rerun the affected workflow automatically on the next push."
+          } >> "$GITHUB_STEP_SUMMARY"
