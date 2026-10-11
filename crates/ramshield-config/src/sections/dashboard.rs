@@ -50,7 +50,7 @@ pub struct DashboardConfig {
     pub cookie_secure: Option<bool>,
     /// Max concurrent Argon2 hash operations (default 4). Prevents a flood of
     /// bad logins from saturating the blocking pool with 100ms CPU-bound hashes.
-    /// 0 = unlimited (original behavior).
+    /// Values below 1 are clamped to 1; zero never disables the bound.
     #[serde(default = "default_argon2_parallelism")]
     pub argon2_parallelism: u32,
 }
