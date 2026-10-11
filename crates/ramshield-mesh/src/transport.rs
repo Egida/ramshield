@@ -270,7 +270,8 @@ impl MeshHandle {
                             warn!(peer = %peer, "mesh outbound send timed out");
                         }
                         PeerSendOutcome::Cancelled => {
-                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed)
+                                .await;
                             debug!(peer = %peer, "mesh outbound send cancelled");
                         }
                         PeerSendOutcome::Failed { message } => {
@@ -337,10 +338,7 @@ impl MeshHandle {
             states
                 .iter_mut()
                 .filter_map(|(peer, state)| {
-                    state
-                        .planner
-                        .take_due(now)
-                        .map(|_| (*peer, state.cursor))
+                    state.planner.take_due(now).map(|_| (*peer, state.cursor))
                 })
                 .collect()
         };
