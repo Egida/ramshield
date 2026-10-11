@@ -38,6 +38,77 @@ fn xdp_capability_hint() -> String {
     )
 }
 
+#[cfg(feature = "mesh")]
+fn restore_mesh_crdt_from_wal(
+    mesh: &AworsetBlocklist,
+    wal: &Wal,
+) -> std::io::Result<()> {
+    use ramshield_mesh::aworset::{ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
+    use ramshield_storage::wal::{MeshMutationAction, WalEntry};
+
+    let entries = wal
+        .replay()
+        .map_err(|error| std::io::Error::other(format!("mesh WAL replay failed: {error}")))?;
+    let mut restored = 0usize;
+    for entry in entries {
+        let WalEntry::MeshMutation {
+            schema_version,
+            origin_node_id,
+            origin_incarnation,
+            origin_counter,
+            ip,
+            action,
+            created_at_ms,
+            expires_at_ms,
+            tier,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        if schema_version != 1 || origin_node_id == 0 || origin_counter == 0 {
+            return Err(std::io::Error::other(format!(
+                "unsupported mesh WAL event: schema={schema_version}, node={origin_node_id}, counter={origin_counter}"
+            )));
+        }
+        let ip: std::net::IpAddr = ip.parse().map_err(|error| {
+            std::io::Error::other(format!("invalid IP in mesh WAL event: {error}"))
+        })?;
+        let incarnation = uuid::Uuid::parse_str(&origin_incarnation).map_err(|error| {
+            std::io::Error::other(format!(
+                "invalid origin incarnation in mesh WAL event: {error}"
+            ))
+        })?;
+        if incarnation.is_nil() {
+            return Err(std::io::Error::other(
+                "nil origin incarnation in mesh WAL event",
+            ));
+        }
+        let dot = ClusterDot {
+            node_id: origin_node_id,
+            incarnation,
+            counter: origin_counter,
+        };
+        match action {
+            MeshMutationAction::Block => {
+                mesh.merge_delta(&ClusterBlockDelta {
+                    ip,
+                    dot,
+                    created_at_ms,
+                    expires_at_ms: expires_at_ms.unwrap_or(u64::MAX),
+                    tier,
+                });
+            }
+            MeshMutationAction::Unblock => {
+                mesh.merge_unblock_delta(&ClusterUnblockDelta { ip, dot });
+            }
+        }
+        restored += 1;
+    }
+    tracing::info!(restored, "mesh CRDT state reconstructed from WAL origin dots");
+    Ok(())
+}
+
 pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // FIX: use engine.config directly for live hot-reload — not a separate ArcSwap.
     // The old code did cfg_snapshot.clone().into_handle() which created a parallel
@@ -212,7 +283,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         enforcement_shutdown.clone(),
     );
     #[cfg(feature = "mesh")]
-    if let Some(mesh) = mesh_blocklist {
+    if let Some(mesh) = mesh_blocklist.clone() {
         enforcement = enforcement.with_mesh_blocklist(mesh);
     }
     #[cfg(feature = "mesh")]
@@ -268,6 +339,30 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                 } else {
                     false
                 };
+
+                // Mesh snapshots currently contain only the effective IP
+                // projection, not per-origin CRDT dots/tombstones. Until that
+                // schema is extended, a pruned WAL cannot safely reconstruct
+                // mesh convergence state, even if IP recovery has a snapshot.
+                #[cfg(feature = "mesh")]
+                if mesh_blocklist.is_some()
+                    && let Some(oldest) = wal.oldest_lsn()
+                    && oldest > 1
+                {
+                    if hard_wal {
+                        return Err(std::io::Error::other(format!(
+                            "mesh WAL history pruned (oldest_lsn={oldest}); refusing to start with incomplete CRDT provenance"
+                        )));
+                    }
+                    tracing::warn!(
+                        oldest_lsn = oldest,
+                        "mesh WAL history was pruned; CRDT recovery is partial until mesh state is included in checkpoints"
+                    );
+                }
+                #[cfg(feature = "mesh")]
+                if let Some(mesh) = mesh_blocklist.as_ref() {
+                    restore_mesh_crdt_from_wal(mesh, &wal)?;
+                }
 
                 // Hard-WAL invariant (PATCH 9): snapshot present but the WAL
                 // history it relies on has been pruned → recovery would start
