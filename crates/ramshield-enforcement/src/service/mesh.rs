@@ -266,7 +266,10 @@ mod retry_tests {
         assert_eq!(report.applied, 1);
         assert_eq!(report.ignored, 1);
         assert_eq!(report.failed, 1);
-        assert!(report.state_changed, "a CRDT merge must trigger repair even if projection fails");
+        assert!(
+            report.state_changed,
+            "a CRDT merge must trigger repair even if projection fails"
+        );
     }
 
     #[test]
