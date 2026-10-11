@@ -502,7 +502,6 @@ fn env_override_blank_synproxy_ports_clears_defaults() {
     clear_env_vars();
 }
 
-
 #[cfg(unix)]
 #[test]
 #[serial]
