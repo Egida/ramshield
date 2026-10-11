@@ -13,8 +13,8 @@
 ## Stage B — CRDT correctness (release-blocking)
 
 - [x] Add/remove/re-add for the same IP and node (same-process operation sequence).
-- [ ] Concurrent bans from different nodes; merge order independence.
-- [ ] Duplicate and reordered deltas are idempotent.
+- [x] Concurrent bans from different nodes; merge order independence.
+- [x] Duplicate and reordered deltas are idempotent.
 - [x] Old ban after unban is rejected; a genuinely newer ban after unban is accepted (same process).
 - [x] HLC physical-time advance cannot reuse a dot counter (64-bit process-local operation counter).
 - [ ] Restart/incarnation changes cannot collide with old dots. **Known blocker:** the operation counter is process-local; durable incarnation/counter recovery is not implemented.
