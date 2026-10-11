@@ -917,4 +917,3 @@ mod wal_batch_integration_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
-
