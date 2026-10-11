@@ -85,8 +85,7 @@ fn replay_wal_into_store_seeded_internal(
     // Reconstruct mesh provenance from the checkpoint seed plus the WAL tail.
     // Without a mesh seed, use the full retained WAL and let boot enforce that
     // retention has not pruned required history.
-    let (mesh_touched, mesh_active) =
-        replay_mesh_state(wal, min_lsn, mesh_seed.as_ref(), now_ns)?;
+    let (mesh_touched, mesh_active) = replay_mesh_state(wal, min_lsn, mesh_seed.as_ref(), now_ns)?;
     // Keep absolute deadlines throughout the fold. Converting a snapshot
     // deadline to whole seconds here loses precision and can resurrect a
     // nearly-expired block. Only convert to remaining seconds at the final
@@ -484,7 +483,8 @@ mod mesh_wal_replay_tests {
         }
         wal.sync().unwrap();
 
-        let (touched, active) = replay_mesh_state(&wal, 0, None, 1_800_000_000_000_000_000).unwrap();
+        let (touched, active) =
+            replay_mesh_state(&wal, 0, None, 1_800_000_000_000_000_000).unwrap();
         assert!(touched.contains(&ip));
         assert!(
             active.contains_key(&ip),
