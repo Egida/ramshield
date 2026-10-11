@@ -252,11 +252,7 @@ impl AworsetBlocklist {
 
     /// Whether another live origin dot would still block this IP after the
     /// supplied tombstone is applied.
-    pub fn would_be_blocked_after_unblock(
-        &self,
-        delta: &ClusterUnblockDelta,
-        now_ms: u64,
-    ) -> bool {
+    pub fn would_be_blocked_after_unblock(&self, delta: &ClusterUnblockDelta, now_ms: u64) -> bool {
         self.entries.iter().any(|entry| {
             if entry.key().0 != delta.ip || entry.value().2 <= now_ms {
                 return false;
