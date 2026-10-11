@@ -89,7 +89,7 @@ impl EnforcementService {
         let Some(handle) = self.mesh_handle.clone() else {
             return report;
         };
-        let messages = handle.drain().await;
+        let messages = handle.drain_with_ack().await;
         if messages.is_empty() {
             return report;
         }
@@ -97,18 +97,21 @@ impl EnforcementService {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        for message in messages {
-            match message {
+        for received in messages {
+            let mut ack_accepted = true;
+            match received.message {
                 MeshMessage::Block(delta) => {
                     let peer_node_id = delta.dot.node_id;
                     let ip = delta.ip;
                     let (state_changed, result) = self.apply_mesh_block(delta, now_ms).await;
+                    ack_accepted &= mesh_ackable(&result, self.wal.is_some());
                     report.record(result, state_changed, peer_node_id, ip, "block");
                 }
                 MeshMessage::Unblock(delta) => {
                     let peer_node_id = delta.dot.node_id;
                     let ip = delta.ip;
                     let (state_changed, result) = self.apply_mesh_unblock(delta, now_ms).await;
+                    ack_accepted &= mesh_ackable(&result, self.wal.is_some());
                     report.record(result, state_changed, peer_node_id, ip, "unblock");
                 }
                 MeshMessage::Sync { blocks, unblocks } => {
@@ -116,16 +119,19 @@ impl EnforcementService {
                         let peer_node_id = delta.dot.node_id;
                         let ip = delta.ip;
                         let (state_changed, result) = self.apply_mesh_block(delta, now_ms).await;
+                        ack_accepted &= mesh_ackable(&result, self.wal.is_some());
                         report.record(result, state_changed, peer_node_id, ip, "sync_block");
                     }
                     for delta in unblocks {
                         let peer_node_id = delta.dot.node_id;
                         let ip = delta.ip;
                         let (state_changed, result) = self.apply_mesh_unblock(delta, now_ms).await;
+                        ack_accepted &= mesh_ackable(&result, self.wal.is_some());
                         report.record(result, state_changed, peer_node_id, ip, "sync_unblock");
                     }
                 }
             }
+            received.acknowledge(ack_accepted);
         }
         // Notify only after processing a batch that changed the CRDT. A merge
         // still needs propagation if its later enforcement/XDP projection fails.
@@ -265,6 +271,20 @@ impl EnforcementService {
             self.mesh_applied_ips.remove(&delta.ip);
         }
         (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
+    }
+}
+
+fn mesh_ackable(
+    result: &Result<MeshApplyOutcome, EnforcementError>,
+    has_wal: bool,
+) -> bool {
+    match result {
+        Ok(MeshApplyOutcome::Ignored) => true,
+        Ok(MeshApplyOutcome::Applied) => has_wal,
+        Err(EnforcementError::Wal(_) | EnforcementError::InvalidCommand(_)) => false,
+        // Storage/XDP failures occur after the mesh event is durable and merged;
+        // the local reconciler retries the projection independently.
+        Err(_) => has_wal,
     }
 }
 
