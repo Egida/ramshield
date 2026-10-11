@@ -127,6 +127,9 @@ struct PeerSyncState {
     planner: ConditionSyncPlanner,
     cursor: Option<StateCursor>,
     delivery_failed: bool,
+    /// Invalidates an in-flight page when retention recovery requests a full
+    /// snapshot, preventing an older completion from overwriting cursor=None.
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -209,6 +212,7 @@ impl MeshHandle {
                                 planner,
                                 cursor: None,
                                 delivery_failed: false,
+                                generation: 0,
                             },
                         )
                     })
@@ -295,6 +299,7 @@ impl MeshHandle {
     pub async fn request_full_sync(&self, peer: SocketAddr) {
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
+            state.generation = state.generation.wrapping_add(1);
             state.cursor = None;
             state.planner.condition(SyncCondition::LocalMutation, now);
         }
@@ -464,7 +469,7 @@ impl MeshHandle {
 
     async fn broadcast_sync(&self) {
         let now = self.sync_epoch.elapsed();
-        let due_peers: Vec<(SocketAddr, Option<StateCursor>)> = {
+        let due_peers: Vec<(SocketAddr, Option<StateCursor>, u64)> = {
             let mut states = self.sync_states.lock().await;
             states
                 .iter_mut()
@@ -472,7 +477,7 @@ impl MeshHandle {
                     state
                         .planner
                         .take_due(now)
-                        .map(|_| (*peer, state.cursor.clone()))
+                        .map(|_| (*peer, state.cursor.clone(), state.generation))
                 })
                 .collect()
         };
@@ -483,31 +488,43 @@ impl MeshHandle {
         // One bounded page task per due peer. The shared writer semaphore caps
         // active network work; a slow peer cannot serialize all other peers.
         let mut tasks = JoinSet::new();
-        for (peer, cursor) in due_peers.iter().cloned() {
+        for (peer, cursor, generation) in due_peers.iter().cloned() {
             let handle = self.clone();
             tasks.spawn(async move {
                 let (next_cursor, success) = handle.send_sync_page(peer, cursor).await;
-                (peer, next_cursor, success)
+                (peer, next_cursor, success, generation)
             });
         }
 
         let mut completed = Vec::with_capacity(due_peers.len());
         while let Some(joined) = tasks.join_next().await {
             match joined {
-                Ok((peer, next_cursor, success)) => {
+                Ok((peer, next_cursor, success, generation)) => {
                     completed.push(peer);
                     let completed_at = self.sync_epoch.elapsed();
                     let mut states = self.sync_states.lock().await;
                     if let Some(state) = states.get_mut(&peer) {
-                        state.planner.complete(completed_at, success);
-                        state.delivery_failed = !success;
-                        if success {
-                            state.cursor = next_cursor;
-                            if state.cursor.is_some() {
-                                state
-                                    .planner
-                                    .condition(SyncCondition::LocalMutation, completed_at);
+                        if state.generation == generation {
+                            state.planner.complete(completed_at, success);
+                            state.delivery_failed = !success;
+                            if success {
+                                state.cursor = next_cursor;
+                                if state.cursor.is_some() {
+                                    state
+                                        .planner
+                                        .condition(SyncCondition::LocalMutation, completed_at);
+                                }
                             }
+                        } else {
+                            // A full sync was requested while this older page
+                            // was in flight. Release the planner but preserve
+                            // the reset cursor and schedule the full rotation.
+                            state.planner.complete(completed_at, true);
+                            state.delivery_failed = false;
+                            state.cursor = None;
+                            state
+                                .planner
+                                .condition(SyncCondition::LocalMutation, completed_at);
                         }
                     }
                 }
@@ -521,13 +538,22 @@ impl MeshHandle {
         // in-flight. Treat missing task outcomes as failed delivery.
         let completed_at = self.sync_epoch.elapsed();
         let mut states = self.sync_states.lock().await;
-        for (peer, _) in due_peers {
+        for (peer, _, generation) in due_peers {
             if completed.contains(&peer) {
                 continue;
             }
             if let Some(state) = states.get_mut(&peer) {
-                state.planner.complete(completed_at, false);
-                state.delivery_failed = true;
+                if state.generation == generation {
+                    state.planner.complete(completed_at, false);
+                    state.delivery_failed = true;
+                } else {
+                    state.planner.complete(completed_at, true);
+                    state.delivery_failed = false;
+                    state.cursor = None;
+                    state
+                        .planner
+                        .condition(SyncCondition::LocalMutation, completed_at);
+                }
             }
         }
     }
