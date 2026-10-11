@@ -388,7 +388,9 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
         MeshMessage::Sync { blocks, unblocks } => {
             blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
                 && blocks.iter().all(valid_block)
-                && unblocks.iter().all(|delta| delta.dot.node_id != 0)
+                && unblocks
+                    .iter()
+                    .all(|delta| delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil())
         }
     }
 }
@@ -672,6 +674,28 @@ mod frame_tests {
             tier: 1,
         };
         assert!(!valid_message(&MeshMessage::Block(delta), 1_000));
+    }
+
+    #[test]
+    fn rejects_missing_incarnation_in_block_and_unblock_messages() {
+        let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let now = now_ms();
+        let block = ClusterBlockDelta {
+            ip,
+            dot: ClusterDot {
+                node_id: 7,
+                incarnation: uuid::Uuid::nil(),
+                counter: 1,
+            },
+            created_at_ms: now,
+            expires_at_ms: now.saturating_add(60_000),
+            tier: 1,
+        };
+        assert!(!valid_message(&MeshMessage::Block(block.clone()), now));
+        assert!(!valid_message(
+            &MeshMessage::Unblock(ClusterUnblockDelta { ip, dot: block.dot }),
+            now
+        ));
     }
 
     #[test]
