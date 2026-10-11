@@ -17,7 +17,7 @@
 - [x] Duplicate and reordered deltas are idempotent.
 - [x] Old ban after unban is rejected; a genuinely newer ban after unban is accepted (same process).
 - [x] HLC physical-time advance cannot reuse a dot counter (64-bit process-local operation counter).
-- [ ] Restart/incarnation changes cannot collide with old dots. **Known blocker:** the operation counter is process-local; durable incarnation/counter recovery is not implemented.
+- [x] Restart/incarnation changes cannot collide with old dots in the same configured node ID: each blocklist instance gets a random UUID incarnation, and nil/missing incarnations are rejected.
 - [x] Regression: explicit-unban high-water mark survives the former GC horizon and rejects a replay.
 - [x] Regression: an expired active entry is converted to a high-water mark before pruning.
 - [ ] Expiry and purge cannot resurrect stale state after a peer is offline in every delivery ordering; requires multi-peer/offline convergence tests.
@@ -36,6 +36,7 @@
 
 - [ ] Invalid HMAC, truncated/invalid HMAC encoding, modified body, malformed JSON.
 - [ ] Replay of a previously valid envelope; duplicate semantics are explicit.
+- [x] Nil/missing incarnation is rejected for block, unblock, and sync deltas.
 - [ ] Self-origin, unknown node ID, counter extremes, invalid tier, invalid expiry, and timestamp boundaries.
 - [ ] Same-key node impersonation and key rotation are either prevented or documented as accepted trust assumptions.
 - [ ] Frame exactly at limit, one byte over, delimiter split across reads, clean EOF, partial EOF, CRLF, and multiple frames on one connection.
