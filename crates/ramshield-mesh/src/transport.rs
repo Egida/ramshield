@@ -999,6 +999,7 @@ mod frame_tests {
                                     blocklist_b.merge_unblock_delta(&delta);
                                 }
                             }
+                            MeshMessage::WalBatch { .. } => {}
                         }
                         received.acknowledge(true);
                     }
@@ -1040,6 +1041,7 @@ mod frame_tests {
                                     blocklist_a.merge_unblock_delta(&delta);
                                 }
                             }
+                            MeshMessage::WalBatch { .. } => {}
                         }
                         received.acknowledge(true);
                     }
