@@ -22,6 +22,8 @@ use crate::engine::checkpoint::{
     SnapshotRestore, build_snapshot, load_snapshot, restore_from_snapshot, snapshot_path,
     write_snapshot,
 };
+#[cfg(feature = "mesh")]
+use crate::engine::checkpoint::build_snapshot_with_mesh;
 use crate::forecasting::Forecaster;
 use crate::metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
