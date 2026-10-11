@@ -412,6 +412,8 @@ mod tests {
                 expires_at_ns: Some(past + 2_000_000_000), // expired 8s ago
             }],
             active_cidrs: vec![],
+            #[cfg(feature = "mesh")]
+            mesh_state: None,
         };
         let restored = restore_from_snapshot(&store, &snap);
         assert!(store.get(&ip).is_none(), "expired block must not resurrect");
