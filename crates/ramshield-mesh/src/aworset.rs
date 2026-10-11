@@ -118,7 +118,7 @@ pub struct AworsetBlocklist {
     node_id: u32,
     incarnation: Uuid,
     hlc: Hlc,
-    pub(crate) entries: DashMap<(IpAddr, u32, Uuid), (u64, u64, u64)>,
+    pub(crate) entries: DashMap<(IpAddr, u32, Uuid), (u64, u64, u64, u8)>,
     /// Per-key high-water marks. These are deliberately retained until a
     /// causal-stability/peer-acknowledgement protocol exists; timer-only GC can
     /// resurrect an old ban from a disconnected peer.
@@ -165,7 +165,7 @@ impl AworsetBlocklist {
         };
         self.entries.insert(
             (ip, self.node_id, self.incarnation),
-            (counter, created_at_ms, expires_at_ms),
+            (counter, created_at_ms, expires_at_ms, tier),
         );
 
         ClusterBlockDelta {
@@ -198,17 +198,18 @@ impl AworsetBlocklist {
         let mut inserted = false;
         self.entries
             .entry(key)
-            .and_modify(|(existing_seq, existing_created, existing_exp)| {
+            .and_modify(|(existing_seq, existing_created, existing_exp, existing_tier)| {
                 if delta.dot.counter > *existing_seq {
                     *existing_seq = delta.dot.counter;
                     *existing_created = delta.created_at_ms;
                     *existing_exp = delta.expires_at_ms;
+                    *existing_tier = delta.tier;
                     inserted = true;
                 }
             })
             .or_insert_with(|| {
                 inserted = true;
-                (delta.dot.counter, delta.created_at_ms, delta.expires_at_ms)
+                (delta.dot.counter, delta.created_at_ms, delta.expires_at_ms, delta.tier)
             });
 
         inserted
@@ -246,7 +247,7 @@ impl AworsetBlocklist {
             .entries
             .iter()
             .filter_map(|entry| {
-                let (_, _, expires_at_ms) = *entry.value();
+                let (_, _, expires_at_ms, _) = *entry.value();
                 (now_ms.saturating_sub(expires_at_ms) >= TOMBSTONE_HORIZON_MS)
                     .then_some((*entry.key(), entry.value().0))
             })
@@ -353,7 +354,7 @@ impl AworsetBlocklist {
                     },
                     created_at_ms: entry.value().1,
                     expires_at_ms: entry.value().2,
-                    tier: 1,
+                    tier: entry.value().3,
                 }),
             ));
         }
@@ -694,7 +695,7 @@ mod tests {
             let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
             mesh.entries.insert(
                 (block_ip, 7, block_incarnation),
-                (n as u64 + 1, 0, u64::MAX),
+                (n as u64 + 1, 0, u64::MAX, 2),
             );
 
             let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
@@ -718,10 +719,11 @@ mod tests {
     fn snapshot_carries_active_dot_and_tombstone() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
-        let ban = mesh.record_ban(ip, 60_000, 1);
+        let ban = mesh.record_ban(ip, 60_000, 3);
         let (blocks, _) = mesh.snapshot(16);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].dot, ban.dot);
+        assert_eq!(blocks[0].tier, ban.tier);
         let unblocks = mesh.record_unban(ip);
         assert_eq!(unblocks.len(), 1);
         let (_, tombstones) = mesh.snapshot(16);
