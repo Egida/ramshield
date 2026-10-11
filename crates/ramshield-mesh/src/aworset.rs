@@ -349,6 +349,15 @@ impl AworsetBlocklist {
         self.entries.is_empty()
     }
 
+    /// Current unexpired IPs represented by at least one active origin dot.
+    pub fn active_ips(&self, now_ms: u64) -> std::collections::HashSet<IpAddr> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.value().2 > now_ms)
+            .map(|entry| entry.key().0)
+            .collect()
+    }
+
     /// Prune expired active entries while preserving a per-key high-water mark.
     ///
     /// An elapsed timer is not proof that every disconnected peer has observed
