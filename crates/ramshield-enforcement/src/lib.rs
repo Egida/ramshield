@@ -116,6 +116,9 @@ pub struct EnforcementService {
     mesh_wal_cursors: Arc<StdMutex<HashMap<SocketAddr, u64>>>,
     #[cfg(feature = "mesh")]
     mesh_wal_inflight: Arc<StdMutex<HashSet<SocketAddr>>>,
+    /// IPs whose durable mesh state still needs Store projection repair.
+    #[cfg(feature = "mesh")]
+    mesh_projection_pending: HashSet<IpAddr>,
     /// Checkpoint coordination: barrier + absolute-deadline mirror. None =
     /// engine never attached one (standalone use, tests).
     checkpoint_shared: Option<Arc<CheckpointShared>>,
@@ -155,6 +158,8 @@ impl EnforcementService {
             mesh_wal_cursors: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(feature = "mesh")]
             mesh_wal_inflight: Arc::new(StdMutex::new(HashSet::new())),
+            #[cfg(feature = "mesh")]
+            mesh_projection_pending: HashSet::new(),
             checkpoint_shared: None,
         }
     }
