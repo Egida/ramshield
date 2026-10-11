@@ -68,9 +68,9 @@ pub enum MeshMessage {
     },
 }
 
-/// Result of attempting to write a mesh message to one configured peer.
-/// `Written` confirms the frame was written to the peer's TCP socket; it does
-/// not confirm that the peer authenticated, accepted, or applied the message.
+/// Result of attempting to deliver a mesh message to one configured peer.
+/// `Written` means the receiver returned an authenticated application ACK after
+/// durable acceptance (or intentional stale/policy rejection), not just TCP write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerSendOutcome {
     Written,
@@ -87,7 +87,7 @@ pub struct PeerSendResult {
 }
 
 /// A broadcast is successful only for peers whose outcome is `Written`.
-/// Application success is reported separately by the receiving enforcement service.
+/// This requires the receiver's authenticated application acknowledgement.
 #[must_use = "inspect per-peer mesh delivery outcomes"]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BroadcastReport {
