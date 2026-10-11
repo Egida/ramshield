@@ -190,7 +190,8 @@ impl ConditionSyncPlanner {
                 .min(self.policy.retry_max);
             self.retry_at = Some(now.saturating_add(delay));
             self.dirty_since.get_or_insert(now);
-            self.forced_reason.get_or_insert(SyncReason::DeliveryRecovery);
+            // A failed pass is more urgent than a coalesced state-change trigger.
+            self.forced_reason = Some(SyncReason::DeliveryRecovery);
         }
     }
 
@@ -275,6 +276,17 @@ mod tests {
         p.condition(SyncCondition::LocalMutation, ms(1));
         p.complete(ms(10), true);
         assert_eq!(p.take_due(ms(50)), Some(SyncReason::StateChanged));
+    }
+
+    #[test]
+    fn failed_pass_promotes_pending_work_to_recovery_reason() {
+        let mut p = planner();
+        p.condition(SyncCondition::PeerReconnected, ms(0));
+        assert_eq!(p.take_due(ms(0)), Some(SyncReason::PeerReconnected));
+        p.condition(SyncCondition::LocalMutation, ms(1));
+        p.complete(ms(10), false);
+        assert_eq!(p.take_due(ms(109)), None);
+        assert_eq!(p.take_due(ms(110)), Some(SyncReason::DeliveryRecovery));
     }
 
     #[test]
