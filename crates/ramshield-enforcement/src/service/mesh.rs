@@ -286,6 +286,97 @@ impl EnforcementService {
         }
     }
 
+    /// Reconcile the durable CRDT projection back into the local Store.
+    /// WAL/CRDT commit and Store/XDP projection are separate failure domains;
+    /// this pass repairs Store drift without inventing new origin dots.
+    pub(crate) async fn reconcile_mesh_projection(&mut self) {
+        let Some(mesh) = self.mesh_blocklist.clone() else {
+            return;
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let active_blocks = mesh.active_block_ttls(now_ms);
+        let active_ips: std::collections::HashSet<_> =
+            active_blocks.iter().map(|(ip, _)| *ip).collect();
+
+        for (ip, ttl_seconds) in active_blocks {
+            if self.mesh_operator_suppressions.contains(&ip) {
+                continue;
+            }
+            let store_blocked = matches!(
+                self.store.get(&ip),
+                Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+            );
+            if store_blocked {
+                self.mesh_applied_ips.insert(ip);
+                continue;
+            }
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "mesh".into(),
+                actor: "mesh-projection-reconciler".into(),
+                timestamp_utc: (now_ms / 1000) as i64,
+                ttl_seconds,
+                reason: "mesh_final".into(),
+                ip,
+                cidr: None,
+                action: EnforceAction::Block,
+                evidence_source: ramshield_types::EvidenceSource::FleetSignals,
+            };
+            if let Err(error) = self.enforce(cmd).await {
+                warn!(ip = %ip, error = %error, "mesh-to-Store block reconciliation failed");
+            }
+            if matches!(
+                self.store.get(&ip),
+                Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+            ) {
+                self.mesh_applied_ips.insert(ip);
+            }
+        }
+
+        let stale: Vec<_> = self
+            .mesh_applied_ips
+            .iter()
+            .copied()
+            .filter(|ip| !active_ips.contains(ip))
+            .collect();
+        for ip in stale {
+            let store_blocked = matches!(
+                self.store.get(&ip),
+                Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+            );
+            if !store_blocked {
+                self.mesh_applied_ips.remove(&ip);
+                continue;
+            }
+            let cmd = EnforceCommand {
+                decision_id: Uuid::new_v4(),
+                policy_version: 1,
+                source: "mesh".into(),
+                actor: "mesh-projection-reconciler".into(),
+                timestamp_utc: (now_ms / 1000) as i64,
+                ttl_seconds: 0,
+                reason: "mesh_purge".into(),
+                ip,
+                cidr: None,
+                action: EnforceAction::Unblock,
+                evidence_source: ramshield_types::EvidenceSource::FleetSignals,
+            };
+            if let Err(error) = self.enforce(cmd).await {
+                warn!(ip = %ip, error = %error, "mesh-to-Store unblock reconciliation failed");
+            }
+            if !matches!(
+                self.store.get(&ip),
+                Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+            ) {
+                self.mesh_applied_ips.remove(&ip);
+            }
+        }
+    }
+
     pub(crate) async fn apply_mesh_messages(&mut self) -> MeshApplyReport {
         let mut report = MeshApplyReport::default();
         let Some(handle) = self.mesh_handle.clone() else {
@@ -476,7 +567,10 @@ impl EnforcementService {
             self.enforce(cmd).await
         }
         .and_then(|result| require_xdp_projection(result, "block"));
-        if enforce_result.is_ok() {
+        if matches!(
+            self.store.get(&delta.ip),
+            Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+        ) {
             self.mesh_applied_ips.insert(delta.ip);
         }
         (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
@@ -532,7 +626,10 @@ impl EnforcementService {
             self.enforce(cmd).await
         }
         .and_then(|result| require_xdp_projection(result, "unblock"));
-        if enforce_result.is_ok() {
+        if !matches!(
+            self.store.get(&delta.ip),
+            Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+        ) {
             self.mesh_applied_ips.remove(&delta.ip);
         }
         (changed, enforce_result.map(|_| MeshApplyOutcome::Applied))
