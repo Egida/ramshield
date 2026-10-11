@@ -1,4 +1,5 @@
 use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterUnblockDelta};
+use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -16,7 +17,6 @@ use tokio::{
     task::JoinSet,
     time::MissedTickBehavior,
 };
-use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use tracing::{debug, warn};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -265,7 +265,8 @@ impl MeshHandle {
                             self.note_peer_success(peer).await;
                         }
                         PeerSendOutcome::TimedOut => {
-                            self.condition_peer(peer, SyncCondition::DeliveryFailed).await;
+                            self.condition_peer(peer, SyncCondition::DeliveryFailed)
+                                .await;
                             warn!(peer = %peer, "mesh outbound send timed out");
                         }
                         PeerSendOutcome::Cancelled => {
@@ -378,7 +379,9 @@ impl MeshHandle {
                     if page.next_cursor != 0 {
                         // Continue large snapshots promptly, but coalesce page
                         // work so this remains bounded by the scheduler tick.
-                        state.planner.condition(SyncCondition::LocalMutation, completed_at);
+                        state
+                            .planner
+                            .condition(SyncCondition::LocalMutation, completed_at);
                     }
                 }
             }
