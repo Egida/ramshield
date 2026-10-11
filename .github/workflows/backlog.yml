@@ -46,6 +46,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Backlog gate contract regression tests
+        run: |
+          set -euo pipefail
+          bash scripts/test_backlog_gate_guard.sh
+          bash scripts/test_backlog_diff_check.sh
+
       - name: Record SHAs
         id: meta
         run: |
@@ -221,27 +227,13 @@ jobs:
       - name: Fetch master for compare
         run: |
           set -euo pipefail
-          git fetch --no-tags origin master:refs/remotes/origin/master \
-            || git fetch --no-tags origin main:refs/remotes/origin/master
-          if ! git merge-base --is-ancestor origin/master HEAD \
-            && ! git merge-base origin/master HEAD >/dev/null 2>&1; then
-            echo "No merge-base with origin/master; falling back to HEAD-only whitespace scan of tracked files."
-            echo "FALLBACK=1" >> "$GITHUB_ENV"
-          else
-            echo "FALLBACK=0" >> "$GITHUB_ENV"
-            git merge-base origin/master HEAD
+          if ! git fetch --no-tags origin master:refs/remotes/origin/master; then
+            echo "origin/master fetch failed; trying origin/main." >&2
+            git fetch --no-tags origin main:refs/remotes/origin/master
           fi
+          git rev-parse --verify 'origin/master^{commit}' >/dev/null
       - name: git diff --check
-        run: |
-          set -euo pipefail
-          if [ "${FALLBACK:-0}" = "1" ]; then
-            # Still catch whitespace errors in the working tree tip files.
-            git diff --check -- $(git ls-files '*.rs' '*.toml' '*.md' '*.yml' '*.yaml' '*.sh') || true
-            git diff --cached --check || true
-            # Compare against empty tree for added paths is noisy; require clean tip vs index only.
-            exit 0
-          fi
-          git diff --check origin/master...HEAD
+        run: bash scripts/check_backlog_diff.sh origin/master HEAD
 
   evidence:
     name: Evidence manifest
@@ -249,6 +241,10 @@ jobs:
     needs: [inventory, fmt, tpacket, core-matrix, shm_abi, diff-check]
     if: always()
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Write evidence
         run: |
           set -euo pipefail
@@ -378,26 +374,23 @@ jobs:
           cat evidence/failure-research/reassessment.md >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
-      - uses: actions/upload-artifact@v4
+      - name: Enforce required gate results
+        env:
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          FORMAT_RESULT: ${{ needs.fmt.result }}
+          TPACKET_RESULT: ${{ needs.tpacket.result }}
+          CORE_MATRIX_RESULT: ${{ needs.core-matrix.result }}
+          SHM_ABI_RESULT: ${{ needs.shm_abi.result }}
+          DIFF_CHECK_RESULT: ${{ needs.diff-check.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_FULL_WORKSPACE: ${{ github.event.inputs.run_full_workspace || '' }}
+          EVIDENCE_STATUS_PATH: evidence/acceptance-status.md
+        run: bash scripts/backlog_gate_guard.sh
+
+      - name: Upload backlog evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: backlog-evidence-${{ github.sha }}
           path: evidence/
           retention-days: 30
-
-      - name: Fail if required gates failed
-        run: |
-          set -euo pipefail
-          fail=0
-          for r in \
-            "${{ needs.fmt.result }}" \
-            "${{ needs.tpacket.result }}" \
-            "${{ needs.core-matrix.result }}" \
-            "${{ needs.shm_abi.result }}" \
-            "${{ needs.diff-check.result }}"
-          do
-            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
-              echo "Required gate result: $r"
-              fail=1
-            fi
-          done
-          exit "$fail"
