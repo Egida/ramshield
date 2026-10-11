@@ -1,6 +1,6 @@
 # Condition-driven mesh sync prototype
 
-**Status:** isolated prototype; not wired into the TCP transport and not production-ready.
+**Status:** integrated transport prototype; exact-SHA acceptance and network-level convergence tests are still required. Not production-ready.
 
 **Branch:** `prototype/condition-driven-mesh-sync-20261011`
 
@@ -19,7 +19,7 @@ Replace unconditional full-state anti-entropy every two seconds with a per-peer 
 | Incoming queue overflow | Request repair because a delta may have been dropped |
 | Periodic repair deadline | Run a safety-net sync even if no trigger was observed |
 
-Defaults are prototype values: 50 ms coalescing, 30 s repair interval, 250 ms initial retry, and 10 s maximum retry delay. Tests use short deterministic durations. Scheduling uses monotonic elapsed time, not wall-clock time.
+Defaults are prototype values: 50 ms coalescing, 30 s repair interval, 250 ms initial retry, and 10 s maximum retry delay. The transport scheduler wakes every 25 ms with delayed missed-tick behavior; tests use short deterministic durations. Scheduling uses monotonic elapsed time, not wall-clock time.
 
 ## State-machine contract
 
@@ -33,17 +33,30 @@ Each configured peer owns one `ConditionSyncPlanner`.
 6. A condition arriving during an in-flight pass remains pending; completion of the older pass cannot erase it.
 7. Periodic repair remains mandatory because notifications can be missed and a successful socket write is not proof that remote state was applied.
 
-## Critical integration work still required
+## Current transport integration
 
-This module is only a tested policy state machine. The current transport still runs unconditional global sync and has no per-peer acknowledgements or durable delivery cursors. Do not claim network-level conditional sync until a follow-up integration:
+The prototype is wired into `MeshHandle` on this branch:
 
-- gives every peer its own planner and sync task;
-- wires local mutation, applied remote state, reconnect, send failure, and queue-overflow signals into that peer's planner;
-- makes snapshot pages fair per peer rather than advancing one shared cursor for all peers;
-- distinguishes bytes-written from authenticated/applied acknowledgement, if acknowledgements are introduced;
-- keeps state changes that happen during a snapshot dirty for the next pass;
-- proves recovery after packet loss, disconnection, process restart, more than 4,096 entries/tombstones, and a saturated inbound queue;
-- verifies bounded memory, bounded task count, cancellation, and shutdown while sends are stalled.
+- each configured peer has its own planner, delivery-failure flag, and snapshot cursor;
+- local `broadcast` calls mark peers dirty; send failures request repair; a successful send after a recorded failure triggers reconnect repair;
+- inbound queue overflow is surfaced to the scheduler after releasing the queue lock;
+- the owner must call `notify_remote_state_applied()` **after** drained messages have actually been merged into the CRDT. Draining alone is deliberately not treated as application success;
+- a 30-second periodic repair remains as a safety net, while large snapshots continue page-by-page;
+- each page is capped at 4,096 entries and each wire message at 128 entries; active page sends use the shared writer semaphore and bounded per-frame deadlines;
+- caller-owned `snapshot_page(cursor, limit)` cursors keep one peer from advancing another peer's pagination position.
+
+## Remaining acceptance work
+
+This is still a prototype, not a production-ready convergence protocol:
+
+- a successful TCP write is not an authenticated/applied acknowledgement; there are no durable delivery acknowledgements or durable cursors;
+- the current shared HMAC trust model does not provide independent per-origin signatures;
+- the higher-level service must call `notify_remote_state_applied()` after merge; this callback is not automatically inferred by the transport;
+- prove recovery after packet loss, disconnection, process restart, more than 4,096 live entries/tombstones, and a saturated inbound queue;
+- test concurrent mutation while pages are emitted, cursor behavior as entries are inserted/removed, peer starvation, bounded memory/task count, cancellation, and shutdown while sends are stalled;
+- run mesh-only and workspace gates and obtain independent review on one exact SHA.
+
+Keep mesh optional and disabled in production until these gates pass.
 
 ## Prototype tests
 
