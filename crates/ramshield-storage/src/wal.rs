@@ -621,7 +621,10 @@ mod tests {
         wal.sync().unwrap();
 
         let all = wal.replay_with_lsn_from(0).unwrap();
-        assert_eq!(all.iter().map(|(lsn, _)| *lsn).collect::<Vec<_>>(), vec![first, second]);
+        assert_eq!(
+            all.iter().map(|(lsn, _)| *lsn).collect::<Vec<_>>(),
+            vec![first, second]
+        );
         let tail = wal.replay_with_lsn_from(first).unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].0, second);
