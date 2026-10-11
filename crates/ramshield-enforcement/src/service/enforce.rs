@@ -444,6 +444,12 @@ impl EnforcementService {
                     }
                 }
 
+                #[cfg(feature = "mesh")]
+                if prepared_mesh_block.is_some() {
+                    // The userspace Store projection succeeded; a later XDP
+                    // failure must not make a peer tombstone look unapplied.
+                    self.mesh_applied_ips.insert(cmd.ip);
+                }
                 drop(_ckpt_guard);
                 // Step 3: dataplane (barrier released — XDP stays outside).
                 let is_cidr = cmd.cidr.is_some();
