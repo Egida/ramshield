@@ -694,6 +694,119 @@ mod frame_tests {
     use tokio::net::TcpListener;
 
     #[test]
+    fn two_peer_condition_sync_converges_after_remote_merge() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let probe_a = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve node A address");
+            let addr_a = probe_a.local_addr().expect("node A address");
+            drop(probe_a);
+            let probe_b = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve node B address");
+            let addr_b = probe_b.local_addr().expect("node B address");
+            drop(probe_b);
+
+            let blocklist_a = Arc::new(AworsetBlocklist::new(1));
+            let blocklist_b = Arc::new(AworsetBlocklist::new(2));
+            let a = MeshHandle::bind(
+                1,
+                blocklist_a.clone(),
+                addr_a,
+                vec![addr_b],
+                vec![7; 32],
+            )
+            .await
+            .expect("bind node A");
+            let b = MeshHandle::bind(
+                2,
+                blocklist_b.clone(),
+                addr_b,
+                vec![addr_a],
+                vec![7; 32],
+            )
+            .await
+            .expect("bind node B");
+
+            let ip_a = IpAddr::V6(Ipv6Addr::from(0xabcdu128));
+            let delta_a = blocklist_a.record_ban(ip_a, 60_000, 1);
+            let report = a.broadcast(MeshMessage::Block(delta_a)).await;
+            assert!(report.all_written(), "node A should deliver its mutation");
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for message in b.drain().await {
+                        match message {
+                            MeshMessage::Block(delta) => {
+                                blocklist_b.merge_delta(&delta);
+                            }
+                            MeshMessage::Unblock(delta) => {
+                                blocklist_b.merge_unblock_delta(&delta);
+                            }
+                            MeshMessage::Sync { blocks, unblocks } => {
+                                for delta in blocks {
+                                    blocklist_b.merge_delta(&delta);
+                                }
+                                for delta in unblocks {
+                                    blocklist_b.merge_unblock_delta(&delta);
+                                }
+                            }
+                        }
+                    }
+                    if blocklist_b.is_blocked(&ip_a, now_ms()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("node B should apply node A's state");
+
+            let ip_b = IpAddr::V6(Ipv6Addr::from(0xdef01234u128));
+            blocklist_b.record_ban(ip_b, 60_000, 2);
+            // The transport must be notified only after the service merges
+            // incoming CRDT messages. This condition should schedule repair.
+            b.notify_remote_state_applied().await;
+
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    for message in a.drain().await {
+                        match message {
+                            MeshMessage::Block(delta) => {
+                                blocklist_a.merge_delta(&delta);
+                            }
+                            MeshMessage::Unblock(delta) => {
+                                blocklist_a.merge_unblock_delta(&delta);
+                            }
+                            MeshMessage::Sync { blocks, unblocks } => {
+                                for delta in blocks {
+                                    blocklist_a.merge_delta(&delta);
+                                }
+                                for delta in unblocks {
+                                    blocklist_a.merge_unblock_delta(&delta);
+                                }
+                            }
+                        }
+                    }
+                    if blocklist_a.is_blocked(&ip_b, now_ms()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("condition-driven repair should converge node A with node B");
+
+            a.shutdown();
+            b.shutdown();
+        });
+    }
+
+    #[test]
     fn delimiter_free_oversized_frame_is_rejected_while_reading() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
