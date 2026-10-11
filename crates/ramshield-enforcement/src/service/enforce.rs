@@ -1,5 +1,70 @@
 use crate::*;
 
+#[derive(Clone, Debug)]
+pub(crate) enum PendingMeshMutation {
+    Block {
+        ip: IpAddr,
+        node_id: u32,
+        incarnation: Uuid,
+        counter: u64,
+        created_at_ms: u64,
+        expires_at_ms: Option<u64>,
+        tier: u8,
+    },
+    Unblock {
+        ip: IpAddr,
+        node_id: u32,
+        incarnation: Uuid,
+        counter: u64,
+    },
+}
+
+impl PendingMeshMutation {
+    fn to_wal_entry(&self, ts_ns: u64) -> WalEntry {
+        match self {
+            Self::Block {
+                ip,
+                node_id,
+                incarnation,
+                counter,
+                created_at_ms,
+                expires_at_ms,
+                tier,
+            } => WalEntry::MeshMutation {
+                schema_version: 1,
+                origin_node_id: *node_id,
+                origin_incarnation: incarnation.to_string(),
+                origin_counter: *counter,
+                ip: ip.to_string(),
+                action: ramshield_storage::wal::MeshMutationAction::Block,
+                created_at_ms: *created_at_ms,
+                expires_at_ms: *expires_at_ms,
+                tier: *tier,
+                signature: None,
+                ts_ns,
+            },
+            Self::Unblock {
+                ip,
+                node_id,
+                incarnation,
+                counter,
+            } => WalEntry::MeshMutation {
+                schema_version: 1,
+                origin_node_id: *node_id,
+                origin_incarnation: incarnation.to_string(),
+                origin_counter: *counter,
+                ip: ip.to_string(),
+                action: ramshield_storage::wal::MeshMutationAction::Unblock,
+                created_at_ms: ts_ns / 1_000_000,
+                expires_at_ms: None,
+                tier: 0,
+                signature: None,
+                ts_ns,
+            },
+        }
+    }
+}
+
 impl EnforcementService {
     pub(crate) fn remember_result(&mut self, result: &EnforceResult) {
         if self
@@ -22,6 +87,22 @@ impl EnforcementService {
     pub async fn enforce(
         &mut self,
         cmd: EnforceCommand,
+    ) -> Result<EnforceResult, EnforcementError> {
+        self.enforce_inner(cmd, None).await
+    }
+
+    pub(crate) async fn enforce_mesh_mutation(
+        &mut self,
+        cmd: EnforceCommand,
+        mutation: PendingMeshMutation,
+    ) -> Result<EnforceResult, EnforcementError> {
+        self.enforce_inner(cmd, Some(mutation)).await
+    }
+
+    async fn enforce_inner(
+        &mut self,
+        cmd: EnforceCommand,
+        incoming_mesh_mutation: Option<PendingMeshMutation>,
     ) -> Result<EnforceResult, EnforcementError> {
         // Idempotent replay: return what actually happened the first time —
         // a fabricated `xdp_applied: true` would hide a dataplane failure
@@ -83,7 +164,9 @@ impl EnforcementService {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         #[cfg(feature = "mesh")]
-        let mesh_wal_entries: Vec<WalEntry> = if cmd.source != "mesh" && cmd.cidr.is_none() {
+        let mesh_wal_entries: Vec<WalEntry> = if let Some(mutation) = incoming_mesh_mutation.as_ref() {
+            vec![mutation.to_wal_entry(now_ns)]
+        } else if cmd.source != "mesh" && cmd.cidr.is_none() {
             if let Some(delta) = prepared_mesh_block.as_ref() {
                 vec![WalEntry::MeshMutation {
                     schema_version: 1,
@@ -188,6 +271,48 @@ impl EnforcementService {
         // fails, WAL and mesh still agree and reconciliation can repair the projection.
         #[cfg(feature = "mesh")]
         if let Some(mesh) = &self.mesh_blocklist {
+            if let Some(mutation) = incoming_mesh_mutation.as_ref() {
+                match mutation {
+                    PendingMeshMutation::Block {
+                        ip,
+                        node_id,
+                        incarnation,
+                        counter,
+                        created_at_ms,
+                        expires_at_ms,
+                        tier,
+                    } => {
+                        mesh.merge_delta(&ramshield_mesh::aworset::ClusterBlockDelta {
+                            ip: *ip,
+                            dot: ramshield_mesh::aworset::ClusterDot {
+                                node_id: *node_id,
+                                incarnation: *incarnation,
+                                counter: *counter,
+                            },
+                            created_at_ms: *created_at_ms,
+                            expires_at_ms: expires_at_ms.unwrap_or(u64::MAX),
+                            tier: *tier,
+                        });
+                    }
+                    PendingMeshMutation::Unblock {
+                        ip,
+                        node_id,
+                        incarnation,
+                        counter,
+                    } => {
+                        mesh.merge_unblock_delta(
+                            &ramshield_mesh::aworset::ClusterUnblockDelta {
+                                ip: *ip,
+                                dot: ramshield_mesh::aworset::ClusterDot {
+                                    node_id: *node_id,
+                                    incarnation: *incarnation,
+                                    counter: *counter,
+                                },
+                            },
+                        );
+                    }
+                }
+            }
             if let Some(delta) = prepared_mesh_block.as_ref() {
                 mesh.merge_delta(delta);
             }
