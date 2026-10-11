@@ -36,6 +36,11 @@ pub fn replay_wal_into_store_seeded(
         .unwrap_or(0);
 
     let seed_ips: Vec<IpAddr> = seed.keys().copied().collect();
+    // Mesh CRDT state is reconstructed from its origin-dot history, not from
+    // the aggregate IP projection. A per-IP unblock must never erase another
+    // origin's concurrent live dot. Full mesh history is required until the
+    // checkpoint format carries a mesh-state seed.
+    let (mesh_touched, mesh_active) = replay_mesh_state(wal, now_ns)?;
     // Keep absolute deadlines throughout the fold. Converting a snapshot
     // deadline to whole seconds here loses precision and can resurrect a
     // nearly-expired block. Only convert to remaining seconds at the final
@@ -66,39 +71,21 @@ pub fn replay_wal_into_store_seeded(
                     blocked.remove(&ip);
                 }
             }
-            WalEntry::MeshMutation {
-                ip,
-                action,
-                created_at_ms,
-                expires_at_ms,
-                ts_ns,
-                ..
-            } => {
-                if let Ok(ip) = ip.parse() {
-                    match action {
-                        ramshield_storage::wal::MeshMutationAction::Block => {
-                            // Mesh timestamps are milliseconds; recovery stores
-                            // absolute deadlines in nanoseconds. None means no TTL.
-                            let deadline = expires_at_ms;
-                            blocked.insert(
-                                ip,
-                                (
-                                    BlockReason::from_reason_str("mesh_final")
-                                        .unwrap_or(BlockReason::ManualBlock),
-                                    created_at_ms.saturating_mul(1_000_000),
-                                    deadline.map(|ms| ms.saturating_mul(1_000_000)),
-                                ),
-                            );
-                        }
-                        ramshield_storage::wal::MeshMutationAction::Unblock => {
-                            blocked.remove(&ip);
-                        }
-                    }
-                    let _ = ts_ns;
-                }
-            }
+            // MeshMutation records are folded separately by origin dot below.
+            // Folding them into this aggregate map would let one peer's tombstone
+            // erase a concurrent block from another peer.
+            WalEntry::MeshMutation { .. } => {}
             _ => {} // Insert/Delete/Checkpoint: traffic data, not block state
         }
+    }
+
+    // For any IP represented in mesh history, replace the snapshot's
+    // aggregate mesh projection with the fold of all retained origin dots.
+    for ip in mesh_touched {
+        blocked.remove(&ip);
+    }
+    for (ip, state) in mesh_active {
+        blocked.insert(ip, state);
     }
 
     let ram_lim = store.traffic.ram_limit_mb.load(Ordering::Relaxed).max(1) * 1024 * 1024;
@@ -167,6 +154,110 @@ pub fn replay_wal_into_store_seeded(
         restored.iter().filter(|(_, t)| *t > 0).count()
     );
     Ok(restored)
+}
+
+/// Reconstruct the effective mesh IP projection from the full retained
+/// origin-dot history. Checkpoint snapshots currently do not carry CRDT
+/// provenance, so callers must refuse startup if retention has pruned history.
+fn replay_mesh_state(
+    wal: &Wal,
+    now_ns: u64,
+) -> anyhow::Result<(
+    std::collections::HashSet<IpAddr>,
+    std::collections::HashMap<IpAddr, (BlockReason, u64, Option<u64>)>,
+)> {
+    type MeshKey = (IpAddr, u32, String);
+    type ActiveMeshDot = (u64, u64, Option<u64>, u8);
+
+    let mut touched = std::collections::HashSet::new();
+    let mut active: std::collections::HashMap<MeshKey, ActiveMeshDot> =
+        std::collections::HashMap::new();
+    let mut tombstones: std::collections::HashMap<MeshKey, u64> =
+        std::collections::HashMap::new();
+
+    for entry in wal.replay()? {
+        let WalEntry::MeshMutation {
+            schema_version,
+            origin_node_id,
+            origin_incarnation,
+            origin_counter,
+            ip,
+            action,
+            created_at_ms,
+            expires_at_ms,
+            tier,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        if schema_version != 1 || origin_node_id == 0 || origin_counter == 0 {
+            anyhow::bail!("unsupported or invalid mesh WAL event: schema={schema_version}, node={origin_node_id}, counter={origin_counter}");
+        }
+        let ip: IpAddr = ip
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid IP in mesh WAL event: {error}"))?;
+        let incarnation = uuid::Uuid::parse_str(&origin_incarnation)
+            .map_err(|error| anyhow::anyhow!("invalid origin incarnation in mesh WAL event: {error}"))?;
+        if incarnation.is_nil() {
+            anyhow::bail!("nil origin incarnation in mesh WAL event");
+        }
+        touched.insert(ip);
+        let key = (ip, origin_node_id, incarnation.to_string());
+        match action {
+            ramshield_storage::wal::MeshMutationAction::Block => {
+                if origin_counter > tombstones.get(&key).copied().unwrap_or(0)
+                    && active
+                        .get(&key)
+                        .is_none_or(|existing| origin_counter > existing.0)
+                {
+                    active.insert(
+                        key,
+                        (
+                            origin_counter,
+                            created_at_ms.saturating_mul(1_000_000),
+                            expires_at_ms.map(|ms| ms.saturating_mul(1_000_000)),
+                            tier,
+                        ),
+                    );
+                }
+            }
+            ramshield_storage::wal::MeshMutationAction::Unblock => {
+                let watermark = tombstones.entry(key.clone()).or_insert(0);
+                *watermark = (*watermark).max(origin_counter);
+                if active
+                    .get(&key)
+                    .is_some_and(|existing| existing.0 <= origin_counter)
+                {
+                    active.remove(&key);
+                }
+            }
+        }
+    }
+
+    let mut by_ip: std::collections::HashMap<
+        IpAddr,
+        (BlockReason, u64, Option<u64>),
+    > = std::collections::HashMap::new();
+    for ((ip, _, _), (_, since_ns, deadline_ns, _tier)) in active {
+        if deadline_ns.is_some_and(|deadline| deadline <= now_ns) {
+            continue;
+        }
+        let candidate = (
+            BlockReason::from_reason_str("mesh_final").unwrap_or(BlockReason::ManualBlock),
+            since_ns,
+            deadline_ns,
+        );
+        by_ip
+            .entry(ip)
+            .and_modify(|existing| {
+                if candidate.1 > existing.1 {
+                    *existing = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+    Ok((touched, by_ip))
 }
 
 pub fn replay_wal_cidrs(wal: &Wal) -> anyhow::Result<Vec<(IpNetwork, u64)>> {
