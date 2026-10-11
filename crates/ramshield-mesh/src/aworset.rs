@@ -445,6 +445,26 @@ mod tests {
         );
     }
     #[test]
+    fn newer_local_ban_after_unban_is_accepted() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 43]);
+
+        let first = sender.record_ban(ip, 60_000, 1);
+        assert!(receiver.merge_delta(&first));
+
+        let unblocks = sender.record_unban(ip);
+        assert_eq!(unblocks.len(), 1);
+        assert!(receiver.merge_unblock_delta(&unblocks[0]));
+        assert!(!receiver.is_blocked(&ip, now_ms().saturating_add(1)));
+
+        let rebanned = sender.record_ban(ip, 60_000, 1);
+        assert!(rebanned.dot.counter > first.dot.counter);
+        assert!(receiver.merge_delta(&rebanned));
+        assert!(receiver.is_blocked(&ip, now_ms()));
+    }
+
+    #[test]
     fn snapshot_carries_active_dot_and_tombstone() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
