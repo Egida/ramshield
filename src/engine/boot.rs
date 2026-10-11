@@ -79,6 +79,9 @@ fn restore_mesh_crdt_from_wal(
         let ip: std::net::IpAddr = ip.parse().map_err(|error| {
             std::io::Error::other(format!("invalid IP in mesh WAL event: {error}"))
         })?;
+        if ip.is_unspecified() {
+            return Err(std::io::Error::other("unspecified IP in mesh WAL event"));
+        }
         let incarnation = uuid::Uuid::parse_str(&origin_incarnation).map_err(|error| {
             std::io::Error::other(format!(
                 "invalid origin incarnation in mesh WAL event: {error}"
