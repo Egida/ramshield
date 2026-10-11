@@ -785,3 +785,127 @@ mod retry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod wal_batch_integration_tests {
+    use super::*;
+    use crate::StubXdpApplier;
+    use ramshield_mesh::transport::{MeshHandle, MeshMessage, MeshMutationKind, ReplicatedMeshMutation};
+    use ramshield_storage::wal::{MeshMutationAction, Wal, WalEntry};
+    use ramshield_types::Durability;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wal_batch_is_durable_and_projected_before_positive_ack() {
+        let dir = std::env::temp_dir().join(format!(
+            "ramshield-mesh-batch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir_string = dir.to_string_lossy().into_owned();
+        let wal = Arc::new(
+            Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap(),
+        );
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 111));
+        let origin_incarnation = uuid::Uuid::new_v4();
+        let receiver_addr = "127.0.0.1:0".parse().unwrap();
+        let receiver_blocklist = Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(2));
+        let receiver = MeshHandle::bind(
+            2,
+            receiver_blocklist.clone(),
+            receiver_addr,
+            Vec::new(),
+            b"test-mesh-key-0123456789abcdef".to_vec(),
+        )
+        .await
+        .unwrap();
+        let listen_addr = receiver.local_addr();
+        let sender = MeshHandle::bind(
+            1,
+            Arc::new(ramshield_mesh::aworset::AworsetBlocklist::new(1)),
+            "127.0.0.1:0".parse().unwrap(),
+            vec![listen_addr],
+            b"test-mesh-key-0123456789abcdef".to_vec(),
+        )
+        .await
+        .unwrap();
+        let store = Arc::new(Store::new(16));
+        let mut service = EnforcementService::new(
+            store.clone(),
+            Arc::new(Metrics::new()),
+            Box::new(StubXdpApplier),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .with_wal(wal.clone())
+        .with_mesh_blocklist(receiver_blocklist.clone())
+        .with_mesh_handle(receiver.clone());
+
+        let batch = MeshMessage::WalBatch {
+            source_node_id: 1,
+            start_lsn: 1,
+            end_lsn: 1,
+            mutations: vec![ReplicatedMeshMutation {
+                source_lsn: 1,
+                origin_node_id: 1,
+                origin_incarnation: origin_incarnation.to_string(),
+                origin_counter: 1,
+                ip,
+                action: MeshMutationKind::Block,
+                created_at_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                expires_at_ms: None,
+                tier: 2,
+            }],
+        };
+        let sender_task = {
+            let sender = sender.clone();
+            tokio::spawn(async move { sender.send_wal_batch(listen_addr, batch).await })
+        };
+
+        let report = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let report = service.apply_mesh_messages().await;
+                if report.received > 0 {
+                    break report;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("service should process the WAL batch");
+        assert_eq!(report.applied, 1);
+        assert_eq!(sender_task.await.unwrap().unwrap(), Some(1));
+        assert!(receiver_blocklist.is_blocked(
+            &ip,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        ));
+        assert!(matches!(
+            store.get(&ip),
+            Some(Value::IpRecord(record)) if matches!(record.block_state, BlockState::Blocked { .. })
+        ));
+        assert!(wal.replay().unwrap().iter().any(|entry| matches!(
+            entry,
+            WalEntry::MeshMutation {
+                schema_version: 1,
+                origin_node_id: 1,
+                origin_counter: 1,
+                action: MeshMutationAction::Block,
+                ..
+            }
+        )));
+
+        sender.shutdown();
+        receiver.shutdown();
+        drop(service);
+        drop(sender);
+        drop(receiver);
+        drop(wal);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
