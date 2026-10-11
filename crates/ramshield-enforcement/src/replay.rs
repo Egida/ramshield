@@ -360,7 +360,8 @@ mod mesh_wal_replay_tests {
 
     #[test]
     fn unblock_only_removes_the_matching_origin_dot() {
-        let dir = std::env::temp_dir().join(format!("ramshield-mesh-replay-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("ramshield-mesh-replay-{}", uuid::Uuid::new_v4()));
         let dir_string = dir.to_string_lossy().into_owned();
         let wal = Wal::open(&dir_string, false, Durability::Fsync, 1 << 20, 1 << 24).unwrap();
         let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
