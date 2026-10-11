@@ -811,10 +811,13 @@ fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
                         && uuid::Uuid::parse_str(&mutation.origin_incarnation)
                             .is_ok_and(|id| !id.is_nil())
                         && !mutation.ip.is_unspecified()
-                        && (mutation.action == MeshMutationKind::Unblock
-                            || mutation
+                        && mutation.created_at_ms <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                        && match mutation.action {
+                            MeshMutationKind::Block => mutation
                                 .expires_at_ms
-                                .is_none_or(|expiry| expiry >= mutation.created_at_ms))
+                                .is_none_or(|expiry| expiry >= mutation.created_at_ms),
+                            MeshMutationKind::Unblock => mutation.expires_at_ms.is_none(),
+                        }
                 })
         }
     }
