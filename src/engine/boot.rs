@@ -684,6 +684,8 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     }
 
     // Periodic checkpoint loop: snapshot state every CHECKPOINT_INTERVAL.
+    #[cfg(feature = "mesh")]
+    let mesh_checkpoint_blocklist = mesh_blocklist.clone();
     if let Some(wal) = pipeline_wal {
         let engine = engine.clone();
         std::mem::drop(tokio::spawn(async move {
@@ -728,7 +730,25 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                         ip_expirations: mirror.ip_expirations.clone(),
                         cidrs,
                     };
-                    let snap = build_snapshot(&store_arc, &ckpt_state, boundary.lsn);
+                    let snap = {
+                        #[cfg(feature = "mesh")]
+                        {
+                            if let Some(mesh) = mesh_checkpoint_blocklist.as_ref() {
+                                build_snapshot_with_mesh(
+                                    &store_arc,
+                                    &ckpt_state,
+                                    boundary.lsn,
+                                    mesh.export_snapshot(),
+                                )
+                            } else {
+                                build_snapshot(&store_arc, &ckpt_state, boundary.lsn)
+                            }
+                        }
+                        #[cfg(not(feature = "mesh"))]
+                        {
+                            build_snapshot(&store_arc, &ckpt_state, boundary.lsn)
+                        }
+                    };
                     (boundary, snap)
                 };
 
