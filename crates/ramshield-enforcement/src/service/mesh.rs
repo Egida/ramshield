@@ -1,5 +1,5 @@
-use crate::*;
 use super::enforce::PendingMeshMutation;
+use crate::*;
 use ramshield_mesh::transport::MeshMessage;
 
 /// Local processing status for a batch drained from the mesh transport.
@@ -196,8 +196,7 @@ impl EnforcementService {
                     incarnation: delta.dot.incarnation,
                     counter: delta.dot.counter,
                     created_at_ms: delta.created_at_ms,
-                    expires_at_ms: (delta.expires_at_ms != u64::MAX)
-                        .then_some(delta.expires_at_ms),
+                    expires_at_ms: (delta.expires_at_ms != u64::MAX).then_some(delta.expires_at_ms),
                     tier: delta.tier,
                 },
             )
