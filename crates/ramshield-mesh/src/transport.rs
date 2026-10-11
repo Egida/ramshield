@@ -3,7 +3,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     net::SocketAddr,
     sync::Arc,
@@ -95,12 +95,33 @@ struct Envelope {
     body: MeshMessage,
     mac: String,
 }
+/// A configured peer identity. Each configured peer has a distinct HMAC key.
+#[derive(Clone)]
+pub struct MeshPeer {
+    pub node_id: u32,
+    pub address: SocketAddr,
+    pub auth_key: Vec<u8>,
+}
+
+impl MeshPeer {
+    pub fn new(node_id: u32, address: SocketAddr, auth_key: Vec<u8>) -> Self {
+        Self {
+            node_id,
+            address,
+            auth_key,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MeshHandle {
     node_id: u32,
     blocklist: Arc<AworsetBlocklist>,
-    peers: Arc<Vec<SocketAddr>>,
+    peers: Arc<Vec<MeshPeer>>,
+    /// This node's own signing key.
     auth_key: Arc<Vec<u8>>,
+    /// Keys authorized to authenticate incoming node IDs.
+    trusted_keys: Arc<HashMap<u32, Vec<u8>>>,
     incoming: Arc<Mutex<VecDeque<MeshMessage>>>,
     readers: Arc<Semaphore>,
     writers: Arc<Semaphore>,
@@ -112,17 +133,22 @@ impl MeshHandle {
         node_id: u32,
         blocklist: Arc<AworsetBlocklist>,
         listen: SocketAddr,
-        peers: Vec<SocketAddr>,
+        peers: Vec<MeshPeer>,
         auth_key: Vec<u8>,
     ) -> std::io::Result<Self> {
         validate_bind_args(node_id, &peers, &auth_key)?;
         let listener = TcpListener::bind(listen).await?;
+        let trusted_keys = peers
+            .iter()
+            .map(|peer| (peer.node_id, peer.auth_key.clone()))
+            .collect::<HashMap<_, _>>();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handle = Self {
             node_id,
             blocklist,
             peers: Arc::new(peers),
             auth_key: Arc::new(auth_key),
+            trusted_keys: Arc::new(trusted_keys),
             incoming: Arc::new(Mutex::new(VecDeque::new())),
             readers: Arc::new(Semaphore::new(MAX_PEER_READERS)),
             writers: Arc::new(Semaphore::new(MAX_PEER_WRITERS)),
@@ -187,7 +213,8 @@ impl MeshHandle {
         let mut tasks = JoinSet::new();
         let mut report = BroadcastReport::default();
 
-        for peer in self.peers.iter().copied() {
+        for peer in self.peers.iter() {
+            let peer = peer.address;
             let permit = match self.writers.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(error) => {
@@ -316,8 +343,14 @@ impl MeshHandle {
             Ok(v) => v,
             Err(_) => return,
         };
-        if now_ms().abs_diff(env.ts_ms) > MAX_CLOCK_SKEW_MS
-            || !verify(&self.auth_key, &payload, &env.mac)
+        let Some(peer_key) = self.trusted_keys.get(&env.node_id) else {
+            warn!(
+                node_id = env.node_id,
+                "mesh frame rejected: node ID is not configured"
+            );
+            return;
+        };
+        if now_ms().abs_diff(env.ts_ms) > MAX_CLOCK_SKEW_MS || !verify(peer_key, &payload, &env.mac)
         {
             warn!(
                 node_id = env.node_id,
@@ -346,24 +379,46 @@ impl MeshHandle {
     }
 }
 /// Validate the public library boundary as well as the higher-level config.
-fn validate_bind_args(node_id: u32, peers: &[SocketAddr], auth_key: &[u8]) -> std::io::Result<()> {
+fn validate_bind_args(node_id: u32, peers: &[MeshPeer], auth_key: &[u8]) -> std::io::Result<()> {
     let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
     if node_id == 0 {
         return Err(invalid("mesh node_id must be non-zero"));
     }
     if auth_key.len() < 16 {
-        return Err(invalid("mesh authentication key must be at least 16 bytes"));
+        return Err(invalid(
+            "local mesh authentication key must be at least 16 bytes",
+        ));
     }
     if peers.len() > MAX_CONFIGURED_PEERS {
         return Err(invalid("mesh peer list exceeds 256 peers"));
     }
-    if peers
-        .iter()
-        .any(|peer| peer.port() == 0 || peer.ip().is_unspecified())
-    {
-        return Err(invalid(
-            "mesh peers must have a concrete IP address and non-zero port",
-        ));
+    let mut seen_ids = HashSet::with_capacity(peers.len());
+    let mut seen_addresses = HashSet::with_capacity(peers.len());
+    let mut seen_keys = HashSet::with_capacity(peers.len() + 1);
+    seen_keys.insert(auth_key.to_vec());
+    for peer in peers {
+        if peer.node_id == 0 || peer.node_id == node_id {
+            return Err(invalid("mesh peer node IDs must be non-zero and not self"));
+        }
+        if peer.auth_key.len() < 16 {
+            return Err(invalid("each mesh peer key must be at least 16 bytes"));
+        }
+        if !seen_keys.insert(peer.auth_key.clone()) {
+            return Err(invalid(
+                "mesh local and peer authentication keys must be unique",
+            ));
+        }
+        if peer.address.port() == 0 || peer.address.ip().is_unspecified() {
+            return Err(invalid(
+                "mesh peers must have a concrete IP address and non-zero port",
+            ));
+        }
+        if !seen_ids.insert(peer.node_id) {
+            return Err(invalid("mesh peer node IDs must be unique"));
+        }
+        if !seen_addresses.insert(peer.address) {
+            return Err(invalid("mesh peer addresses must be unique"));
+        }
     }
     Ok(())
 }
@@ -510,17 +565,17 @@ fn now_ms() -> u64 {
 mod frame_tests {
     use super::{
         Envelope, MAX_CONFIGURED_PEERS, MAX_FRAME, MAX_SYNC_FRAME_ENTRIES, MeshHandle, MeshMessage,
-        PeerSendOutcome, chunk_sync, now_ms, push_frame_bytes, read_bounded_frame,
-        read_bounded_frame_with_timeout, valid_message, validate_bind_args, with_timeout,
+        MeshPeer, PeerSendOutcome, chunk_sync, now_ms, push_frame_bytes, read_bounded_frame,
+        read_bounded_frame_with_timeout, sign, valid_message, validate_bind_args, with_timeout,
     };
     use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterDot, ClusterUnblockDelta};
     use std::time::Duration;
     use std::{
-        net::{IpAddr, Ipv6Addr, SocketAddr},
+        net::{IpAddr, Ipv6Addr},
         sync::Arc,
     };
     use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     #[test]
     fn delimiter_free_oversized_frame_is_rejected_while_reading() {
@@ -565,15 +620,89 @@ mod frame_tests {
         let error = validate_bind_args(1, &[], &[7u8; 15]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-        let peers: Vec<SocketAddr> = (0..=MAX_CONFIGURED_PEERS)
-            .map(|_| "127.0.0.1:1234".parse().expect("peer address"))
+        let peers: Vec<MeshPeer> = (0..=MAX_CONFIGURED_PEERS)
+            .map(|_| {
+                MeshPeer::new(
+                    2,
+                    "127.0.0.1:1234".parse().expect("peer address"),
+                    vec![8; 32],
+                )
+            })
             .collect();
         let error = validate_bind_args(1, &peers, &valid_key).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 
-        let invalid_peer = ["0.0.0.0:1234".parse().expect("unspecified peer")];
+        let invalid_peer = [MeshPeer::new(
+            2,
+            "0.0.0.0:1234".parse().expect("unspecified peer"),
+            vec![8; 32],
+        )];
         let error = validate_bind_args(1, &invalid_peer, &valid_key).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_peer_key_cannot_impersonate_an_unconfigured_node_id() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let probe = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("probe listener");
+            let address = probe.local_addr().expect("probe address");
+            drop(probe);
+
+            let trusted_key = vec![1u8; 32];
+            let local_key = vec![2u8; 32];
+            let handle = MeshHandle::bind(
+                2,
+                Arc::new(AworsetBlocklist::new(2)),
+                address,
+                vec![MeshPeer::new(
+                    1,
+                    "127.0.0.1:1".parse().expect("peer address"),
+                    trusted_key.clone(),
+                )],
+                local_key,
+            )
+            .await
+            .expect("bind receiver");
+
+            let now = now_ms();
+            let body = MeshMessage::Block(ClusterBlockDelta {
+                ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                dot: ClusterDot {
+                    node_id: 1,
+                    incarnation: uuid::Uuid::new_v4(),
+                    counter: 1,
+                },
+                created_at_ms: now,
+                expires_at_ms: now.saturating_add(60_000),
+                tier: 1,
+            });
+            // The payload is validly signed with node 1's key, but claims node 3.
+            let payload = serde_json::to_vec(&(now, 3u32, &body)).expect("encode payload");
+            let envelope = Envelope {
+                ts_ms: now,
+                node_id: 3,
+                body,
+                mac: sign(&trusted_key, &payload).expect("sign forged identity"),
+            };
+            let mut stream = TcpStream::connect(address).await.expect("connect peer");
+            stream
+                .write_all(format!("{}\n", serde_json::to_string(&envelope).unwrap()).as_bytes())
+                .await
+                .expect("write signed frame");
+            drop(stream);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                handle.drain().await.is_empty(),
+                "a key trusted for node 1 must not authenticate node 3"
+            );
+            handle.shutdown();
+        });
     }
 
     #[test]
@@ -593,7 +722,7 @@ mod frame_tests {
                 1,
                 Arc::new(AworsetBlocklist::new(1)),
                 "127.0.0.1:0".parse().expect("listen address"),
-                vec![unavailable_peer],
+                vec![MeshPeer::new(2, unavailable_peer, vec![8; 32])],
                 vec![7; 32],
             )
             .await
