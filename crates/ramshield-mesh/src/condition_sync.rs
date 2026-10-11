@@ -1,9 +1,10 @@
 //! Condition-driven anti-entropy scheduling prototype.
 //!
-//! This module is deliberately a policy/state-machine prototype: it does not
-//! open sockets or alter the current transport loop. A caller owns one planner
-//! per peer and invokes `condition`, `take_due`, and `complete` around its
-//! existing snapshot/send operation.
+//! This module implements the per-peer scheduling policy used by the mesh
+//! transport. The transport owns one planner per configured peer and invokes
+//! `condition`, `take_due`, and `complete` around bounded snapshot/send work.
+//! The scheduler is integrated, but its convergence guarantees remain a
+//! prototype until network-fault and concurrent-pagination acceptance tests pass.
 //!
 //! The policy reduces needless full-state syncs while retaining a periodic
 //! repair ceiling. Delta delivery is still separate from convergence: a socket
