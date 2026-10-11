@@ -66,8 +66,7 @@ impl AworsetSnapshot {
                 || delta.dot.node_id == 0
                 || delta.dot.counter == 0
                 || delta.dot.incarnation.is_nil()
-                || (delta.expires_at_ms != u64::MAX
-                    && delta.expires_at_ms < delta.created_at_ms)
+                || (delta.expires_at_ms != u64::MAX && delta.expires_at_ms < delta.created_at_ms)
             {
                 return Err("invalid active mesh dot in checkpoint");
             }
