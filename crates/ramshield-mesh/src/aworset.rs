@@ -429,6 +429,52 @@ mod tests {
         assert!(!a.merge_delta(&d3), "lower counter must be rejected");
     }
     #[test]
+    fn concurrent_bans_converge_independent_of_merge_order() {
+        let node_a = AworsetBlocklist::new(1);
+        let node_b = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 44]);
+        let a = node_a.record_ban(ip, 60_000, 1);
+        let b = node_b.record_ban(ip, 90_000, 2);
+
+        let left = AworsetBlocklist::new(3);
+        let right = AworsetBlocklist::new(4);
+        assert!(left.merge_delta(&a));
+        assert!(left.merge_delta(&b));
+        assert!(right.merge_delta(&b));
+        assert!(right.merge_delta(&a));
+
+        let normalize = |mesh: &AworsetBlocklist| {
+            let mut state: Vec<_> = mesh
+                .entries
+                .iter()
+                .map(|entry| (*entry.key(), *entry.value()))
+                .collect();
+            state.sort_by_key(|(key, value)| (key.0, key.1, value.0));
+            state
+        };
+        assert_eq!(normalize(&left), normalize(&right));
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_and_reordered_deltas_are_idempotent() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 45]);
+        let old = sender.record_ban(ip, 60_000, 1);
+        let mut newer = sender.record_ban(ip, 90_000, 2);
+        newer.dot.counter = old.dot.counter + 1;
+
+        assert!(receiver.merge_delta(&newer));
+        assert!(!receiver.merge_delta(&newer), "duplicate delta must be idempotent");
+        assert!(!receiver.merge_delta(&old), "reordered stale delta must be ignored");
+        let entry = receiver.entries.get(&(ip, sender.node_id)).unwrap();
+        assert_eq!(entry.value().0, newer.dot.counter);
+        assert_eq!(entry.value().2, newer.expires_at_ms);
+    }
+
+    #[test]
     fn unban_tombstone_rejects_delayed_old_ban() {
         let peer = AworsetBlocklist::new(2);
         let ip = IpAddr::from([198, 51, 100, 42]);
