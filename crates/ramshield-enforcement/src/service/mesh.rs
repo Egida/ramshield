@@ -1,4 +1,5 @@
 use crate::*;
+use super::enforce::PendingMeshMutation;
 use ramshield_mesh::transport::MeshMessage;
 
 /// Local processing status for a batch drained from the mesh transport.
@@ -47,51 +48,39 @@ impl MeshApplyReport {
 }
 
 impl EnforcementService {
-    /// Persist the original mesh operation identity before allowing it into the
-    /// local CRDT. A local WAL LSN is not an origin counter and is never used
-    /// to rewrite the remote dot.
-    fn persist_mesh_mutation(
+    /// Apply a tombstone that does not release the effective IP because
+    /// another origin dot is still live. WAL append, fsync and CRDT merge are
+    /// kept inside the checkpoint barrier; the aggregate Store projection stays
+    /// blocked, so a concurrent checkpoint remains consistent.
+    fn persist_and_merge_unblock_only(
         &mut self,
-        ip: std::net::IpAddr,
-        dot: ramshield_mesh::aworset::ClusterDot,
-        action: ramshield_storage::wal::MeshMutationAction,
-        created_at_ms: u64,
-        expires_at_ms: Option<u64>,
-        tier: u8,
+        delta: &ramshield_mesh::aworset::ClusterUnblockDelta,
     ) -> Result<(), EnforcementError> {
-        let Some(wal) = self.wal.as_ref() else {
-            return Ok(());
-        };
-        // Keep incoming append+fsync inside the checkpoint barrier. Otherwise a
-        // snapshot could capture pre-merge state and its tail could start after
-        // this durable event, losing the mutation on restart.
         let checkpoint_arc = self.checkpoint_shared.clone();
         let _checkpoint_guard = checkpoint_arc
             .as_ref()
             .map(|shared| shared.barrier.lock().unwrap_or_else(|e| e.into_inner()));
-        let ts_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos() as u64)
-            .unwrap_or(0);
-        let entry = ramshield_storage::wal::WalEntry::MeshMutation {
-            schema_version: 1,
-            origin_node_id: dot.node_id,
-            origin_incarnation: dot.incarnation.to_string(),
-            origin_counter: dot.counter,
-            ip: ip.to_string(),
-            action,
-            created_at_ms,
-            expires_at_ms,
-            tier,
-            signature: None,
-            ts_ns,
-        };
-        let lsn = wal
-            .append(&entry)
-            .map_err(|error| EnforcementError::Wal(error.to_string()))?;
-        wal.sync()
-            .map_err(|error| EnforcementError::Wal(error.to_string()))?;
-        self.last_wal_lsn = Some(lsn);
+        if let Some(wal) = self.wal.as_ref() {
+            let ts_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0);
+            let mutation = PendingMeshMutation::Unblock {
+                ip: delta.ip,
+                node_id: delta.dot.node_id,
+                incarnation: delta.dot.incarnation,
+                counter: delta.dot.counter,
+            };
+            let lsn = wal
+                .append(&mutation.to_wal_entry(ts_ns))
+                .map_err(|error| EnforcementError::Wal(error.to_string()))?;
+            wal.sync()
+                .map_err(|error| EnforcementError::Wal(error.to_string()))?;
+            self.last_wal_lsn = Some(lsn);
+        }
+        if let Some(mesh) = &self.mesh_blocklist {
+            mesh.merge_unblock_delta(delta);
+        }
         Ok(())
     }
 
@@ -169,23 +158,10 @@ impl EnforcementService {
         if self.mesh_operator_suppressions.contains(&delta.ip) {
             return (false, Ok(MeshApplyOutcome::Ignored));
         }
-        // Persist the original origin dot before merging. Repeated deliveries
-        // whose dot is already retained need no additional WAL record.
-        if mesh.needs_merge_delta(&delta) {
-            if let Err(error) = self.persist_mesh_mutation(
-                delta.ip,
-                delta.dot,
-                ramshield_storage::wal::MeshMutationAction::Block,
-                delta.created_at_ms,
-                (delta.expires_at_ms != u64::MAX).then_some(delta.expires_at_ms),
-                delta.tier,
-            ) {
-                return (false, Err(error));
-            }
-        }
-        // CRDT state can be merged before enforcement fails (e.g. storage or
-        // XDP projection error); retries repair the local projection.
-        let changed = mesh.merge_delta(&delta);
+        // Do not mutate the CRDT yet. For a new dot, enforce_inner persists
+        // and merges it while holding the checkpoint barrier, together with the
+        // Store mutation. A retry of an already durable dot only repairs projection.
+        let changed = mesh.needs_merge_delta(&delta);
         if should_skip_mesh_block(changed, self.mesh_applied_ips.contains(&delta.ip)) {
             return (changed, Ok(MeshApplyOutcome::Ignored));
         }
@@ -211,10 +187,25 @@ impl EnforcementService {
             action: EnforceAction::Block,
             evidence_source: ramshield_types::EvidenceSource::FleetSignals,
         };
-        let enforce_result = self
-            .enforce(cmd)
+        let enforce_result = if changed {
+            self.enforce_mesh_mutation(
+                cmd,
+                PendingMeshMutation::Block {
+                    ip: delta.ip,
+                    node_id: delta.dot.node_id,
+                    incarnation: delta.dot.incarnation,
+                    counter: delta.dot.counter,
+                    created_at_ms: delta.created_at_ms,
+                    expires_at_ms: (delta.expires_at_ms != u64::MAX)
+                        .then_some(delta.expires_at_ms),
+                    tier: delta.tier,
+                },
+            )
             .await
-            .and_then(|result| require_xdp_projection(result, "block"));
+        } else {
+            self.enforce(cmd).await
+        }
+        .and_then(|result| require_xdp_projection(result, "block"));
         if enforce_result.is_ok() {
             self.mesh_applied_ips.insert(delta.ip);
         }
@@ -229,29 +220,19 @@ impl EnforcementService {
         let Some(mesh) = self.mesh_blocklist.clone() else {
             return (false, Ok(MeshApplyOutcome::Ignored));
         };
-        // The tombstone must be durable before it can suppress a live dot.
-        if mesh.needs_merge_unblock(&delta) {
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            if let Err(error) = self.persist_mesh_mutation(
-                delta.ip,
-                delta.dot,
-                ramshield_storage::wal::MeshMutationAction::Unblock,
-                now_ms,
-                None,
-                0,
-            ) {
-                return (false, Err(error));
-            }
-        }
-        // As with blocks, retain retryability if the local enforcement unblock fails.
-        let changed = mesh.merge_unblock_delta(&delta);
-        let still_blocked = mesh.is_blocked(&delta.ip, now_ms);
+        // Predict the effective state without mutating it. The durable event and
+        // tombstone merge must be atomic with the checkpoint barrier.
+        let changed = mesh.needs_merge_unblock(&delta);
+        let still_blocked = mesh.would_be_blocked_after_unblock(&delta, now_ms);
         let locally_applied = self.mesh_applied_ips.contains(&delta.ip);
-        if should_skip_mesh_unblock(still_blocked, locally_applied) {
-            return (changed, Ok(MeshApplyOutcome::Ignored));
+        if changed && still_blocked {
+            return match self.persist_and_merge_unblock_only(&delta) {
+                Ok(()) => (true, Ok(MeshApplyOutcome::Ignored)),
+                Err(error) => (false, Err(error)),
+            };
+        }
+        if !changed && should_skip_mesh_unblock(still_blocked, locally_applied) {
+            return (false, Ok(MeshApplyOutcome::Ignored));
         }
         let cmd = EnforceCommand {
             decision_id: Uuid::new_v4(),
@@ -266,10 +247,21 @@ impl EnforcementService {
             action: EnforceAction::Unblock,
             evidence_source: ramshield_types::EvidenceSource::FleetSignals,
         };
-        let enforce_result = self
-            .enforce(cmd)
+        let enforce_result = if changed {
+            self.enforce_mesh_mutation(
+                cmd,
+                PendingMeshMutation::Unblock {
+                    ip: delta.ip,
+                    node_id: delta.dot.node_id,
+                    incarnation: delta.dot.incarnation,
+                    counter: delta.dot.counter,
+                },
+            )
             .await
-            .and_then(|result| require_xdp_projection(result, "unblock"));
+        } else {
+            self.enforce(cmd).await
+        }
+        .and_then(|result| require_xdp_projection(result, "unblock"));
         if enforce_result.is_ok() {
             self.mesh_applied_ips.remove(&delta.ip);
         }
