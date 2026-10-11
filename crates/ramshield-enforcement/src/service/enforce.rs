@@ -148,31 +148,31 @@ impl EnforcementService {
                 None
             } else {
                 let entry = match cmd.action {
-                EnforceAction::Block => match cmd.cidr {
-                    Some(cidr) => WalEntry::BlockCidr {
-                        cidr,
-                        reason: cmd.reason.clone(),
-                        ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
-                        ts_ns: now_ns,
+                    EnforceAction::Block => match cmd.cidr {
+                        Some(cidr) => WalEntry::BlockCidr {
+                            cidr,
+                            reason: cmd.reason.clone(),
+                            ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
+                            ts_ns: now_ns,
+                        },
+                        None => WalEntry::BlockIp {
+                            ip: cmd.ip.to_string(),
+                            reason: cmd.reason.clone(),
+                            ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
+                            ts_ns: now_ns,
+                        },
                     },
-                    None => WalEntry::BlockIp {
-                        ip: cmd.ip.to_string(),
-                        reason: cmd.reason.clone(),
-                        ttl_secs: (cmd.ttl_seconds > 0).then_some(cmd.ttl_seconds),
-                        ts_ns: now_ns,
+                    EnforceAction::Unblock => match cmd.cidr {
+                        Some(cidr) => WalEntry::UnblockCidr {
+                            cidr,
+                            ts_ns: now_ns,
+                        },
+                        None => WalEntry::UnblockIp {
+                            ip: cmd.ip.to_string(),
+                            ts_ns: now_ns,
+                        },
                     },
-                },
-                EnforceAction::Unblock => match cmd.cidr {
-                    Some(cidr) => WalEntry::UnblockCidr {
-                        cidr,
-                        ts_ns: now_ns,
-                    },
-                    None => WalEntry::UnblockIp {
-                        ip: cmd.ip.to_string(),
-                        ts_ns: now_ns,
-                    },
-                },
-            };
+                };
                 let lsn = wal
                     .append(&entry)
                     .map_err(|e| EnforcementError::Wal(e.to_string()))?;
