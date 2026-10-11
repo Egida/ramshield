@@ -209,7 +209,12 @@ impl AworsetBlocklist {
             })
             .or_insert_with(|| {
                 inserted = true;
-                (delta.dot.counter, delta.created_at_ms, delta.expires_at_ms, delta.tier)
+                (
+                    delta.dot.counter,
+                    delta.created_at_ms,
+                    delta.expires_at_ms,
+                    delta.tier,
+                )
             });
 
         inserted
