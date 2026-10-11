@@ -48,6 +48,14 @@ pub struct SnapshotPage {
     pub total: usize,
 }
 
+/// Full CRDT checkpoint payload. Both active origin dots and tombstone
+/// watermarks are required to prevent resurrection after WAL retention.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AworsetSnapshot {
+    pub blocks: Vec<ClusterBlockDelta>,
+    pub unblocks: Vec<ClusterUnblockDelta>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
     pub key: String,
@@ -343,6 +351,64 @@ impl AworsetBlocklist {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Export every origin dot and tombstone for a durable checkpoint.
+    pub fn export_snapshot(&self) -> AworsetSnapshot {
+        let mut blocks: Vec<_> = self
+            .entries
+            .iter()
+            .map(|entry| ClusterBlockDelta {
+                ip: entry.key().0,
+                dot: ClusterDot {
+                    node_id: entry.key().1,
+                    incarnation: entry.key().2,
+                    counter: entry.value().0,
+                },
+                created_at_ms: entry.value().1,
+                expires_at_ms: entry.value().2,
+                tier: entry.value().3,
+            })
+            .collect();
+        let mut unblocks: Vec<_> = self
+            .tombstones
+            .iter()
+            .map(|entry| ClusterUnblockDelta {
+                ip: entry.key().0,
+                dot: ClusterDot {
+                    node_id: entry.key().1,
+                    incarnation: entry.key().2,
+                    counter: *entry.value(),
+                },
+            })
+            .collect();
+        blocks.sort_by_key(|delta| {
+            (
+                delta.ip,
+                delta.dot.node_id,
+                delta.dot.incarnation,
+                delta.dot.counter,
+            )
+        });
+        unblocks.sort_by_key(|delta| {
+            (
+                delta.ip,
+                delta.dot.node_id,
+                delta.dot.incarnation,
+                delta.dot.counter,
+            )
+        });
+        AworsetSnapshot { blocks, unblocks }
+    }
+
+    /// Merge a checkpoint payload into a fresh or existing CRDT.
+    pub fn restore_snapshot(&self, snapshot: &AworsetSnapshot) {
+        for delta in &snapshot.unblocks {
+            self.merge_unblock_delta(delta);
+        }
+        for delta in &snapshot.blocks {
+            self.merge_delta(delta);
+        }
     }
 
     /// Current unexpired IPs represented by at least one active origin dot.
