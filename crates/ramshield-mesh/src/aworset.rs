@@ -693,6 +693,31 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_roundtrip_preserves_concurrent_dots_and_tombstones() {
+        let source = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 79]);
+        let first = source.record_ban(ip, 60_000, 1);
+        let second = source.record_ban(ip, 60_000, 2);
+        let tombstone = source.record_unban(ip).into_iter().next().unwrap();
+        assert_eq!(tombstone.dot, first.dot);
+        assert!(!source.is_blocked(&ip, now_ms().saturating_add(1)));
+
+        let snapshot = source.export_snapshot();
+        let restored = AworsetBlocklist::new(9);
+        restored.restore_snapshot(&snapshot);
+        assert_eq!(restored.export_snapshot(), snapshot);
+        assert!(!restored.is_blocked(&ip, now_ms().saturating_add(1)));
+
+        // A later operation from the same origin must still win over the
+        // checkpointed tombstone watermark.
+        let newer = source.record_ban(ip, 60_000, 3);
+        assert!(newer.dot.counter > second.dot.counter);
+        let newer_snapshot = source.export_snapshot();
+        restored.restore_snapshot(&newer_snapshot);
+        assert!(restored.is_blocked(&ip, now_ms()));
+    }
+
+    #[test]
     fn prepared_ban_is_not_visible_until_committed() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 77]);
