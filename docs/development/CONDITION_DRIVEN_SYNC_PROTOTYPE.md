@@ -2,7 +2,7 @@
 
 **Status:** integrated WAL-backed prototype; receiver-confirmed recovery completion, multi-process fault-injection acceptance, and independent review remain open. Not production-ready.
 
-**Latest verified coordination baseline before this documentation update:** `dc74280121d35f86eb2443fd1ded520088b0bd47`. The previous GitHub workflow lookup returned no PR-triggered workflow runs for this SHA; exact-head CI/review/backlog status is therefore **unverified**, not green. See [MESH_RECOVERY_ACCEPTANCE_MATRIX.md](MESH_RECOVERY_ACCEPTANCE_MATRIX.md) for the durable contract, acceptance matrix, ownership, and handoff process.
+**Status discipline:** this document describes the implementation, not the live branch status. Before each run, fetch the current PR #19 HEAD and verify checks on that exact SHA; missing workflow runs/checks are **unverified**, not green. See [MESH_RECOVERY_ACCEPTANCE_MATRIX.md](MESH_RECOVERY_ACCEPTANCE_MATRIX.md) for the durable contract, acceptance matrix, ownership, and handoff process.
 
 **Branch:** prototype/condition-driven-mesh-sync-20261011
 
@@ -34,7 +34,7 @@ Prototype defaults are 50 ms coalescing, a 30 s repair interval, 250 ms initial 
 7. Startup restores checkpointed CRDT provenance/tombstones and replays the WAL tail. If required history was pruned and no provenance-bearing checkpoint exists, hard-WAL mode fails closed.
 8. If a peer cursor falls behind WAL retention, the sender holds that cursor pending a fixed full CRDT snapshot. The recovery boundary and snapshot are captured once per attempt; repeated ticks cannot restart the attempt or move the boundary.
 
-The transport's full-sync rotation currently considers completion after every frame/page in the current generation has received an accepted application ACK. Enforcement then consumes a local completion marker and resumes WAL replay after the captured boundary. **This is not yet a separate receiver-level RecoveryComplete handshake that echoes the generation, boundary, and a digest of the snapshot.** Treat that as remaining protocol-hardening work; do not describe the current marker as a receiver-confirmed snapshot transaction.
+**Current recovery behavior is deliberately fail-closed:** frame ACKs may set a local transfer marker, but they are not whole-recovery completion. Enforcement gates WAL replay while `recovery_completion_pending(peer)` remains true; the local marker does not prove receiver-wide completion and must not release the cursor. The required receiver-confirmed handshake bound to generation + captured source-WAL boundary + canonical snapshot digest is still missing. Until it is implemented and verified, recovery remains pending rather than resuming unsafely.
 
 ## State-machine contract
 
@@ -53,9 +53,9 @@ Each configured peer owns one ConditionSyncPlanner.
 - Each configured peer has its own planner, delivery-failure flag, recovery generation, fixed snapshot (when recovering), and recovery boundary.
 - Local broadcasts mark peers dirty; send failures request repair; success after a recorded failure triggers reconnect repair.
 - Inbound queue overflow is surfaced to the scheduler after releasing the queue lock.
-- Enforcement uses drain_with_ack() and acknowledges only after processing; WAL batches return the sender's page-end LSN only after all contained mutations are accepted.
+- Enforcement uses `drain_with_ack()` and acknowledges only after processing; WAL batches return the sender-local batch-end LSN only after all contained mutations are accepted.
 - Full-state recovery exports one fixed, deterministically ordered snapshot under an exclusive CRDT snapshot barrier and splits it into 16-entry wire frames; every frame requires an authenticated application ACK. This avoids a moving cursor over a live map, but the snapshot currently consumes memory proportional to the full CRDT state. WAL batches are separately bounded and active sends use a shared writer semaphore and per-frame deadlines.
-- The former snapshot_page(cursor, limit) and rotating live-map snapshot mechanisms have been removed from the prototype.
+- Live-map snapshot pagination (`snapshot_page(cursor, limit)`) and rotating snapshot traversal are explicitly rejected and have been removed. Do not reintroduce or rename that design; fixed recovery snapshots plus the WAL tail are the accepted approach.
 - CRDT state includes origin dots and tombstone high-water marks so concurrent origin mutations are not collapsed into one peer's aggregate event.
 
 ## Acceptance work still required
@@ -79,7 +79,7 @@ The script archives the current committed HEAD into a fresh temporary directory 
 
 ## Verified regression coverage
 
-The integrated branch contains tests for WAL LSN paging, checkpoint/tombstone roundtrip, checkpoint-seed plus WAL-tail folding, positive/negative application ACKs, enforcement-level WAL-batch TCP handling, and a recovery-boundary regression that proves repeated recovery requests do not move the captured boundary.
+The integrated branch contains tests for bounded WAL-batch LSN behavior, checkpoint/tombstone roundtrip, checkpoint-seed plus WAL-tail folding, positive/negative application ACKs, enforcement-level WAL-batch TCP handling, and a recovery-boundary regression that proves repeated recovery requests do not move the captured boundary. These are existing test descriptions, not a claim that they have run successfully on the current HEAD.
 
 ## Acceptance bar
 
