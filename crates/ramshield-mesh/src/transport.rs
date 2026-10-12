@@ -130,6 +130,10 @@ struct PeerSyncState {
     /// Invalidates an in-flight page when retention recovery requests a full
     /// snapshot, preventing an older completion from overwriting cursor=None.
     generation: u64,
+    /// Sender WAL boundary captured when the recovery attempt starts.
+    recovery_boundary_lsn: Option<u64>,
+    /// Completed local snapshot rotation, awaiting consumption by enforcement.
+    completed_recovery: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +217,8 @@ impl MeshHandle {
                                 cursor: None,
                                 delivery_failed: false,
                                 generation: 0,
+                                recovery_boundary_lsn: None,
+                                completed_recovery: None,
                             },
                         )
                     })
@@ -295,14 +301,28 @@ impl MeshHandle {
     }
 
     /// Request a full CRDT anti-entropy rotation for a peer after its WAL
-    /// history fell behind retention.
-    pub async fn request_full_sync(&self, peer: SocketAddr) {
+    /// history fell behind retention. The boundary is fixed for the lifetime
+    /// of the attempt; repeated tick calls must not restart an in-flight repair.
+    pub async fn request_full_sync(&self, peer: SocketAddr, boundary_lsn: u64) {
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
-            state.generation = state.generation.wrapping_add(1);
-            state.cursor = None;
-            state.planner.condition(SyncCondition::LocalMutation, now);
+            if state.recovery_boundary_lsn.is_none() && state.completed_recovery.is_none() {
+                state.generation = state.generation.wrapping_add(1);
+                state.cursor = None;
+                state.recovery_boundary_lsn = Some(boundary_lsn);
+                state.planner.condition(SyncCondition::LocalMutation, now);
+            }
         }
+    }
+
+    /// Consume a completed full-state rotation. Completion is published only
+    /// after every frame in every page of the current generation was accepted.
+    pub async fn take_completed_recovery(&self, peer: SocketAddr) -> Option<(u64, u64)> {
+        self.sync_states
+            .lock()
+            .await
+            .get_mut(&peer)
+            .and_then(|state| state.completed_recovery.take())
     }
 
     /// Send a WAL batch and return the sender-local LSN durably acknowledged
@@ -513,6 +533,11 @@ impl MeshHandle {
                                     state
                                         .planner
                                         .condition(SyncCondition::LocalMutation, completed_at);
+                                } else if let Some(boundary_lsn) = state.recovery_boundary_lsn.take() {
+                                    // This generation completed a full rotation. The enforcement
+                                    // actor advances its WAL cursor to the captured boundary, not
+                                    // to the WAL's newer current end.
+                                    state.completed_recovery = Some((generation, boundary_lsn));
                                 }
                             }
                         } else {

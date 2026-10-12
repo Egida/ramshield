@@ -115,6 +115,28 @@ impl EnforcementService {
             if !inserted {
                 continue;
             }
+            if let Some((_generation, boundary_lsn)) =
+                handle.take_completed_recovery(peer).await
+            {
+                if let Ok(mut values) = cursors.lock() {
+                    let current = values.get(&peer).copied().unwrap_or(0);
+                    if boundary_lsn >= current {
+                        values.insert(peer, boundary_lsn);
+                        info!(
+                            peer = %peer,
+                            boundary_lsn,
+                            "full CRDT recovery rotation completed; WAL tail resumes at boundary + 1"
+                        );
+                    } else {
+                        warn!(
+                            peer = %peer,
+                            current_cursor = current,
+                            boundary_lsn,
+                            "ignored stale full recovery completion"
+                        );
+                    }
+                }
+            }
             let cursor = cursors
                 .lock()
                 .ok()
@@ -141,15 +163,15 @@ impl EnforcementService {
                         None => cursor < latest_lsn,
                     };
                     if history_gap {
-                        peer_handle.request_full_sync(peer).await;
+                        peer_handle.request_full_sync(peer, latest_lsn).await;
                         warn!(
                             peer = %peer,
                             cursor_lsn = cursor,
                             oldest_lsn = ?oldest_lsn,
                             boundary_lsn = latest_lsn,
-                            "mesh WAL cursor fell behind retention; requested full CRDT anti-entropy and reset tail boundary"
+                            "mesh WAL cursor fell behind retention; requested full CRDT anti-entropy and retained cursor pending completion"
                         );
-                        return Some(latest_lsn);
+                        return None;
                     }
 
                     let read_wal = peer_wal.clone();
@@ -169,25 +191,25 @@ impl EnforcementService {
                         }
                     };
                     if records.is_empty() {
-                        peer_handle.request_full_sync(peer).await;
+                        peer_handle.request_full_sync(peer, latest_lsn).await;
                         warn!(
                             peer = %peer,
                             cursor_lsn = cursor,
                             boundary_lsn = latest_lsn,
-                            "mesh WAL page is empty despite an outstanding tail; requested CRDT anti-entropy"
+                            "mesh WAL page is empty despite an outstanding tail; requested CRDT anti-entropy and retained cursor pending completion"
                         );
-                        return Some(latest_lsn);
+                        return None;
                     }
                     if records[0].0 > cursor.saturating_add(1) {
-                        peer_handle.request_full_sync(peer).await;
+                        peer_handle.request_full_sync(peer, latest_lsn).await;
                         warn!(
                             peer = %peer,
                             cursor_lsn = cursor,
                             first_lsn = records[0].0,
                             boundary_lsn = latest_lsn,
-                            "mesh WAL page exposed a history gap; requested CRDT anti-entropy"
+                            "mesh WAL page exposed a history gap; requested CRDT anti-entropy and retained cursor pending completion"
                         );
-                        return Some(latest_lsn);
+                        return None;
                     }
                     let start_lsn = records[0].0;
                     let end_lsn = records.last().map(|record| record.0).unwrap_or(cursor);
