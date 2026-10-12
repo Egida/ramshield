@@ -132,7 +132,8 @@ struct PeerSyncState {
     generation: u64,
     /// Sender WAL boundary captured when the recovery attempt starts.
     recovery_boundary_lsn: Option<u64>,
-    /// Completed local snapshot rotation, awaiting consumption by enforcement.
+    /// Local snapshot transfer finished after frame ACKs; awaiting enforcement consumption.
+    /// This is not yet a receiver-confirmed generation/boundary/digest handshake.
     completed_recovery: Option<(u64, u64)>,
 }
 
@@ -155,7 +156,7 @@ pub struct ReceivedMeshMessage {
 impl ReceivedMeshMessage {
     /// Complete the receive-side application handshake. True means the
     /// mutation was durably accepted (or intentionally ignored as stale/policy
-    /// suppressed); false asks the sender to retry the page.
+    /// suppressed); false asks the sender to retry the frame.
     pub fn acknowledge(self, accepted: bool) {
         self.acknowledge_with_lsn(accepted, None);
     }
@@ -317,7 +318,7 @@ impl MeshHandle {
     }
 
     /// Consume a completed full-state rotation. Completion is published only
-    /// after every frame in every page of the current generation was accepted.
+    /// after every bounded frame in the current generation was application-ACKed.
     pub async fn take_completed_recovery(&self, peer: SocketAddr) -> Option<(u64, u64)> {
         self.sync_states
             .lock()
@@ -1146,7 +1147,7 @@ mod frame_tests {
                 }
             })
             .await
-            .expect("receiver should acknowledge the WAL page boundary");
+            .expect("receiver should acknowledge the WAL batch boundary");
             assert_eq!(
                 sender.await.expect("WAL sender task").expect("WAL ACK"),
                 Some(11)
@@ -1181,7 +1182,7 @@ mod frame_tests {
                 }
             })
             .await
-            .expect("receiver should reject the WAL page");
+            .expect("receiver should reject the WAL batch");
             assert!(
                 rejected_sender
                     .await
@@ -1585,11 +1586,11 @@ mod frame_tests {
                 }
             })
             .await
-            .expect("full recovery rotation should complete after acknowledged pages");
+            .expect("full recovery transfer should complete after acknowledged frames");
 
             assert!(
                 generation > 0,
-                "recovery must invalidate any older page task"
+                "recovery must invalidate any older repair task"
             );
             assert_eq!(
                 boundary_lsn, 17,
