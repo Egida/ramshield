@@ -66,7 +66,13 @@ pub(crate) fn scan_segment<R: Read + Seek>(
 
     loop {
         let mut peek = [0u8; 1];
-        let n = file.read(&mut peek).map_err(Error::from_io)?;
+        let n = loop {
+            match file.read(&mut peek) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(Error::from_io(e)),
+                Ok(n) => break n,
+            }
+        };
         if n == 0 {
             break;
         }
@@ -108,9 +114,11 @@ pub(crate) fn scan_segment<R: Read + Seek>(
 
         let mut available = 0usize;
         while available < plen {
-            let n = file
-                .read(&mut payload_buf[available..plen])
-                .map_err(Error::from_io)?;
+            let n = match file.read(&mut payload_buf[available..plen]) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(Error::from_io(e)),
+                Ok(n) => n,
+            };
 
             if n == 0 {
                 break;
@@ -293,7 +301,29 @@ mod tests {
     use super::*;
     use crate::record::{HEADER_SIZE, RecordHeader, encode_payload};
     use crate::testkit::FailingReader;
-    use std::io::Write;
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+
+    struct InterruptOnceReader {
+        inner: Cursor<Vec<u8>>,
+        interrupt_at: u64,
+        interrupted: bool,
+    }
+
+    impl Read for InterruptOnceReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted && self.inner.position() == self.interrupt_at {
+                self.interrupted = true;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for InterruptOnceReader {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
 
     fn tmp_path(tag: &str) -> PathBuf {
         let ns = std::time::SystemTime::now()
@@ -367,5 +397,35 @@ mod tests {
         assert_eq!(valid, (HEADER_SIZE + 5) as u64);
         assert!(matches!(tail, TailState::PartialHeader { .. }));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried_for_header_and_payload() {
+        let (stored, flags) = encode_payload(b"payload", false, 64);
+        let rh = RecordHeader::new(Lsn::new(1), &stored, flags);
+        let mut hdr = [0u8; HEADER_SIZE];
+        rh.encode(&mut hdr);
+        let mut bytes = hdr.to_vec();
+        bytes.extend_from_slice(&stored);
+
+        for interrupt_at in [0, HEADER_SIZE as u64] {
+            let mut reader = InterruptOnceReader {
+                inner: Cursor::new(bytes.clone()),
+                interrupt_at,
+                interrupted: false,
+            };
+            let mut prev = None;
+            let mut out = Vec::new();
+
+            let (valid, truncate, tail) =
+                scan_segment(&mut reader, 1, &mut prev, &mut out).unwrap();
+
+            assert_eq!(valid, bytes.len() as u64);
+            assert!(!truncate);
+            assert!(matches!(tail, TailState::Clean));
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].payload, b"payload");
+            assert!(reader.interrupted);
+        }
     }
 }
