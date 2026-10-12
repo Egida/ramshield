@@ -60,13 +60,17 @@ Rules:
 
 ## GitHub-side independent workers
 
-GitHub Copilot cloud agent can be assigned to a well-scoped issue when enabled for the repository. It works asynchronously and creates a pull request for review. Use it as an independent worker, not as the reviewer for its own change. Give the issue:
+GitHub Copilot cloud agent can be assigned to a well-scoped issue when enabled for the repository. It works asynchronously in a GitHub-hosted environment, can run tests, and creates a pull request for review. Use it as an independent worker, not as the reviewer for its own change.
+
+Supported launch paths include issue assignment and mentioning `@copilot` in an open pull request comment. For an issue assignment, select the target repository and base branch explicitly. For a PR comment, explicitly request a separate PR based on the safe target branch; Copilot otherwise may push directly to the existing PR branch. Verify dispatch by observing the Copilot 👀 reaction/session timeline and then a resulting branch/PR. A posted mention alone is not proof that an agent started. Availability depends on the Copilot plan and repository policy.
+
+Give each task:
 1. one bounded task and target area,
 2. explicit acceptance criteria and forbidden paths,
 3. requirement to run tests and report actual commands/results,
 4. no permission to merge/deploy or alter production settings.
 
-For PR #19, a Copilot worker must target a dedicated branch/PR based on `audit-branch`, not the default `master` branch. If the GitHub assignment UI cannot select that base branch, do not dispatch it against the default branch; use the isolated automation branch or wait until a safe target is available.
+For PR #19, a Copilot worker must target a dedicated branch/PR based on `audit-branch` or the isolated PR #19 branch, depending on the task; never default to `master`. For agent-flow follow-up issue #21, the safe base is `automation/github-mcp-flow-pilot-20261012`. The current MCP connector can post comments and assign ordinary users but does not expose the Copilot-specific assignment operation with an explicit base-branch argument. Do not attempt an ordinary API assignment that might default to `master`. If the GitHub UI cannot select the exact safe branch, stop rather than dispatching to an unsafe base. If a Copilot mention receives no reaction/session, report NOT DISPATCHED and verify repository/plan enablement rather than claiming a worker is active.
 
 ## Workflow trust boundary
 
