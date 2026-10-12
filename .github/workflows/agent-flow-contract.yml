@@ -8,7 +8,9 @@ on:
     branches: [audit-branch]
     paths:
       - ".github/agent-flow/**"
+      - ".github/agents/**"
       - ".github/workflows/agent-flow-contract.yml"
+      - "docs/development/AGENT_FLOW_RUNBOOK.md"
 
 permissions:
   contents: read
