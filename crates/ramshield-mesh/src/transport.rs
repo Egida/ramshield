@@ -1554,7 +1554,7 @@ mod frame_tests {
             .expect("bind receiver");
 
             sender.request_full_sync(receiver_addr, 17).await;
-            // A repeated tick must not replace the captured boundary with a
+            // Repeated ticks must not replace the captured boundary with a
             // newer WAL end while the same repair attempt is in flight.
             sender.request_full_sync(receiver_addr, 99).await;
             assert!(
@@ -1567,30 +1567,32 @@ mod frame_tests {
             let (generation, boundary_lsn) =
                 tokio::time::timeout(Duration::from_secs(3), async {
                     loop {
-                    for received in receiver.drain_with_ack().await {
-                        match received.message.clone() {
-                            MeshMessage::Block(delta) => {
-                                receiver_state.merge_delta(&delta);
-                            }
-                            MeshMessage::Unblock(delta) => {
-                                receiver_state.merge_unblock_delta(&delta);
-                            }
-                            MeshMessage::Sync { blocks, unblocks } => {
-                                for delta in blocks {
+                        for received in receiver.drain_with_ack().await {
+                            match received.message.clone() {
+                                MeshMessage::Block(delta) => {
                                     receiver_state.merge_delta(&delta);
                                 }
-                                for delta in unblocks {
+                                MeshMessage::Unblock(delta) => {
                                     receiver_state.merge_unblock_delta(&delta);
                                 }
+                                MeshMessage::Sync { blocks, unblocks } => {
+                                    for delta in blocks {
+                                        receiver_state.merge_delta(&delta);
+                                    }
+                                    for delta in unblocks {
+                                        receiver_state.merge_unblock_delta(&delta);
+                                    }
+                                }
+                                MeshMessage::WalBatch { .. } => {}
                             }
-                            MeshMessage::WalBatch { .. } => {}
+                            received.acknowledge(true);
                         }
-                        received.acknowledge(true);
-                    }
-                    if let Some(completed) = sender.take_completed_recovery(receiver_addr).await {
-                        break completed;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                        if let Some(completed) =
+                            sender.take_completed_recovery(receiver_addr).await
+                        {
+                            break completed;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 })
                 .await
