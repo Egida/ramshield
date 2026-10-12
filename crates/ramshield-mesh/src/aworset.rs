@@ -9,45 +9,12 @@
 use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 pub type Dot = u64;
 pub(crate) type BlockKey = (IpAddr, u32, Uuid);
 pub(crate) type BlockState = (u64, u64, u64, u8);
-type SnapshotKey = (IpAddr, u32, Uuid, u8);
-/// Stable identity of an item in the deterministic anti-entropy ordering.
-///
-/// The cursor deliberately excludes the operation counter: counters can change
-/// while a page walk is in progress, but the identity key remains stable.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct StateCursor {
-    pub ip: IpAddr,
-    pub node_id: u32,
-    pub incarnation: Uuid,
-    pub kind: StateKind,
-}
-
-/// Distinguishes a live block from a tombstone for the same CRDT key.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub enum StateKind {
-    Block,
-    Unblock,
-}
-
-/// One bounded snapshot page and its seek-based continuation.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SnapshotPage {
-    pub blocks: Vec<ClusterBlockDelta>,
-    pub unblocks: Vec<ClusterUnblockDelta>,
-    /// Last included key when more items remain; None means this pass is complete.
-    pub next_cursor: Option<StateCursor>,
-    pub has_more: bool,
-    pub total: usize,
-}
-
 /// Full CRDT checkpoint payload. Both active origin dots and tombstone
 /// watermarks are required to prevent resurrection after WAL retention.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -201,7 +168,6 @@ pub struct AworsetBlocklist {
     /// resurrect an old ban from a disconnected peer.
     pub(crate) tombstones: DashMap<BlockKey, u64>,
     next_dot_counter: AtomicU64,
-    snapshot_cursor: AtomicUsize,
 }
 
 impl AworsetBlocklist {
@@ -213,7 +179,6 @@ impl AworsetBlocklist {
             entries: DashMap::new(),
             tombstones: DashMap::new(),
             next_dot_counter: AtomicU64::new(0),
-            snapshot_cursor: AtomicUsize::new(0),
         }
     }
 
@@ -550,174 +515,10 @@ impl AworsetBlocklist {
         }
         changed
     }
-    /// Return a bounded anti-entropy page for a caller-owned cursor.
-    ///
-    /// Unlike `snapshot`, this method does not share cursor state between
-    /// callers. A transport can therefore keep one cursor per peer and avoid
-    /// letting a fast peer advance another peer's repair position. The cursor
-    /// is an index into a deterministic sorted snapshot, not a durable
-    /// acknowledgement; concurrent mutations may cause duplicates or skips,
-    /// which periodic full rotations must repair.
-    pub fn snapshot_page(&self, cursor: Option<&StateCursor>, limit: usize) -> SnapshotPage {
-        enum SnapshotItem {
-            Block(ClusterBlockDelta),
-            Unblock(ClusterUnblockDelta),
-        }
+    // Full anti-entropy state is exported as one immutable, deterministically
+    // ordered value. Transport framing may split this value for delivery, but
+    // recovery does not walk a live mutable map with a continuation cursor.
 
-        let mut items: Vec<(StateCursor, SnapshotItem)> =
-            Vec::with_capacity(self.entries.len() + self.tombstones.len());
-        for entry in self.entries.iter() {
-            let key = *entry.key();
-            items.push((
-                StateCursor {
-                    ip: key.0,
-                    node_id: key.1,
-                    incarnation: key.2,
-                    kind: StateKind::Block,
-                },
-                SnapshotItem::Block(ClusterBlockDelta {
-                    ip: key.0,
-                    dot: ClusterDot {
-                        node_id: key.1,
-                        incarnation: key.2,
-                        counter: entry.value().0,
-                    },
-                    created_at_ms: entry.value().1,
-                    expires_at_ms: entry.value().2,
-                    tier: entry.value().3,
-                }),
-            ));
-        }
-        for tombstone in self.tombstones.iter() {
-            let key = *tombstone.key();
-            items.push((
-                StateCursor {
-                    ip: key.0,
-                    node_id: key.1,
-                    incarnation: key.2,
-                    kind: StateKind::Unblock,
-                },
-                SnapshotItem::Unblock(ClusterUnblockDelta {
-                    ip: key.0,
-                    dot: ClusterDot {
-                        node_id: key.1,
-                        incarnation: key.2,
-                        counter: *tombstone.value(),
-                    },
-                }),
-            ));
-        }
-        items.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-
-        let total = items.len();
-        if limit == 0 {
-            return SnapshotPage {
-                total,
-                ..SnapshotPage::default()
-            };
-        }
-
-        let start = match cursor {
-            Some(cursor) => items.partition_point(|(key, _)| key <= cursor),
-            None => 0,
-        };
-        let available = total.saturating_sub(start);
-        let count = limit.min(available);
-        let has_more = available > count;
-        let next_cursor = if has_more {
-            count
-                .checked_sub(1)
-                .and_then(|last| items.get(start + last))
-                .map(|(key, _)| key.clone())
-        } else {
-            None
-        };
-
-        let mut blocks = Vec::with_capacity(count);
-        let mut unblocks = Vec::with_capacity(count);
-        for (_, item) in items.into_iter().skip(start).take(count) {
-            match item {
-                SnapshotItem::Block(block) => blocks.push(block),
-                SnapshotItem::Unblock(unblock) => unblocks.push(unblock),
-            }
-        }
-        SnapshotPage {
-            blocks,
-            unblocks,
-            next_cursor,
-            has_more,
-            total,
-        }
-    }
-
-    /// Return a bounded, rotating anti-entropy page.
-    ///
-    /// Items are sorted before paging so a stable state has deterministic order.
-    /// The cursor advances between calls, preventing a fixed map prefix from
-    /// starving keys beyond the per-sync budget. Concurrent state changes can
-    /// cause duplicates or temporary skips; repeated rotations repair those
-    /// changes, while delivery acknowledgement is a separate concern.
-    pub fn snapshot(&self, limit: usize) -> (Vec<ClusterBlockDelta>, Vec<ClusterUnblockDelta>) {
-        enum SnapshotItem {
-            Block(ClusterBlockDelta),
-            Unblock(ClusterUnblockDelta),
-        }
-
-        if limit == 0 {
-            return (Vec::new(), Vec::new());
-        }
-
-        let mut items: Vec<(SnapshotKey, SnapshotItem)> =
-            Vec::with_capacity(self.entries.len() + self.tombstones.len());
-        for entry in self.entries.iter() {
-            let key = *entry.key();
-            items.push((
-                (key.0, key.1, key.2, 0),
-                SnapshotItem::Block(ClusterBlockDelta {
-                    ip: key.0,
-                    dot: ClusterDot {
-                        node_id: key.1,
-                        incarnation: key.2,
-                        counter: entry.value().0,
-                    },
-                    created_at_ms: entry.value().1,
-                    expires_at_ms: entry.value().2,
-                    tier: entry.value().3,
-                }),
-            ));
-        }
-        for tombstone in self.tombstones.iter() {
-            let key = *tombstone.key();
-            items.push((
-                (key.0, key.1, key.2, 1),
-                SnapshotItem::Unblock(ClusterUnblockDelta {
-                    ip: key.0,
-                    dot: ClusterDot {
-                        node_id: key.1,
-                        incarnation: key.2,
-                        counter: *tombstone.value(),
-                    },
-                }),
-            ));
-        }
-        items.sort_unstable_by_key(|(key, _)| *key);
-
-        let total = items.len();
-        if total == 0 {
-            return (Vec::new(), Vec::new());
-        }
-        let start = self.snapshot_cursor.fetch_add(limit, Ordering::Relaxed) % total;
-        let count = limit.min(total);
-        let mut blocks = Vec::with_capacity(count);
-        let mut unblocks = Vec::with_capacity(count);
-        for offset in 0..count {
-            match &items[(start + offset) % total].1 {
-                SnapshotItem::Block(block) => blocks.push(block.clone()),
-                SnapshotItem::Unblock(unblock) => unblocks.push(unblock.clone()),
-            }
-        }
-        (blocks, unblocks)
-    }
 }
 
 #[cfg(test)]
@@ -1054,126 +855,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_rotates_through_more_entries_than_one_sync_budget() {
-        const TOTAL: usize = 5_000;
-        const PAGE: usize = 1_024;
-        let mesh = AworsetBlocklist::new(7);
-        for n in 0..TOTAL {
-            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.record_ban(ip, 60_000, 1);
-        }
-
-        let mut observed = std::collections::HashSet::new();
-        for _ in 0..TOTAL.div_ceil(PAGE) {
-            let (blocks, unblocks) = mesh.snapshot(PAGE);
-            assert!(blocks.len() + unblocks.len() <= PAGE);
-            observed.extend(blocks.into_iter().map(|delta| delta.ip));
-        }
-        assert_eq!(observed.len(), TOTAL);
-    }
-
-    #[test]
-    fn snapshot_rotates_through_mixed_blocks_and_tombstones() {
+    fn exported_snapshot_covers_large_mixed_state() {
         const EACH: usize = 2_500;
-        const PAGE: usize = 1_024;
-        let mesh = AworsetBlocklist::new(7);
-        let block_incarnation = Uuid::new_v4();
-        let tombstone_incarnation = Uuid::new_v4();
-        for n in 0..EACH {
-            let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.entries.insert(
-                (block_ip, 7, block_incarnation),
-                (n as u64 + 1, 0, u64::MAX, 2),
-            );
-
-            let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
-            mesh.tombstones
-                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
-        }
-
-        let mut observed_blocks = std::collections::HashSet::new();
-        let mut observed_tombstones = std::collections::HashSet::new();
-        for _ in 0..(EACH * 2).div_ceil(PAGE) {
-            let (blocks, unblocks) = mesh.snapshot(PAGE);
-            assert!(blocks.len() + unblocks.len() <= PAGE);
-            observed_blocks.extend(blocks.into_iter().map(|delta| delta.ip));
-            observed_tombstones.extend(unblocks.into_iter().map(|delta| delta.ip));
-        }
-        assert_eq!(observed_blocks.len(), EACH);
-        assert_eq!(observed_tombstones.len(), EACH);
-    }
-
-    #[test]
-    fn snapshot_page_cursors_are_independent_and_bounded() {
-        let mesh = AworsetBlocklist::new(7);
-        for n in 0..5 {
-            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.record_ban(ip, 60_000, 1);
-        }
-
-        let peer_a_first = mesh.snapshot_page(None, 2);
-        let peer_b_first = mesh.snapshot_page(None, 2);
-        assert_eq!(peer_a_first, peer_b_first);
-        assert_eq!(peer_a_first.total, 5);
-        assert_eq!(peer_a_first.blocks.len() + peer_a_first.unblocks.len(), 2);
-        assert!(peer_a_first.has_more);
-        let peer_a_cursor = peer_a_first
-            .next_cursor
-            .clone()
-            .expect("second page exists");
-
-        let peer_a_second = mesh.snapshot_page(Some(&peer_a_cursor), 2);
-        assert_eq!(peer_a_second.total, 5);
-        assert_eq!(peer_a_second.blocks.len() + peer_a_second.unblocks.len(), 2);
-        assert!(peer_a_second.has_more);
-        assert_ne!(
-            peer_a_first.blocks[0].ip, peer_a_second.blocks[0].ip,
-            "advancing one peer cursor should select a different page"
-        );
-        assert_eq!(mesh.snapshot_page(None, 2), peer_b_first);
-    }
-
-    #[test]
-    fn snapshot_page_seek_survives_mutations_before_and_after_cursor() {
-        let mesh = AworsetBlocklist::new(7);
-        for n in 0..6 {
-            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.record_ban(ip, 60_000, 1);
-        }
-
-        let first = mesh.snapshot_page(None, 2);
-        let cursor = first.next_cursor.clone().expect("more items remain");
-        let last_first_ip = first.blocks.last().expect("first page has blocks").ip;
-
-        // Add one key on either side of the cursor, and remove an earlier key.
-        mesh.record_ban(IpAddr::V6(std::net::Ipv6Addr::from(0u128)), 60_000, 1);
-        mesh.record_ban(IpAddr::V6(std::net::Ipv6Addr::from(100u128)), 60_000, 1);
-        mesh.record_unban(IpAddr::V6(std::net::Ipv6Addr::from(0u128)));
-
-        let second = mesh.snapshot_page(Some(&cursor), 16);
-        assert!(second.blocks.iter().all(|delta| {
-            StateCursor {
-                ip: delta.ip,
-                node_id: delta.dot.node_id,
-                incarnation: delta.dot.incarnation,
-                kind: StateKind::Block,
-            } > cursor
-        }));
-        assert!(
-            second
-                .blocks
-                .iter()
-                .any(|delta| { delta.ip == IpAddr::V6(std::net::Ipv6Addr::from(100u128)) })
-        );
-        assert!(!second.blocks.iter().any(|delta| delta.ip == last_first_ip));
-        assert!(!second.has_more);
-        assert!(second.next_cursor.is_none());
-    }
-
-    #[test]
-    fn snapshot_page_covers_large_mixed_state_exactly_once() {
-        const EACH: usize = 2_500;
-        const LIMIT: usize = 4_096;
         let mesh = AworsetBlocklist::new(7);
         let block_incarnation = Uuid::new_v4();
         let tombstone_incarnation = Uuid::new_v4();
@@ -1182,48 +865,23 @@ mod tests {
 
         for n in 0..EACH {
             let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.entries.insert(
-                (block_ip, 7, block_incarnation),
-                (n as u64 + 1, 0, u64::MAX, 2),
-            );
+            mesh.entries.insert((block_ip, 7, block_incarnation), (n as u64 + 1, 0, u64::MAX, 2));
             expected_blocks.insert(block_ip);
 
             let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
-            mesh.tombstones
-                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
+            mesh.tombstones.insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
             expected_tombstones.insert(tombstone_ip);
         }
 
-        let first = mesh.snapshot_page(None, LIMIT);
-        assert_eq!(first.total, EACH * 2);
-        assert_eq!(first.blocks.len() + first.unblocks.len(), LIMIT);
-        assert!(first.has_more);
-        let cursor = first.next_cursor.clone().expect("second page exists");
-
-        let second = mesh.snapshot_page(Some(&cursor), LIMIT);
-        assert_eq!(second.total, EACH * 2);
-        assert_eq!(
-            second.blocks.len() + second.unblocks.len(),
-            EACH * 2 - LIMIT
-        );
-        assert!(!second.has_more);
-        assert!(second.next_cursor.is_none());
-
-        let observed_blocks: std::collections::HashSet<_> = first
-            .blocks
-            .into_iter()
-            .chain(second.blocks)
-            .map(|delta| delta.ip)
-            .collect();
-        let observed_tombstones: std::collections::HashSet<_> = first
-            .unblocks
-            .into_iter()
-            .chain(second.unblocks)
-            .map(|delta| delta.ip)
-            .collect();
-
-        assert_eq!(observed_blocks, expected_blocks);
-        assert_eq!(observed_tombstones, expected_tombstones);
+        let snapshot = mesh.export_snapshot();
+        assert_eq!(snapshot.blocks.len(), EACH);
+        assert_eq!(snapshot.unblocks.len(), EACH);
+        assert_eq!(snapshot.blocks.iter().map(|delta| delta.ip).collect::<std::collections::HashSet<_>>(), expected_blocks);
+        assert_eq!(snapshot.unblocks.iter().map(|delta| delta.ip).collect::<std::collections::HashSet<_>>(), expected_tombstones);
+        assert!(snapshot.blocks.windows(2).all(|pair| {
+            (pair[0].ip, pair[0].dot.node_id, pair[0].dot.incarnation, pair[0].dot.counter)
+                <= (pair[1].ip, pair[1].dot.node_id, pair[1].dot.incarnation, pair[1].dot.counter)
+        }));
     }
 
     #[test]
@@ -1231,13 +889,15 @@ mod tests {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
         let ban = mesh.record_ban(ip, 60_000, 3);
-        let (blocks, _) = mesh.snapshot(16);
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].dot, ban.dot);
         assert_eq!(blocks[0].tier, ban.tier);
         let unblocks = mesh.record_unban(ip);
         assert_eq!(unblocks.len(), 1);
-        let (_, tombstones) = mesh.snapshot(16);
+        let snapshot = mesh.export_snapshot();
+        let tombstones = snapshot.unblocks;
         assert_eq!(tombstones.len(), 1);
         assert_eq!(tombstones[0].dot, ban.dot);
     }
