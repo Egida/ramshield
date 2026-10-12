@@ -206,3 +206,69 @@ async fn invalid_hmac_frame_never_enters_receive_queue() {
     );
     receiver.shutdown();
 }
+
+
+/// A real TCP transfer can acknowledge every snapshot frame and still must not
+/// release the sender's retention-gap WAL replay gate. Only the future
+/// receiver-confirmed whole-recovery completion handshake may do that.
+#[tokio::test]
+async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
+    let receiver_addr = free_addr().await;
+    let receiver = MeshHandle::bind(
+        2,
+        Arc::new(AworsetBlocklist::new(2)),
+        receiver_addr,
+        Vec::new(),
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind recovery receiver");
+    let sender = MeshHandle::bind(
+        1,
+        Arc::new(AworsetBlocklist::new(1)),
+        free_addr().await,
+        vec![receiver_addr],
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind recovery sender");
+
+    // Empty state deliberately exercises the required one-frame empty snapshot.
+    let boundary_lsn = 42;
+    sender.request_full_sync(receiver_addr, boundary_lsn).await;
+    assert!(
+        sender.recovery_completion_pending(receiver_addr).await,
+        "retention-gap recovery must pin WAL replay as soon as it starts"
+    );
+
+    let transfer = timeout(Duration::from_secs(4), async {
+        loop {
+            for received in receiver.drain_with_ack().await {
+                assert!(
+                    matches!(received.message, MeshMessage::Sync { .. }),
+                    "full recovery should be delivered as snapshot frames"
+                );
+                received.acknowledge(true);
+            }
+
+            if let Some((generation, boundary)) =
+                sender.acked_recovery_transfer(receiver_addr).await
+            {
+                break (generation, boundary);
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("receiver should application-ACK the fixed recovery snapshot");
+
+    assert!(transfer.0 > 0, "recovery generation must be non-zero");
+    assert_eq!(transfer.1, boundary_lsn);
+    assert!(
+        sender.recovery_completion_pending(receiver_addr).await,
+        "ACKs for all snapshot frames are not receiver-confirmed whole-recovery completion"
+    );
+
+    sender.shutdown();
+    receiver.shutdown();
+}
