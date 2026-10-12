@@ -1557,10 +1557,16 @@ mod frame_tests {
             // A repeated tick must not replace the captured boundary with a
             // newer WAL end while the same repair attempt is in flight.
             sender.request_full_sync(receiver_addr, 99).await;
-            assert!(sender.take_completed_recovery(receiver_addr).await.is_none());
+            assert!(
+                sender
+                    .take_completed_recovery(receiver_addr)
+                    .await
+                    .is_none()
+            );
 
-            let (generation, boundary_lsn) = tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
+            let (generation, boundary_lsn) =
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
                     for received in receiver.drain_with_ack().await {
                         match received.message.clone() {
                             MeshMessage::Block(delta) => {
@@ -1585,13 +1591,19 @@ mod frame_tests {
                         break completed;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("full recovery rotation should complete after acknowledged pages");
+                    }
+                })
+                .await
+                .expect("full recovery rotation should complete after acknowledged pages");
 
-            assert!(generation > 0, "recovery must invalidate any older page task");
-            assert_eq!(boundary_lsn, 17, "recovery must retain its captured boundary");
+            assert!(
+                generation > 0,
+                "recovery must invalidate any older page task"
+            );
+            assert_eq!(
+                boundary_lsn, 17,
+                "recovery must retain its captured boundary"
+            );
             assert!(
                 receiver_state.is_blocked(&ip, now_ms()),
                 "receiver must have applied the transferred CRDT state"
@@ -1600,5 +1612,4 @@ mod frame_tests {
             receiver.shutdown();
         });
     }
-
 }
