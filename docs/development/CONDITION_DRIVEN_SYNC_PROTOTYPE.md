@@ -1,6 +1,8 @@
 # Condition-driven mesh sync prototype
 
-**Status:** integrated WAL-backed prototype; exact-head CI is green, but multi-node fault-injection acceptance and independent review remain open. Not production-ready.
+**Status:** integrated WAL-backed prototype; receiver-confirmed recovery completion, multi-process fault-injection acceptance, and independent review remain open. Not production-ready.
+
+**Latest verified coordination baseline before this documentation update:** `dc74280121d35f86eb2443fd1ded520088b0bd47`. The previous GitHub workflow lookup returned no PR-triggered workflow runs for this SHA; exact-head CI/review/backlog status is therefore **unverified**, not green. See [MESH_RECOVERY_ACCEPTANCE_MATRIX.md](MESH_RECOVERY_ACCEPTANCE_MATRIX.md) for the durable contract, acceptance matrix, ownership, and handoff process.
 
 **Branch:** prototype/condition-driven-mesh-sync-20261011
 
@@ -84,7 +86,7 @@ The integrated branch contains tests for WAL LSN paging, checkpoint/tombstone ro
 Do not merge or enable production mesh until all of the following are demonstrated on one immutable SHA:
 
 - convergence with dropped, duplicated, delayed, and reordered messages;
-- every page and tombstone eventually visited for each peer independently;
+- every entry and tombstone in the fixed recovery snapshot and subsequent WAL tail is applied for each peer independently;
 - recovery does not advance past the captured boundary without the required completion proof;
 - bounded recovery latency after reconnect/overflow/failure and no hot retry loop;
 - no lost dirty signal when mutation races with sync completion;
