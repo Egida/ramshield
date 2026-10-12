@@ -45,6 +45,7 @@ jobs:
         if: always()
         env:
           JOB_RESULT: ${{ job.status }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           echo "result=$JOB_RESULT" >> "$GITHUB_OUTPUT"
@@ -52,7 +53,7 @@ jobs:
           cat > .agent-flow-output/state.json <<EOF
           {
             "schema_version": 1,
-            "candidate_sha": "${GITHUB_SHA}",
+            "candidate_sha": "$CANDIDATE_SHA",
             "workflow": "${GITHUB_WORKFLOW}",
             "run_id": ${GITHUB_RUN_ID},
             "run_attempt": ${GITHUB_RUN_ATTEMPT},
@@ -62,7 +63,7 @@ jobs:
           EOF
           {
             echo "### Agent-flow contract"
-            echo "- Candidate SHA: `$GITHUB_SHA`"
+            echo "- Candidate SHA: `$CANDIDATE_SHA`"
             echo "- Validation result: **$JOB_RESULT**"
             echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo "- This validates the handoff schema only; it does not certify Rust or recovery correctness."
@@ -72,7 +73,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-flow-state-${{ github.sha }}
+          name: agent-flow-state-${{ github.event.pull_request.head.sha || github.sha }}
           path: .agent-flow-output/state.json
           if-no-files-found: error
           retention-days: 14
