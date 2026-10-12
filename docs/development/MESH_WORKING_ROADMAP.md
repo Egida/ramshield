@@ -35,7 +35,7 @@ Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unb
 
 ### Phase 0 — Make the baseline observable
 
-1. Keep the current defaults as the first test baseline: 50 ms coalescing, 30 s periodic repair, 250 ms initial retry capped at 10 s, 25 ms scheduler tick, 2 s application-ACK wait, 16 entries per wire frame, 2,048 inbound queue capacity, 64 outbound writer permits, and existing read/write deadlines. The former 4,096-entry live-map snapshot cap has been removed; the current fixed-snapshot implementation must be memory-qualified at target state sizes.
+1. Keep the current defaults as the first test baseline: 50 ms coalescing, 30 s periodic repair, 250 ms initial retry capped at 10 s, 25 ms scheduler tick, 2 s application-ACK wait, 16 entries per wire frame, 2,048 inbound queue capacity, 64 outbound writer permits, and existing read/write deadlines. The former 4,096-entry live-map snapshot cap has been removed; snapshot capture now freezes CRDT mutations for a consistent export, and the fixed-snapshot implementation must be memory-qualified at target state sizes.
 2. Expose the signals above through structured tracing and small counters/gauges without adding a metrics framework.
 3. Add one repeatable harness report with initial/final state digest, per-peer acknowledged WAL cursor/head, repair duration, recovery-frame count, ACK failures, queue overflow, projection debt, and memory/task bounds.
 4. Capture a quiet baseline, steady mutation baseline, and overloaded/unreachable-peer baseline. Record the exact commit SHA and commands.
