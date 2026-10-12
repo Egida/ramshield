@@ -175,3 +175,16 @@ Commands actually run (all exit 0): `cargo fmt --all -- --check`; `cargo clippy 
 Remaining findings: A-035 passed its recorded exact-SHA gates; its final audit is tracked by A-038. A-036 documentation is complete and awaits exact-SHA gates/review. A-037/A-038/A-039 remain open.
 
 Next action: qualify A-036 on its exact candidate SHA, then continue with A-037 core benchmark baselines.
+
+## 2026-10-13 Independent Audit Review Snapshot
+
+- **Audit SHA**: `09d7af6` (current HEAD on audit-branch)
+- **Local CI checks**: `cargo fmt --all -- --check` ✅, `cargo clippy --workspace --all-targets --locked -- -D warnings` ✅, `cargo test --workspace --locked --features full` ✅ (0 failures)
+- **A-035**: PASS (exact SHA `0e48c3bc6ce7997d5e57421930715706b9627f71` — CI runs 38297139446/38297139440 passed, local checks verified)
+- **A-036**: DOCS COMPLETE (CGNAT README, DEPLOYMENT_COMMANDS.md, INDEX.md). Exact‑SHA gates and independent review pending before final acceptance.
+- **A-037**: IN PROGRESS (regression budget table added to BENCHMARKS.md; baselines recorded in `docs/development/BENCHMARK_BASELINES.md`. Kernel capture/TPACKET ring and isolated memory behavior not measured; field-day variance too high for threshold).
+- **A-038**: OPEN (final independent audit — requires two independent reviewer assessments. My review in progress; second reviewer still needed).
+- **A-039**: OPEN (final acceptance report — pending A‑038 closure. Will attach exact SHA, compare‑to‑master, workflow URLs/job conclusions, fmt result, test counts, known limitations, module scores with evidence, prioritized residual‑risk statement.)
+- **A-022**: OPEN (WAL stress / heavy traffic testing task added).
+
+**Next steps**: qualify A-036 exact‑SHA gates, finalize A-038 review, secure second reviewer, draft A-039 acceptance report.
