@@ -59,7 +59,7 @@ if [[ ! -f Cargo.lock ]]; then
 fi
 
 printf '\n[1/3] Full-sync captured-boundary regression\n'
-cargo test --locked -p ramshield-mesh full_sync_recovery_completes_at_captured_boundary_after_frame_acks
+cargo test --locked -p ramshield-mesh full_sync_recovery_waits_for_receiver_completion_after_frame_acks
 
 printf '\n[2/3] Real TCP mesh transport acceptance tests\n'
 cargo test --locked -p ramshield-mesh --test mesh_acceptance
