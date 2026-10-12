@@ -152,6 +152,33 @@ impl Config {
             if key.len() < 16 {
                 anyhow::bail!("mesh.auth_key must decode to at least 16 bytes");
             }
+            if self.mesh.peer_node_ids.len() != self.mesh.peers.len() {
+                anyhow::bail!("mesh.peer_node_ids must have one entry per mesh.peers address");
+            }
+            if self.mesh.peer_auth_keys.len() != self.mesh.peers.len() {
+                anyhow::bail!("mesh.peer_auth_keys must have one key per mesh.peers address");
+            }
+            let mut peer_ids = std::collections::HashSet::new();
+            let mut auth_keys = std::collections::HashSet::new();
+            auth_keys.insert(key);
+            for (index, peer_id) in self.mesh.peer_node_ids.iter().enumerate() {
+                if *peer_id == 0 || *peer_id == self.mesh.node_id {
+                    anyhow::bail!(
+                        "mesh.peer_node_ids[{index}] must be non-zero and not equal mesh.node_id"
+                    );
+                }
+                if !peer_ids.insert(*peer_id) {
+                    anyhow::bail!("mesh.peer_node_ids must be unique");
+                }
+                let peer_key = hex::decode(self.mesh.peer_auth_keys[index].trim())
+                    .map_err(|_| anyhow::anyhow!("mesh.peer_auth_keys[{index}] must be hex"))?;
+                if peer_key.len() < 16 {
+                    anyhow::bail!("mesh.peer_auth_keys[{index}] must decode to at least 16 bytes");
+                }
+                if !auth_keys.insert(peer_key) {
+                    anyhow::bail!("mesh local and peer authentication keys must all be unique");
+                }
+            }
         }
 
         if self.xdp.trusted_overlay_cidrs.len() > 256 {
@@ -422,5 +449,61 @@ impl Config {
             ));
         }
         w
+    }
+}
+
+#[cfg(test)]
+mod mesh_peer_identity_tests {
+    use super::*;
+
+    fn configured_mesh() -> Config {
+        let mut config = Config::default();
+        config.mesh.enabled = true;
+        config.mesh.node_id = 1;
+        config.mesh.listen_addr = "127.0.0.1:7900".into();
+        config.mesh.peers = vec!["127.0.0.1:7901".into()];
+        config.mesh.peer_node_ids = vec![2];
+        config.mesh.peer_auth_keys = vec!["22".repeat(32)];
+        config.mesh.auth_key = "11".repeat(32);
+        config
+    }
+
+    #[test]
+    fn mesh_accepts_distinct_local_and_peer_keys() {
+        configured_mesh()
+            .validate()
+            .expect("distinct per-node keys should validate");
+    }
+
+    #[test]
+    fn mesh_debug_redacts_local_and_peer_keys() {
+        let config = configured_mesh();
+        let rendered = format!("{:?}", config.mesh);
+        assert!(!rendered.contains(&config.mesh.auth_key));
+        assert!(!rendered.contains(&config.mesh.peer_auth_keys[0]));
+        assert!(rendered.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn mesh_rejects_peer_without_matching_identity_or_key() {
+        let mut config = configured_mesh();
+        config.mesh.peer_node_ids.clear();
+        assert!(
+            config
+                .validate()
+                .expect_err("missing peer identity must fail")
+                .to_string()
+                .contains("peer_node_ids")
+        );
+
+        let mut config = configured_mesh();
+        config.mesh.peer_auth_keys[0] = config.mesh.auth_key.clone();
+        assert!(
+            config
+                .validate()
+                .expect_err("shared key must fail")
+                .to_string()
+                .contains("keys must all be unique")
+        );
     }
 }

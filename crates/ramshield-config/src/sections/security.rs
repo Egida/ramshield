@@ -1,4 +1,5 @@
 use crate::*;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutonomousConfig {
@@ -145,7 +146,7 @@ fn default_synproxy_new_connection_total_burst() -> u32 {
     4000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MeshConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -153,9 +154,16 @@ pub struct MeshConfig {
     pub node_id: u32,
     #[serde(default = "default_mesh_listen_addr")]
     pub listen_addr: String,
+    /// Peer socket addresses, in the same order as peer_node_ids and peer_auth_keys.
     #[serde(default)]
     pub peers: Vec<String>,
-    /// Hex-encoded shared secret. Empty disables authenticated mesh transport.
+    /// Expected node ID for each peer address; IDs must be unique and non-zero.
+    #[serde(default)]
+    pub peer_node_ids: Vec<u32>,
+    /// Hex-encoded HMAC key for each peer, parallel to peers/peer_node_ids.
+    #[serde(default)]
+    pub peer_auth_keys: Vec<String>,
+    /// Hex-encoded local node HMAC key. Must differ from every peer key.
     #[serde(default)]
     pub auth_key: String,
 }
@@ -166,8 +174,30 @@ impl Default for MeshConfig {
             node_id: default_mesh_node_id(),
             listen_addr: default_mesh_listen_addr(),
             peers: Vec::new(),
+            peer_node_ids: Vec::new(),
+            peer_auth_keys: Vec::new(),
             auth_key: String::new(),
         }
+    }
+}
+
+impl fmt::Debug for MeshConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let peer_keys = format!("[REDACTED: {} keys]", self.peer_auth_keys.len());
+        let local_key = if self.auth_key.is_empty() {
+            "[EMPTY]"
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("MeshConfig")
+            .field("enabled", &self.enabled)
+            .field("node_id", &self.node_id)
+            .field("listen_addr", &self.listen_addr)
+            .field("peers", &self.peers)
+            .field("peer_node_ids", &self.peer_node_ids)
+            .field("peer_auth_keys", &peer_keys)
+            .field("auth_key", &local_key)
+            .finish()
     }
 }
 fn default_mesh_node_id() -> u32 {

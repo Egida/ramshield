@@ -6,7 +6,7 @@
 
 use ramshield_mesh::{
     aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterDot},
-    transport::{MeshHandle, MeshMessage},
+    transport::{MeshHandle, MeshMessage, MeshPeer},
 };
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -19,7 +19,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-const TEST_KEY: &[u8] = b"mesh-test-key-at-least-16-bytes";
+const NODE_1_KEY: &[u8] = b"mesh-node-one-auth-key-at-least-32-bytes";
+const NODE_2_KEY: &[u8] = b"mesh-node-two-auth-key-at-least-32-bytes";
 
 async fn free_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -28,6 +29,19 @@ async fn free_addr() -> SocketAddr {
     let address = listener.local_addr().expect("read reserved address");
     drop(listener);
     address
+}
+
+async fn free_addrs() -> (SocketAddr, SocketAddr) {
+    let first = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve first loopback port");
+    let second = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve second loopback port");
+    let first_address = first.local_addr().expect("read first address");
+    let second_address = second.local_addr().expect("read second address");
+    drop((first, second));
+    (first_address, second_address)
 }
 
 fn now_ms() -> u64 {
@@ -53,13 +67,13 @@ async fn wait_for_one(handle: &MeshHandle) -> Vec<MeshMessage> {
 
 #[tokio::test]
 async fn authenticated_block_crosses_real_tcp_transport() {
-    let receiver_addr = free_addr().await;
+    let (receiver_addr, sender_addr) = free_addrs().await;
     let receiver = MeshHandle::bind(
         2,
         Arc::new(AworsetBlocklist::new(2)),
         receiver_addr,
-        Vec::new(),
-        TEST_KEY.to_vec(),
+        vec![MeshPeer::new(1, sender_addr, NODE_1_KEY.to_vec())],
+        NODE_2_KEY.to_vec(),
     )
     .await
     .expect("bind receiver");
@@ -67,9 +81,9 @@ async fn authenticated_block_crosses_real_tcp_transport() {
     let sender = MeshHandle::bind(
         1,
         Arc::new(AworsetBlocklist::new(1)),
-        free_addr().await,
-        vec![receiver_addr],
-        TEST_KEY.to_vec(),
+        sender_addr,
+        vec![MeshPeer::new(2, receiver_addr, NODE_2_KEY.to_vec())],
+        NODE_1_KEY.to_vec(),
     )
     .await
     .expect("bind sender");
@@ -109,8 +123,8 @@ async fn invalid_hmac_frame_never_enters_receive_queue() {
         2,
         Arc::new(AworsetBlocklist::new(2)),
         receiver_addr,
-        Vec::new(),
-        TEST_KEY.to_vec(),
+        vec![MeshPeer::new(1, free_addr().await, NODE_1_KEY.to_vec())],
+        NODE_2_KEY.to_vec(),
     )
     .await
     .expect("bind receiver");
