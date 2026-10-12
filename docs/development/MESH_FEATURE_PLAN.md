@@ -50,11 +50,11 @@ Recent bounded implementation changes already on `audit-branch`:
 
 
 
-These commits are progress, not a feature acceptance decision. The latest recorded workflow on the baseline SHA is [run 38041528476](https://github.com/grep999/ramshield/actions/runs/38041528476); it passed Check, Build, Test, and Clippy. Formatting was not part of that workflow and remains to be verified.
+These commits are progress, not a feature acceptance decision. The current isolated draft is [PR #19](https://github.com/grep999/ramshield/pull/19), head `8a224281d40b66a862481ac71c606d8308388a37`. CI [run #603](https://github.com/grep999/ramshield/actions/runs/38222184534), Review Pipeline [run #440](https://github.com/grep999/ramshield/actions/runs/38222184499), and Backlog Gate [run #359](https://github.com/grep999/ramshield/actions/runs/38222184503) passed on that exact head. This proves those configured gates passed, not network-level convergence or production readiness.
 
 
 
-## Mesh backlog
+## Design decision — recovery without mutable-map pagination (2026-10-12)\n\nDo not pursue keyset/cursor pagination over the live mutable CRDT maps. That approach is dropped. The intended direction is WAL-led incremental catch-up per peer, using the peer's acknowledged source-WAL LSN when history is retained. When retention has created a gap, recover from a fixed recovery generation/boundary using a deterministic bounded snapshot stream, verify receiver completion, then replay WAL after the boundary. Transport framing may split the immutable recovery stream into bounded frames, but do not use a moving live-map cursor as the correctness mechanism. A recovery-completion handshake and fault-injection evidence are required before acceptance.\n\nPR #19 currently contains a keyset snapshot-cursor experiment. Treat that code as prototype material to replace or remove; do not treat it as the chosen design merely because its CI passes.\n\n## Mesh backlog
 
 
 
@@ -78,9 +78,9 @@ These commits are progress, not a feature acceptance decision. The latest record
 
 - [x] **M-010: Bound chunk size and wire frames.** Initial chunking and maximum-frame regression coverage committed.
 
-- [ ] **M-011: Fair pagination beyond 4,096 entries.** Ensure every live entry and tombstone is eventually visited, rather than repeatedly sampling an arbitrary prefix of concurrent maps.
+- [ ] **M-011: WAL-led catch-up and retention-gap recovery.** Use per-peer acknowledged WAL LSNs for incremental sync while retained history is available. On a retention gap, start a fixed recovery generation with a captured WAL boundary; stream a deterministic snapshot in bounded frames, require receiver-confirmed completion bound to generation/boundary/digest, then replay the WAL tail. Do not use cursor pagination over a live mutable CRDT map.
 
-- [ ] **M-012: End-to-end convergence under large state.** Test multiple pages/chunks, repeated sync, loss/reconnect, tombstones, state exceeding a page and the configured maximum, and eventual convergence.
+- [ ] **M-012: End-to-end convergence under large state.** Test recovery streams spanning many bounded frames, repeated sync, loss/reconnect, tombstones, concurrent mutation, state larger than one frame and the configured workload, and eventual convergence without relying on a mutable-map page cursor.
 
 - [ ] **M-013: Frame-boundary tests.** Exact maximum, one byte over, delimiter split across reads, clean EOF, partial EOF, malformed JSON, and oversized input must have deterministic expected outcomes.
 
@@ -138,7 +138,7 @@ These commits are progress, not a feature acceptance decision. The latest record
 
 1. Define CRDT invariants and solve tombstone-GC safety (M-001–M-003).
 
-2. Finish fair pagination and prove large-state convergence (M-011–M-013).
+2. Finish WAL-led catch-up, fixed-boundary recovery, and large-state convergence (M-011–M-013).
 
 3. Complete input trust, replay, and overload policy (M-021–M-024).
 
@@ -160,7 +160,7 @@ Mesh can be declared production-ready only when all of the following hold on the
 
 - CRDT convergence and tombstone-GC invariants are documented and tested, including long-offline peers and subsequent legitimate bans.
 
-- Anti-entropy reaches all entries/tombstones across multiple pages, loss, reconnect, and state larger than one page.
+- WAL catch-up and fixed-boundary recovery reach all required mutations/tombstones across bounded frames, loss, reconnect, and large state; receiver-confirmed completion prevents skipping the tail.
 
 - Frame limits, malformed input, authentication, replay, timestamp skew, queue overload, and saturation have deterministic regression tests.
 
