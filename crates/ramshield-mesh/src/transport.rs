@@ -133,7 +133,7 @@ struct PeerSyncState {
     recovery_boundary_lsn: Option<u64>,
     /// Local snapshot transfer finished after frame ACKs; awaiting enforcement consumption.
     /// This is not yet a receiver-confirmed generation/boundary/digest handshake.
-    completed_recovery: Option<(u64, u64)>,
+    acked_recovery_transfer: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -218,7 +218,7 @@ impl MeshHandle {
                                 delivery_failed: false,
                                 generation: 0,
                                 recovery_boundary_lsn: None,
-                                completed_recovery: None,
+                                acked_recovery_transfer: None,
                             },
                         )
                     })
@@ -307,7 +307,7 @@ impl MeshHandle {
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer)
             && state.recovery_boundary_lsn.is_none()
-            && state.completed_recovery.is_none()
+            && state.acked_recovery_transfer.is_none()
         {
             state.generation = state.generation.wrapping_add(1);
             state.recovery_snapshot = Some(Arc::new(self.blocklist.export_snapshot()));
@@ -318,12 +318,12 @@ impl MeshHandle {
 
     /// Consume a completed full-state rotation. Completion is published only
     /// after every bounded frame in the current generation was application-ACKed.
-    pub async fn take_completed_recovery(&self, peer: SocketAddr) -> Option<(u64, u64)> {
+    pub async fn take_acked_recovery_transfer(&self, peer: SocketAddr) -> Option<(u64, u64)> {
         self.sync_states
             .lock()
             .await
             .get_mut(&peer)
-            .and_then(|state| state.completed_recovery.take())
+            .and_then(|state| state.acked_recovery_transfer.take())
     }
 
     /// Send a WAL batch and return the sender-local LSN durably acknowledged
@@ -531,7 +531,7 @@ impl MeshHandle {
                             state.delivery_failed = !success;
                             if success {
                                 if let Some(boundary_lsn) = state.recovery_boundary_lsn.take() {
-                                    state.completed_recovery = Some((generation, boundary_lsn));
+                                    state.acked_recovery_transfer = Some((generation, boundary_lsn));
                                     state.recovery_snapshot = None;
                                 }
                             }
@@ -1565,7 +1565,7 @@ mod frame_tests {
             sender.request_full_sync(receiver_addr, 99).await;
             assert!(
                 sender
-                    .take_completed_recovery(receiver_addr)
+                    .take_acked_recovery_transfer(receiver_addr)
                     .await
                     .is_none()
             );
@@ -1592,14 +1592,14 @@ mod frame_tests {
                         }
                         received.acknowledge(true);
                     }
-                    if let Some(completed) = sender.take_completed_recovery(receiver_addr).await {
+                    if let Some(completed) = sender.take_acked_recovery_transfer(receiver_addr).await {
                         break completed;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
-            .expect("full recovery transfer should complete after acknowledged frames");
+            .expect("full recovery frame transfer should finish after acknowledged frames");
 
             assert!(
                 generation > 0,
