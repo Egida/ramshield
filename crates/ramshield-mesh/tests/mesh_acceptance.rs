@@ -295,9 +295,10 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
         );
     }
 
+    let receiver_state = Arc::new(AworsetBlocklist::new(2));
     let receiver = MeshHandle::bind(
         2,
-        Arc::new(AworsetBlocklist::new(2)),
+        receiver_state.clone(),
         receiver_addr,
         Vec::new(),
         TEST_KEY.to_vec(),
@@ -321,10 +322,19 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
         let mut frame_count = 0usize;
         loop {
             for received in receiver.drain_with_ack().await {
-                assert!(
-                    matches!(&received.message, MeshMessage::Sync { .. }),
-                    "full recovery should be delivered as snapshot frames"
-                );
+                match received.message.clone() {
+                    MeshMessage::Sync { blocks, unblocks } => {
+                        // Application ACK must follow receiver-state application;
+                        // transport ACK alone is not proof of snapshot convergence.
+                        for delta in blocks {
+                            receiver_state.merge_delta(&delta);
+                        }
+                        for delta in unblocks {
+                            receiver_state.merge_unblock_delta(&delta);
+                        }
+                    }
+                    other => panic!("full recovery should be delivered as snapshot frames, got {other:?}"),
+                }
                 frame_count += 1;
                 received.acknowledge(true);
             }
