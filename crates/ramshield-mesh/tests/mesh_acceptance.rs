@@ -223,9 +223,11 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
     )
     .await
     .expect("bind recovery receiver");
+    let sender_state = Arc::new(AworsetBlocklist::new(1));
+    let snapshot = sender_state.export_snapshot();
     let sender = MeshHandle::bind(
         1,
-        Arc::new(AworsetBlocklist::new(1)),
+        sender_state,
         free_addr().await,
         vec![receiver_addr],
         TEST_KEY.to_vec(),
@@ -235,7 +237,7 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
 
     // Empty state deliberately exercises the required one-frame empty snapshot.
     let boundary_lsn = 42;
-    sender.request_full_sync(receiver_addr, boundary_lsn).await;
+    sender.request_full_sync(receiver_addr, boundary_lsn, snapshot).await;
     assert!(
         sender.recovery_completion_pending(receiver_addr).await,
         "retention-gap recovery must pin WAL replay as soon as it starts"
@@ -252,7 +254,7 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
             }
 
             if let Some((generation, boundary)) =
-                sender.acked_recovery_transfer(receiver_addr).await
+                sender.completed_recovery(receiver_addr).await
             {
                 break (generation, boundary);
             }
@@ -308,7 +310,8 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
     .expect("bind multi-frame recovery sender");
 
     let boundary_lsn = 73;
-    sender.request_full_sync(receiver_addr, boundary_lsn).await;
+    let snapshot = sender_state.export_snapshot();
+    sender.request_full_sync(receiver_addr, boundary_lsn, snapshot).await;
     let (generation, boundary, frame_count) = timeout(Duration::from_secs(5), async {
         let mut frame_count = 0usize;
         loop {
@@ -322,7 +325,7 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
             }
 
             if let Some((generation, boundary)) =
-                sender.acked_recovery_transfer(receiver_addr).await
+                sender.completed_recovery(receiver_addr).await
             {
                 break (generation, boundary, frame_count);
             }
