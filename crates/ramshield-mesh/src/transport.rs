@@ -328,14 +328,14 @@ impl MeshHandle {
             })
     }
 
-    /// Consume a completed full-state rotation. Completion is published only
-    /// after every bounded frame in the current generation was application-ACKed.
-    pub async fn take_acked_recovery_transfer(&self, peer: SocketAddr) -> Option<(u64, u64)> {
+    /// Inspect the locally ACKed transfer marker without clearing the recovery
+    /// gate. Only a future receiver-wide completion handshake may release it.
+    pub async fn acked_recovery_transfer(&self, peer: SocketAddr) -> Option<(u64, u64)> {
         self.sync_states
             .lock()
             .await
-            .get_mut(&peer)
-            .and_then(|state| state.acked_recovery_transfer.take())
+            .get(&peer)
+            .and_then(|state| state.acked_recovery_transfer)
     }
 
     /// Send a WAL batch and return the sender-local LSN durably acknowledged
@@ -1577,7 +1577,7 @@ mod frame_tests {
             sender.request_full_sync(receiver_addr, 99).await;
             assert!(
                 sender
-                    .take_acked_recovery_transfer(receiver_addr)
+                    .acked_recovery_transfer(receiver_addr)
                     .await
                     .is_none()
             );
@@ -1604,7 +1604,7 @@ mod frame_tests {
                         }
                         received.acknowledge(true);
                     }
-                    if let Some(completed) = sender.take_acked_recovery_transfer(receiver_addr).await {
+                    if let Some(completed) = sender.acked_recovery_transfer(receiver_addr).await {
                         break completed;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
