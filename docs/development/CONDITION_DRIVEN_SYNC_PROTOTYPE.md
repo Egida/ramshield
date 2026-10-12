@@ -25,12 +25,12 @@ Prototype defaults are 50 ms coalescing, a 30 s repair interval, 250 ms initial 
 
 1. A local mesh mutation gets a durable WAL record with schema version, origin node/incarnation/counter, IP, action, creation/expiry, and tier.
 2. WAL append and sync precede publication of the mutation to the CRDT.
-3. Each peer has an independent cursor over this node's WAL LSNs. These are sender-local offsets, not a cluster-global order.
-4. Replication pages are bounded. The receiver validates the authenticated envelope and mutation fields, persists/merges accepted mutations idempotently, and returns an authenticated application ACK.
-5. The sender advances a WAL cursor only when the ACK's LSN exactly matches the page end. A socket write alone is not acceptance.
+3. Each peer has an independent acknowledged cursor over this node's WAL LSNs. These are sender-local offsets, not a cluster-global order; they are unrelated to any CRDT-state traversal.
+4. WAL batches and snapshot transport frames are bounded. The receiver validates the authenticated envelope and mutation fields, persists/merges accepted mutations idempotently, and returns an authenticated application ACK for each frame.
+5. The sender advances a WAL cursor only when the ACK's LSN exactly matches the batch end. A socket write alone is not acceptance.
 6. Projection failure does not erase committed history; a bounded repair queue retries Store projection. XDP reconciliation remains a separate projection concern.
 7. Startup restores checkpointed CRDT provenance/tombstones and replays the WAL tail. If required history was pruned and no provenance-bearing checkpoint exists, hard-WAL mode fails closed.
-8. If a peer cursor falls behind WAL retention, the sender holds that cursor pending a full CRDT rotation. The recovery boundary is captured once per attempt; repeated ticks cannot restart the attempt or move the boundary.
+8. If a peer cursor falls behind WAL retention, the sender holds that cursor pending a fixed full CRDT snapshot. The recovery boundary and snapshot are captured once per attempt; repeated ticks cannot restart the attempt or move the boundary.
 
 The transport's full-sync rotation currently considers completion after every frame/page in the current generation has received an accepted application ACK. Enforcement then consumes a local completion marker and resumes WAL replay after the captured boundary. **This is not yet a separate receiver-level RecoveryComplete handshake that echoes the generation, boundary, and a digest of the snapshot.** Treat that as remaining protocol-hardening work; do not describe the current marker as a receiver-confirmed snapshot transaction.
 
@@ -48,18 +48,18 @@ Each configured peer owns one ConditionSyncPlanner.
 
 ## Current integration
 
-- Each configured peer has its own planner, delivery-failure flag, snapshot cursor, generation, and recovery boundary.
+- Each configured peer has its own planner, delivery-failure flag, recovery generation, fixed snapshot (when recovering), and recovery boundary.
 - Local broadcasts mark peers dirty; send failures request repair; success after a recorded failure triggers reconnect repair.
 - Inbound queue overflow is surfaced to the scheduler after releasing the queue lock.
 - Enforcement uses drain_with_ack() and acknowledges only after processing; WAL batches return the sender's page-end LSN only after all contained mutations are accepted.
-- Full-state pages are bounded to 4,096 entries per page and 16 entries per wire frame. WAL pages are also bounded, and active page sends use a shared writer semaphore and per-frame deadlines.
-- Caller-owned snapshot_page(cursor, limit) cursors keep one peer from advancing another peer's pagination position.
+- Full-state recovery exports one fixed, deterministically ordered snapshot and splits it into 16-entry wire frames; every frame requires an authenticated application ACK. This avoids a moving cursor over a live map, but the snapshot currently consumes memory proportional to the full CRDT state. WAL batches are separately bounded and active sends use a shared writer semaphore and per-frame deadlines.
+- The former snapshot_page(cursor, limit) and rotating live-map snapshot mechanisms have been removed from the prototype.
 - CRDT state includes origin dots and tombstone high-water marks so concurrent origin mutations are not collapsed into one peer's aggregate event.
 
 ## Acceptance work still required
 
 - Add and test an explicit receiver-confirmed recovery completion frame binding the recovery generation, captured WAL boundary, and a deterministic digest of the completed state rotation.
-- Run real multi-node fault injection: disconnect/reconnect, process restart across checkpoint/retention, duplicate and reordered pages, queue pressure, concurrent mutation during pagination, and repeated ACK loss.
+- Run real multi-node fault injection: disconnect/reconnect, process restart across checkpoint/retention, duplicate/reordered/lost frames and ACKs, queue pressure, concurrent mutations during fixed-snapshot capture/transfer, and eventual CRDT plus Store/XDP convergence.
 - Prove eventual convergence of both CRDT state and Store/XDP projections, including tombstones and more than 4,096 live entries/tombstones.
 - Test cancellation/shutdown during stalled sends, peer fairness, bounded task/memory behavior, and no hot retry loop for unreachable peers.
 - Add origin signatures or per-node authenticated identity. Current shared-key HMAC authenticates a configured mesh member, not an individual origin dot.
@@ -91,3 +91,8 @@ Do not merge or enable production mesh until all of the following are demonstrat
 - feature-off and mesh-enabled workspace gates, strict Clippy, formatting, dependency audit, and independent review are green.
 
 Until those gates pass, keep mesh optional and disabled in production.
+
+
+## Current implementation delta — 2026-10-12
+
+The live-map keyset cursor and rotating snapshot APIs have been removed from the PR branch. Anti-entropy now exports one immutable sorted `AworsetSnapshot` per repair attempt and splits it into bounded `Sync` frames; each frame is sent through the authenticated application-ACK path. The retention-gap boundary is retained across retries. This is an implementation step, not final recovery acceptance: the receiver-confirmed generation/boundary/digest completion handshake and multi-process fault-injection tests remain to be implemented. Full snapshot export currently duplicates CRDT state in memory and must be measured under the target workload.
