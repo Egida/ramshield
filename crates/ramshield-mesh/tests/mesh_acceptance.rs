@@ -301,7 +301,7 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
     .expect("bind multi-frame recovery receiver");
     let sender = MeshHandle::bind(
         1,
-        sender_state,
+        sender_state.clone(),
         free_addr().await,
         vec![receiver_addr],
         TEST_KEY.to_vec(),
