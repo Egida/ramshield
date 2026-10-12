@@ -22,7 +22,7 @@ Add a small, stable telemetry surface before tuning behavior:
 |---|---|---|
 | WAL lag per peer | local WAL head LSN minus acknowledged peer cursor, only for the same source WAL | Detect a peer that is connected but not catching up |
 | ACK outcome | accepted, rejected, timeout, disconnect, malformed/mismatched LSN | Distinguish transport reachability from application acceptance |
-| Repair outcome/latency | reason, start/end monotonic time, pages and entries visited | Verify condition-driven sync reduces work without delaying repair |
+| Repair outcome/latency | reason, start/end monotonic time, frames and entries visited | Verify condition-driven sync reduces work without delaying repair |
 | Queue pressure | queue depth/capacity and overflow/drop count | Make loss/recovery triggers visible before convergence fails |
 | Projection debt | pending Store projections; XDP reconcile failures separately | Detect durable-but-not-yet-enforced state |
 | Recovery state | generation, captured boundary, state, age, retries | Detect stuck or incorrectly restarted full-sync generations |
@@ -54,7 +54,7 @@ Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unb
 
 ### Phase 2 — Prove convergence under adversarial delivery
 
-Build a deterministic two-process test first, then three peers. Inject disconnect/reconnect, dropped and duplicated frames/ACKs, reordering, delayed frames, queue saturation, slow readers, and shutdown during a stalled send. Mutate and unblock/re-block keys while a fixed recovery snapshot is being captured and streamed; do not use a moving cursor over the live CRDT map. Include expiry, tombstones, concurrent origin updates, and more than 4,096 live entries/tombstones.
+Build a deterministic two-process test first, then three peers. Inject disconnect/reconnect, dropped and duplicated frames/ACKs, reordering, delayed frames, queue saturation, slow readers, and shutdown during a stalled send. Mutate and unblock/re-block keys while a fixed recovery snapshot is being captured and streamed; do not use a moving cursor over the live CRDT map. Include expiry, tombstones, concurrent origin updates, and large live state and tombstone sets beyond a single frame.
 
 For each run compare canonical digests of:
 1. CRDT blocks + tombstones;
