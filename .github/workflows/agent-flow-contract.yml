@@ -30,8 +30,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: .github/agent-flow/package.json
 
       - name: Install pinned schema dependency
         run: npm install --prefix .github/agent-flow --ignore-scripts --no-audit --no-fund
