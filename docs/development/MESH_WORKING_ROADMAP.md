@@ -8,7 +8,7 @@
 
 The detailed recovery contract, acceptance matrix, file ownership, and exact-SHA handoff process are maintained in [MESH_RECOVERY_ACCEPTANCE_MATRIX.md](MESH_RECOVERY_ACCEPTANCE_MATRIX.md). Update that ledger through bounded commits as implementation and evidence land; do not mark a case passed without an observed result.
 
-Current coordination baseline before this roadmap update: recovery acceptance-matrix commit `552017a5f8cbc0aca6eaeaf342475fe3616af8b9`. This is documentation progress only. It does not implement the completion handshake or satisfy Rust/network acceptance.
+Current coordination baseline for this roadmap revision: PR head `412bd48338661d737eb139b0e90c82f7e0813cb5`. This revision corrects execution order and stale status wording; it is documentation/process work only, not protocol implementation or acceptance evidence.
 
 ## Target architecture
 
@@ -22,7 +22,7 @@ Current coordination baseline before this roadmap update: recovery acceptance-ma
 
 Existing code gives us useful signals/state: MeshApplyReport counts received/applied/ignored/failed mutations; peer WAL cursors and in-flight guards; bounded queues and configured capacity; per-peer planner reasons, dirty/in-flight state, and retry policy; the projection-pending set; frame/ACK outcomes; and WAL head/LSN boundaries. These are not yet a complete exported operational metrics contract.
 
-Add a small, stable telemetry surface before tuning behavior:
+First derive a diagnostic baseline from existing state and structured tracing; do not block the recovery fix on a new metrics surface. After behavioral tests exist, expose only the minimum stable signals that are missing from existing logs:
 
 | Signal | Derivation | Why it matters |
 |---|---|---|
@@ -112,13 +112,14 @@ Prefer the smallest change that improves a measured bottleneck without violating
 | Shared-key HMAC lacks origin attribution | Restrict membership to trusted nodes and document trust boundary | Claim signatures or per-origin authentication exist |
 | Green CI without network faults | Keep PR draft; use a multi-process fault-injection gate | Merge based on compile/unit success alone |
 
-## Execution order for the next pass
+## Execution order for the next pass — follow in order, no documentation-only loop
 
-1. Add telemetry needed to observe progress and failures (Phase 0).
-2. Implement the receiver-confirmed recovery completion protocol (Phase 1).
-3. Build a deterministic multi-process fault harness and convergence digest checks (Phase 2).
-4. Cover checkpoint/retention crash windows (Phase 3).
-5. Finish overload, lifecycle, and origin-trust decisions (Phase 4).
-6. Benchmark and tune only after correctness gates (Phase 5).
+1. **Protocol coder:** implement the receiver-confirmed completion handshake in the assigned production files. Before coding, derive only the necessary baseline from existing WAL/cursor/ACK/planner state. Do not create a telemetry prerequisite.
+2. **Test coder in parallel:** prepare behavioral cases and a two-process harness in test-owned paths; bind tests to the protocol coder's actual published contract, not invented field names.
+3. **Checkpoint:** once both changes are committed, record exact old/new SHAs, changed files, actual command results, and remaining gaps. Re-fetch live HEAD before every subsequent write.
+4. **Independent review:** review the same exact candidate SHA from both handoffs; missing/mismatched SHA or missing required gate evidence is BLOCKED.
+5. **Run exact-SHA checks and fault tests:** test frame loss/duplication/reordering, completion loss/replay, stale proof, restart/reconnect, concurrent post-snapshot WAL mutations, tombstones, and effective projection convergence. Research and mitigate failures before rerunning.
+6. **Checkpoint/retention crash windows and bounded-resource qualification** only after the completion protocol has real behavioral coverage.
+7. **Origin trust, overload/lifecycle hardening, then performance tuning** from measured results. Do not tune before correctness evidence.
 
-**Current gate (2026-10-12):** PR #19 remains Draft at the latest implementation SHA (see PR head). The live-map cursor APIs are removed; snapshot export is frozen against concurrent CRDT map mutations; each bounded frame uses authenticated application ACKs; and the WAL cursor is deliberately held until receiver-wide completion proof. The explicit generation/boundary/digest completion handshake, multi-process fault-injection acceptance, memory qualification, origin-authentication decision, and independent review remain open. No CI/check runs are currently visible for the latest SHA, and this environment cannot run Cargo locally. Keep production mesh disabled.
+**Current gate (checkpoint 2026-10-12, PR head `412bd48338661d737eb139b0e90c82f7e0813cb5`):** live-map snapshot pagination APIs are removed. Recovery captures one fixed snapshot and boundary; bounded frame ACKs do not complete the recovery; enforcement keeps WAL replay gated while the recovery marker is pending. The receiver-confirmed generation/boundary/digest handshake is not implemented yet. Multi-process fault acceptance, memory qualification, origin-trust decision, and independent review remain open. GitHub returned no PR-triggered workflow runs and no combined status checks for this exact SHA; Cargo/Rust tests are not claimed. Keep PR Draft and production mesh disabled. Re-check live HEAD before acting because this checkpoint becomes stale after any commit.
