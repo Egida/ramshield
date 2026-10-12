@@ -577,8 +577,12 @@ impl MeshHandle {
         peer: SocketAddr,
         fixed_snapshot: Option<Arc<AworsetSnapshot>>,
     ) -> bool {
+        let started = Instant::now();
+        let is_recovery = fixed_snapshot.is_some();
         let snapshot = fixed_snapshot
             .unwrap_or_else(|| Arc::new(self.blocklist.export_snapshot()));
+        let block_count = snapshot.blocks.len();
+        let tombstone_count = snapshot.unblocks.len();
         let mut messages = chunk_sync(&snapshot.blocks, &snapshot.unblocks);
         if messages.is_empty() {
             // Even an empty snapshot must be application-acknowledged so the
@@ -589,6 +593,7 @@ impl MeshHandle {
             });
         }
 
+        let frame_count = messages.len();
         let mut shutdown = self.shutdown_tx.subscribe();
         if *shutdown.borrow() {
             return false;
@@ -601,7 +606,7 @@ impl MeshHandle {
             _ = shutdown.changed() => return false,
         };
 
-        for message in messages {
+        for (frame_index, message) in messages.into_iter().enumerate() {
             let result = tokio::select! {
                 result = with_timeout(MAX_PEER_WRITE_TIMEOUT, async {
                     self.send_to_ack(peer, message).await.map(|_| ())
@@ -612,12 +617,21 @@ impl MeshHandle {
                 }
             };
             if let Err(error) = result {
-                warn!(peer = %peer, error = %error, "condition-driven mesh snapshot failed");
+                warn!(peer = %peer, frame_index, frame_count, blocks = block_count, tombstones = tombstone_count, is_recovery, elapsed_ms = started.elapsed().as_millis() as u64, error = %error, "condition-driven mesh snapshot failed");
                 drop(permit);
                 return false;
             }
         }
         drop(permit);
+        debug!(
+            peer = %peer,
+            blocks = block_count,
+            tombstones = tombstone_count,
+            frames = frame_count,
+            is_recovery,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "condition-driven mesh snapshot acknowledged"
+        );
         true
     }
     async fn send_to(&self, peer: SocketAddr, body: MeshMessage) -> std::io::Result<()> {
