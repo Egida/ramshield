@@ -65,6 +65,16 @@ Each configured peer owns one ConditionSyncPlanner.
 - Add origin signatures or per-node authenticated identity. Current shared-key HMAC authenticates a configured mesh member, not an individual origin dot.
 - Keep independent review and exact-head CI green. Passing unit/workspace CI does not replace network-level convergence acceptance.
 
+## Minimal disposable sandbox
+
+From a checkout of this branch, run:
+
+```bash
+bash scripts/test-mesh-recovery-sandbox.sh
+```
+
+The script archives the current committed HEAD into a fresh temporary directory and runs three focused Rust gates: the captured recovery-boundary regression, real loopback TCP mesh acceptance tests, and enforcement tests with the mesh feature enabled. It requires Git, tar, Cargo/Rust, and Cargo.lock; it does not need Docker or production configuration. Use `--keep` to preserve the temporary tree for inspection. The sandbox validates these targeted integration paths; it is not a substitute for multi-process fault injection or the explicit recovery-completion handshake still listed above.
+
 ## Verified regression coverage
 
 The integrated branch contains tests for WAL LSN paging, checkpoint/tombstone roundtrip, checkpoint-seed plus WAL-tail folding, positive/negative application ACKs, enforcement-level WAL-batch TCP handling, and a recovery-boundary regression that proves repeated recovery requests do not move the captured boundary.
