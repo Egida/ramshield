@@ -90,7 +90,7 @@
 
 | A-035 | Public API / error semantics | In progress. `doctor` checks `ip link show` exit status (success/failure regression); CLI IPC enforces newline framing, a 1 MiB response cap, 5-second read/write timeouts, UTF-8, and valid JSON responses, with tests for valid/oversized/unterminated frames and invalid JSON. CLI HMAC auth accepts a configurable key ID and enforces the server's 16-byte minimum key size with tests for short and malformed keys. Dashboard Argon2 concurrency documentation corrected on `748feb2010e78a614b684b4d9cc1c4568a04fcb2`. New finding: `RAMSHIELD_SYNPROXY__PORTS` silently discarded malformed entries via `filter_map(parse().ok())`, contradicting fail-fast env parsing. Fixed parsing on `0e95bd9045b7077f883a349d2456fc69e285d215`; regression tests for malformed middle item and intentional blank-list clearing added on `c83c3f6fcb17095a712ce70e284d043f7815878d`. Formatting mismatch found by CI logs was corrected on `7124b099abffff1d50c61393732c519a09867397`; the resulting candidate `2f235eed19c2699fe026d4facaaf95d7239526ff` passed CI run [38119254374](https://github.com/grep999/ramshield/actions/runs/38119254374) and Backlog Gate [38119254347](https://github.com/grep999/ramshield/actions/runs/38119254347). Follow-up finding: the direct environment read could still ignore non-UTF-8 values; this follow-up uses the shared fail-fast parser and adds a Unix regression test. CI formatting check on SHA `c8acb10791deb4fc90512aefdc0e6478d2e213d7` failed only on an extra blank line before the Unix regression test (run [38119482080](https://github.com/grep999/ramshield/actions/runs/38119482080), job `114411062397`, step `Check formatting`); exact log reviewed and correction committed here. Current exact-SHA gates and independent review remain pending; local Cargo is unavailable in this execution environment. | IN PROGRESS |
 
-| A-036 | Core docs and claims | Replace stale code-health notes; document supported core deployment commands and operational assumptions. Add/update README files for analytics and CGNAT; verify enforcement and detection documentation against code. Mesh threat model, deployment, and module docs are tracked in the separate mesh feature plan. | OPEN |
+|| A-036 | Core docs and claims | Replace stale code-health notes; document supported core deployment commands and operational assumptions. Add/update README files for analytics and CGNAT; verify enforcement and detection documentation against code. Mesh threat model, deployment, and module docs are tracked in the separate mesh feature plan. | PARTIAL — P1 docs shipped (cc685f4): `crates/ramshield-cgnat/README.md`, `docs/DEPLOYMENT_COMMANDS.md`. Remaining: analytics README operational guidance, CODE_BIBLE.md refresh, enforcement/detection doc verification, operational assumptions doc, DEFENSE_MODEL.md capability matrix verification. |
 
 | A-037 | Core benchmarks and regression budgets | Establish reproducible baselines for detection, enforcement, WAL, native ingest, and memory under load. Set only evidence-based regression thresholds. Mesh merge/gossip performance is tracked in the separate mesh feature plan. | OPEN |
 
@@ -161,3 +161,17 @@ The following source-level fixes were applied directly to `audit-branch`:
 ### Acceptance status
 
 These are applied source changes, **not a release sign-off**. The full Rust/C build, formatting, Clippy, zero-unwrap gate, and end-to-end suite must pass on one final immutable SHA before closure. Keep the remaining backlog items open until that evidence is attached.
+
+## 2026-10-12 decomposition/hardening pass — audit-branch
+
+Base SHA: `44dfdae`. Result SHA: `cc685f4`. One bounded pass.
+
+Changed paths: `crates/ramshield-config/src/env.rs`, `crates/ramshield-config/src/validate.rs`, `crates/ramshield-enforcement/src/service/enforce.rs`, `src/engine/native.rs`, `src/ipc/server/connection.rs`, `src/ipc/server/handlers.rs` (decomposition, committed earlier via `e65408e`); `crates/ramshield-cgnat/README.md`, `docs/DEPLOYMENT_COMMANDS.md` (this commit).
+
+Regression coverage: existing suite covers the touched paths. New native.rs misalignment assertion in `tpacket_tests`. Checkpoint-barrier scope in `enforce.rs` verified unchanged by diff review — not covered by a new test.
+
+Commands actually run (all exit 0): `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked --features full` (all crate test suites pass, 0 failures).
+
+Remaining findings: A-035 exact-SHA gates + independent review still pending. A-036 partial (two P1 docs shipped; remaining listed in row). A-037/A-038/A-039 open.
+
+Next action: A-035 exact-SHA validation (Cargo is available locally — the earlier "Cargo unavailable" note is stale).
