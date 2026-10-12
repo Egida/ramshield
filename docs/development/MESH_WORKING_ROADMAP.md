@@ -14,7 +14,7 @@
 
 ## What is measurable today, and what must be exposed
 
-Existing code gives us useful signals/state: MeshApplyReport counts received/applied/ignored/failed mutations; peer WAL cursors and in-flight guards; bounded queues and configured capacity; per-peer planner reasons, dirty/in-flight state, and retry policy; the projection-pending set; page/ACK outcomes; and WAL head/LSN boundaries. These are not yet a complete exported operational metrics contract.
+Existing code gives us useful signals/state: MeshApplyReport counts received/applied/ignored/failed mutations; peer WAL cursors and in-flight guards; bounded queues and configured capacity; per-peer planner reasons, dirty/in-flight state, and retry policy; the projection-pending set; frame/ACK outcomes; and WAL head/LSN boundaries. These are not yet a complete exported operational metrics contract.
 
 Add a small, stable telemetry surface before tuning behavior:
 
@@ -26,7 +26,7 @@ Add a small, stable telemetry surface before tuning behavior:
 | Queue pressure | queue depth/capacity and overflow/drop count | Make loss/recovery triggers visible before convergence fails |
 | Projection debt | pending Store projections; XDP reconcile failures separately | Detect durable-but-not-yet-enforced state |
 | Recovery state | generation, captured boundary, state, age, retries | Detect stuck or incorrectly restarted full-sync generations |
-| State/page progress | per-peer cursor, pages completed, last successful repair age | Verify fairness and no starvation beyond 4,096 entries |
+| Recovery-stream progress | generation, frames accepted, last successful repair age | Detect stalled or incomplete recovery without live-map cursor paging |
 | Mutation outcomes | existing received/applied/ignored/failed counts, with bounded reason labels | Separate idempotent ignores from malformed or failed mutations |
 
 Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unbounded metric labels. Put high-cardinality context in sampled/structured logs. Never log shared keys or secrets.
@@ -35,9 +35,9 @@ Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unb
 
 ### Phase 0 — Make the baseline observable
 
-1. Keep the current defaults as the first test baseline: 50 ms coalescing, 30 s periodic repair, 250 ms initial retry capped at 10 s, 25 ms scheduler tick, 2 s application-ACK wait, 16 entries per wire frame, 4,096 entries per state page, 2,048 inbound queue capacity, 64 outbound writer permits, and existing read/write deadlines.
+1. Keep the current defaults as the first test baseline: 50 ms coalescing, 30 s periodic repair, 250 ms initial retry capped at 10 s, 25 ms scheduler tick, 2 s application-ACK wait, 16 entries per wire frame, 2,048 inbound queue capacity, 64 outbound writer permits, and existing read/write deadlines. The current 4,096-entry snapshot cap is an implementation constraint to replace, not an accepted pagination design.
 2. Expose the signals above through structured tracing and small counters/gauges without adding a metrics framework.
-3. Add one repeatable harness report with initial/final state digest, per-peer acknowledged WAL cursor/head, repair duration, page count, ACK failures, queue overflow, projection debt, and memory/task bounds.
+3. Add one repeatable harness report with initial/final state digest, per-peer acknowledged WAL cursor/head, repair duration, recovery-frame count, ACK failures, queue overflow, projection debt, and memory/task bounds.
 4. Capture a quiet baseline, steady mutation baseline, and overloaded/unreachable-peer baseline. Record the exact commit SHA and commands.
 
 **Exit:** a failed or stalled test explains where progress stopped (WAL, ACK, snapshot rotation, queue, or projection), rather than only timing out.
@@ -45,7 +45,7 @@ Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unb
 ### Phase 1 — Close the recovery protocol gap (highest priority)
 
 1. Add an explicit receiver-confirmed RecoveryComplete message binding protocol version, peer/session identity, recovery generation, captured WAL boundary, and deterministic digest of the completed state rotation.
-2. Receiver emits it only after every required state page is validated and applied; sender accepts only a matching generation/boundary/digest. Duplicate completion is idempotent; stale or mismatched completion is rejected.
+2. Receiver emits it only after every frame in the fixed recovery stream is validated and applied; sender accepts only a matching generation/boundary/digest. Duplicate completion is idempotent; stale or mismatched completion is rejected.
 3. Keep the sender WAL cursor at/before the captured boundary until this proof is accepted; resume WAL replay at boundary + 1 only afterward.
 4. Define digest canonicalization explicitly (stable sort, normalized fields, tombstones included); never hash map iteration order.
 5. Test lost, duplicated, delayed, stale-generation, wrong-boundary, and wrong-digest completion messages.
@@ -54,7 +54,7 @@ Do not use peer IPs, mutation IPs, origin IDs, or arbitrary error strings as unb
 
 ### Phase 2 — Prove convergence under adversarial delivery
 
-Build a deterministic two-process test first, then three peers. Inject disconnect/reconnect, dropped and duplicated frames/ACKs, reordering, delayed pages, queue saturation, slow readers, and shutdown during a stalled send. Mutate and unblock/re-block keys while a snapshot page walk is active. Include expiry, tombstones, concurrent origin updates, and more than 4,096 live entries/tombstones.
+Build a deterministic two-process test first, then three peers. Inject disconnect/reconnect, dropped and duplicated frames/ACKs, reordering, delayed frames, queue saturation, slow readers, and shutdown during a stalled send. Mutate and unblock/re-block keys while a fixed recovery snapshot is being captured and streamed; do not use a moving cursor over the live CRDT map. Include expiry, tombstones, concurrent origin updates, and more than 4,096 live entries/tombstones.
 
 For each run compare canonical digests of:
 1. CRDT blocks + tombstones;
@@ -81,7 +81,7 @@ Test restart with (a) a valid provenance-bearing checkpoint and retained WAL tai
 
 ### Phase 5 — Tune from evidence, then canary
 
-Only tune scheduling, page sizes, timeouts, or concurrency after Phase 2–4 tests emit comparable measurements. Change one parameter at a time and compare:
+Only tune scheduling, frame/batch sizes, timeouts, or concurrency after Phase 2–4 tests emit comparable measurements. Change one parameter at a time and compare:
 - p50/p95/p99 repair duration;
 - time to convergence after reconnect or overflow;
 - WAL lag trajectory and time to drain backlog;
@@ -98,8 +98,8 @@ Prefer the smallest change that improves a measured bottleneck without violating
 
 | Blocker | Safe workaround until fixed | Do not do |
 |---|---|---|
-| No receiver-confirmed recovery transaction | Keep mesh disabled in production; keep cursor pinned at captured boundary during recovery | Treat page ACKs or local marker as proof of whole-snapshot completion |
-| Concurrent mutations during keyset pagination | Periodic full repair plus generation-aware restart; stress-test mutation races | Claim a page walk is an atomic snapshot |
+| No receiver-confirmed recovery transaction | Keep mesh disabled in production; keep cursor pinned at captured boundary during recovery | Treat frame ACKs or a local marker as proof of whole-snapshot completion |
+| No fixed recovery snapshot boundary | Capture a deterministic recovery generation/boundary and stream that fixed state in bounded frames; test concurrent mutations against WAL tail replay | Walk a live mutable map with a moving cursor and call it an atomic snapshot |
 | Queue overflow / dropped delta | Mark peer dirty and run repair; expose overflow and backlog | Silently discard and report healthy |
 | Projection failure after durable acceptance | Keep WAL/CRDT truth, record projection debt, retry reconciliation | Roll back committed history or ACK before durable acceptance |
 | Cursor older than WAL retention | Run full-state repair with explicit boundary proof, then replay tail | Jump cursor to current head before repair completes |
