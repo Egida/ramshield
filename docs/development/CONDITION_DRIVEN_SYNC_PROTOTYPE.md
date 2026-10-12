@@ -1,14 +1,14 @@
 # Condition-driven mesh sync prototype
 
-**Status:** integrated transport prototype; exact-SHA acceptance and network-level convergence tests are still required. Not production-ready.
+**Status:** integrated WAL-backed prototype; exact-head CI is green, but multi-node fault-injection acceptance and independent review remain open. Not production-ready.
 
-**Branch:** `prototype/condition-driven-mesh-sync-20261011`
+**Branch:** prototype/condition-driven-mesh-sync-20261011
 
 ## Goal
 
-Replace unconditional full-state anti-entropy every two seconds with a per-peer scheduler that syncs when evidence suggests it is needed, while retaining a bounded periodic repair pass. This is an optimization of *when* to send anti-entropy, not a change to CRDT merge semantics.
+Use the existing WAL as durable mutation history and the CRDT as the convergence model. Condition-driven anti-entropy reduces unnecessary full-state work without introducing blockchain machinery, a global sequence, or changing CRDT merge semantics. A bounded periodic repair remains as a safety net.
 
-## Conditions
+## Scheduling conditions
 
 | Condition | Scheduling behavior |
 |---|---|
@@ -19,58 +19,65 @@ Replace unconditional full-state anti-entropy every two seconds with a per-peer 
 | Incoming queue overflow | Request repair because a delta may have been dropped |
 | Periodic repair deadline | Run a safety-net sync even if no trigger was observed |
 
-Defaults are prototype values: 50 ms coalescing, 30 s repair interval, 250 ms initial retry, and 10 s maximum retry delay. The transport scheduler wakes every 25 ms with delayed missed-tick behavior; tests use short deterministic durations. Scheduling uses monotonic elapsed time, not wall-clock time.
+Prototype defaults are 50 ms coalescing, a 30 s repair interval, 250 ms initial retry, and 10 s maximum retry delay. The transport scheduler wakes every 25 ms with delayed missed-tick behavior; tests use short deterministic durations. Scheduling uses monotonic elapsed time, not wall-clock time.
+
+## Durable mutation and replication contract
+
+1. A local mesh mutation gets a durable WAL record with schema version, origin node/incarnation/counter, IP, action, creation/expiry, and tier.
+2. WAL append and sync precede publication of the mutation to the CRDT.
+3. Each peer has an independent cursor over this node's WAL LSNs. These are sender-local offsets, not a cluster-global order.
+4. Replication pages are bounded. The receiver validates the authenticated envelope and mutation fields, persists/merges accepted mutations idempotently, and returns an authenticated application ACK.
+5. The sender advances a WAL cursor only when the ACK's LSN exactly matches the page end. A socket write alone is not acceptance.
+6. Projection failure does not erase committed history; a bounded repair queue retries Store projection. XDP reconciliation remains a separate projection concern.
+7. Startup restores checkpointed CRDT provenance/tombstones and replays the WAL tail. If required history was pruned and no provenance-bearing checkpoint exists, hard-WAL mode fails closed.
+8. If a peer cursor falls behind WAL retention, the sender holds that cursor pending a full CRDT rotation. The recovery boundary is captured once per attempt; repeated ticks cannot restart the attempt or move the boundary.
+
+The transport's full-sync rotation currently considers completion after every frame/page in the current generation has received an accepted application ACK. Enforcement then consumes a local completion marker and resumes WAL replay after the captured boundary. **This is not yet a separate receiver-level RecoveryComplete handshake that echoes the generation, boundary, and a digest of the snapshot.** Treat that as remaining protocol-hardening work; do not describe the current marker as a receiver-confirmed snapshot transaction.
 
 ## State-machine contract
 
-Each configured peer owns one `ConditionSyncPlanner`.
+Each configured peer owns one ConditionSyncPlanner.
 
 1. The caller reports a condition with a monotonic timestamp.
-2. `take_due(now)` claims at most one pass; overlapping passes are prevented.
-3. The caller performs the existing bounded snapshot/chunk/send work for that peer.
-4. The caller invokes `complete(now, success)` exactly once for each claimed pass.
+2. take_due(now) claims at most one pass; overlapping passes are prevented.
+3. The caller performs bounded snapshot/chunk/send work for that peer.
+4. The caller invokes complete(now, success) once for each claimed pass.
 5. Failure leaves the peer dirty and applies capped exponential backoff.
-6. A condition arriving during an in-flight pass remains pending; completion of the older pass cannot erase it.
-7. Periodic repair remains mandatory because notifications can be missed and a successful socket write is not proof that remote state was applied.
+6. A condition arriving during an in-flight pass remains pending; completion of an older pass cannot erase it.
+7. Periodic repair remains mandatory because notifications can be missed and ACKs cover individual frames, not an atomic snapshot transaction.
 
-## Current transport integration
+## Current integration
 
-The prototype is wired into `MeshHandle` on this branch:
+- Each configured peer has its own planner, delivery-failure flag, snapshot cursor, generation, and recovery boundary.
+- Local broadcasts mark peers dirty; send failures request repair; success after a recorded failure triggers reconnect repair.
+- Inbound queue overflow is surfaced to the scheduler after releasing the queue lock.
+- Enforcement uses drain_with_ack() and acknowledges only after processing; WAL batches return the sender's page-end LSN only after all contained mutations are accepted.
+- Full-state pages are bounded to 4,096 entries per page and 16 entries per wire frame. WAL pages are also bounded, and active page sends use a shared writer semaphore and per-frame deadlines.
+- Caller-owned snapshot_page(cursor, limit) cursors keep one peer from advancing another peer's pagination position.
+- CRDT state includes origin dots and tombstone high-water marks so concurrent origin mutations are not collapsed into one peer's aggregate event.
 
-- each configured peer has its own planner, delivery-failure flag, and snapshot cursor;
-- local `broadcast` calls mark peers dirty; send failures request repair; a successful send after a recorded failure triggers reconnect repair;
-- inbound queue overflow is surfaced to the scheduler after releasing the queue lock;
-- the owner must call `notify_remote_state_applied()` **after** drained messages have actually been merged into the CRDT. Draining alone is deliberately not treated as application success;
-- a 30-second periodic repair remains as a safety net, while large snapshots continue page-by-page;
-- each page is capped at 4,096 entries and each wire message at 128 entries; active page sends use the shared writer semaphore and bounded per-frame deadlines;
-- caller-owned `snapshot_page(cursor, limit)` cursors keep one peer from advancing another peer's pagination position.
+## Acceptance work still required
 
-## Remaining acceptance work
+- Add and test an explicit receiver-confirmed recovery completion frame binding the recovery generation, captured WAL boundary, and a deterministic digest of the completed state rotation.
+- Run real multi-node fault injection: disconnect/reconnect, process restart across checkpoint/retention, duplicate and reordered pages, queue pressure, concurrent mutation during pagination, and repeated ACK loss.
+- Prove eventual convergence of both CRDT state and Store/XDP projections, including tombstones and more than 4,096 live entries/tombstones.
+- Test cancellation/shutdown during stalled sends, peer fairness, bounded task/memory behavior, and no hot retry loop for unreachable peers.
+- Add origin signatures or per-node authenticated identity. Current shared-key HMAC authenticates a configured mesh member, not an individual origin dot.
+- Keep independent review and exact-head CI green. Passing unit/workspace CI does not replace network-level convergence acceptance.
 
-This is still a prototype, not a production-ready convergence protocol:
+## Verified regression coverage
 
-- a successful TCP write is not an authenticated/applied acknowledgement; there are no durable delivery acknowledgements or durable cursors;
-- the current shared HMAC trust model does not provide independent per-origin signatures;
-- the higher-level service must call `notify_remote_state_applied()` after merge; this callback is not automatically inferred by the transport;
-- prove recovery after packet loss, disconnection, process restart, more than 4,096 live entries/tombstones, and a saturated inbound queue;
-- test concurrent mutation while pages are emitted, cursor behavior as entries are inserted/removed, peer starvation, bounded memory/task count, cancellation, and shutdown while sends are stalled;
-- run mesh-only and workspace gates and obtain independent review on one exact SHA.
-
-Keep mesh optional and disabled in production until these gates pass.
-
-## Prototype tests
-
-The module has deterministic unit tests for mutation coalescing, reconnect fast-path, periodic fallback, capped retry behavior, conditions during an in-flight pass, queue-overflow repair, no overlapping passes, and invalid policy settings. These are source-level tests only until exact-SHA CI runs.
+The integrated branch contains tests for WAL LSN paging, checkpoint/tombstone roundtrip, checkpoint-seed plus WAL-tail folding, positive/negative application ACKs, enforcement-level WAL-batch TCP handling, and a recovery-boundary regression that proves repeated recovery requests do not move the captured boundary.
 
 ## Acceptance bar
 
-Do not replace the current transport scheduler until the integrated implementation demonstrates:
+Do not merge or enable production mesh until all of the following are demonstrated on one immutable SHA:
+
 - convergence with dropped, duplicated, delayed, and reordered messages;
 - every page and tombstone eventually visited for each peer independently;
-- bounded recovery latency after reconnect/overflow/failure;
-- no hot retry loop for an unreachable peer;
+- recovery does not advance past the captured boundary without the required completion proof;
+- bounded recovery latency after reconnect/overflow/failure and no hot retry loop;
 - no lost dirty signal when mutation races with sync completion;
-- core feature-off suite unchanged and green;
-- mesh-only and mesh-integrated CI, strict Clippy, formatting, and independent review all green on one exact SHA.
+- feature-off and mesh-enabled workspace gates, strict Clippy, formatting, dependency audit, and independent review are green.
 
 Until those gates pass, keep mesh optional and disabled in production.
