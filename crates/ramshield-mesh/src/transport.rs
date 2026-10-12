@@ -1509,7 +1509,7 @@ mod frame_tests {
     }
 
     #[test]
-    fn full_sync_recovery_completes_at_captured_boundary_after_page_acks() {
+    fn full_sync_recovery_completes_at_captured_boundary_after_frame_acks() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
