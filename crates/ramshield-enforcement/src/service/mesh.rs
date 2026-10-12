@@ -108,32 +108,18 @@ impl EnforcementService {
         let inflight = self.mesh_wal_inflight.clone();
 
         for peer in handle.peers() {
+            // Never advance/replay the WAL tail merely because every snapshot
+            // frame was ACKed. Resume only after the receiver-wide recovery
+            // completion handshake clears this pending state.
+            if handle.recovery_completion_pending(peer).await {
+                continue;
+            }
             let inserted = inflight
                 .lock()
                 .map(|mut peers| peers.insert(peer))
                 .unwrap_or(false);
             if !inserted {
                 continue;
-            }
-            if let Some((_generation, boundary_lsn)) = handle.take_acked_recovery_transfer(peer).await {
-                if let Ok(mut values) = cursors.lock() {
-                    let current = values.get(&peer).copied().unwrap_or(0);
-                    if boundary_lsn >= current {
-                        values.insert(peer, boundary_lsn);
-                        info!(
-                            peer = %peer,
-                            boundary_lsn,
-                            "all recovery snapshot frames ACKed; awaiting receiver-wide completion proof before WAL tail resumes"
-                        );
-                    } else {
-                        warn!(
-                            peer = %peer,
-                            current_cursor = current,
-                            boundary_lsn,
-                            "ignored stale full recovery completion"
-                        );
-                    }
-                }
             }
             let cursor = cursors
                 .lock()
