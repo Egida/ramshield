@@ -16,6 +16,8 @@
 
 **Meaning of 100/100:** every applicable production-essential P0/P1 is closed with regression evidence, P2s are closed or explicitly justified as non-applicable, all core acceptance gates pass on one SHA, and an independent reviewer approves that SHA. A green build alone is not 100/100.
 
+**State review (2026-10-12):** A-035 remains `IN PROGRESS`; complete its doctor/API/error-semantics follow-ups and validate the exact resulting SHA before moving to A-036. A-036 (core docs/claims), A-037 (core performance baselines), A-038 (independent audit), and A-039 (final acceptance report) remain open. Mesh remains explicitly outside this core backlog and is tracked in `docs/development/MESH_FEATURE_PLAN.md`; no mesh pagination task belongs here. The mesh prototype's green checks do not change core backlog status or constitute mesh production acceptance.
+
 
 
 ## Priority definitions
