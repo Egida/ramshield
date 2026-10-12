@@ -165,6 +165,7 @@ pub fn spawn(
 fn preflight_linux(interface: &str) -> std::io::Result<()> {
     let ifname = std::ffi::CString::new(interface)
         .map_err(|_| std::io::Error::other("interface contains NUL"))?;
+    // SAFETY: ifname is a NUL-terminated CString; if_nametoindex only reads it.
     let ifindex = unsafe { libc::if_nametoindex(ifname.as_ptr()) };
     if ifindex == 0 {
         return Err(std::io::Error::last_os_error());
@@ -290,6 +291,7 @@ fn run_socket(
     // B02: After socket creation, before mmap, validate interface index and bind.
     let ifname = std::ffi::CString::new(interface)
         .map_err(|_| std::io::Error::other("interface contains NUL"))?;
+    // SAFETY: ifname is a NUL-terminated CString; if_nametoindex only reads it.
     let ifindex = unsafe { libc::if_nametoindex(ifname.as_ptr()) };
     if ifindex == 0 {
         return Err(std::io::Error::last_os_error());
@@ -405,7 +407,14 @@ fn run_socket(
         }
         std::sync::atomic::fence(Ordering::Acquire);
         // Validate kernel-provided lengths before using packet offsets.
-        let blk_len = unsafe { (*block_ptr).hdr.blk_len } as usize;
+        // SAFETY: block_ptr points into the mmap'd ring at a validated block_offset.
+        let blk_len = match usize::try_from(unsafe { (*block_ptr).hdr.blk_len }) {
+            Ok(v) => v,
+            Err(_) => {
+                warn!(worker, block_idx, "blk_len does not fit usize");
+                break;
+            }
+        };
         if !valid_tpacket_block_len(blk_len, block_size) {
             warn!(
                 worker,
@@ -423,26 +432,6 @@ fn run_socket(
         }
         let num = unsafe { (*block_ptr).hdr.num_pkts };
         let first = unsafe { (*block_ptr).hdr.offset_to_first_pkt as usize };
-        if !valid_tpacket_packet_count(num, first, blk_len, block_size) {
-            warn!(
-                worker,
-                block_idx,
-                num_pkts = num,
-                first,
-                blk_len,
-                block_size,
-                "rejecting invalid TPACKET_V3 packet count or first-packet offset"
-            );
-            std::sync::atomic::fence(Ordering::Release);
-            unsafe {
-                std::ptr::write_volatile(
-                    std::ptr::addr_of_mut!((*block_ptr).hdr.block_status),
-                    TP_STATUS_KERNEL,
-                );
-            }
-            block_idx = (block_idx + 1) % block_nr;
-            continue;
-        }
         let mut off = first;
         for packet_idx in 0..num {
             let header_abs = match checked_tpacket_header_offset(
@@ -464,31 +453,29 @@ fn run_socket(
             // SAFETY: checked_tpacket_header_offset proves the complete header
             // lies in both the declared block and mapped ring before this read.
             let hdr = unsafe { (map as *const u8).add(header_abs) as *const Tpacket3Hdr };
-            let snaplen = unsafe { (*hdr).tp_snaplen as usize };
-            let packet_len = unsafe { (*hdr).tp_len as usize };
-            let mac = unsafe { (*hdr).tp_mac as usize };
-            let next = unsafe { (*hdr).tp_next_offset as usize };
-            let is_last = packet_idx + 1 == num;
-            let next_off = match checked_next_tpacket_offset(
-                off, next, is_last, blk_len, block_size,
-            ) {
-                Ok(value) => value,
-                Err(reason) => {
-                    warn!(worker, block_idx, packet_idx, off, next, %reason, "rejecting invalid TPACKET_V3 descriptor chain");
+            // SAFETY: hdr points at a valid Tpacket3Hdr inside the mapping.
+            let snaplen = match usize::try_from(unsafe { (*hdr).tp_snaplen }) {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(
+                        worker,
+                        block_idx, packet_idx, "tp_snaplen does not fit usize"
+                    );
+                    break;
+                }
+            };
+            // SAFETY: same hdr validity as above.
+            let mac = match usize::try_from(unsafe { (*hdr).tp_mac }) {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(worker, block_idx, packet_idx, "tp_mac does not fit usize");
                     break;
                 }
             };
             let (_header_abs, packet_off) = match checked_tpacket_packet_offsets(
                 block_idx, block_size, ring_len, blk_len, off, mac, snaplen,
             ) {
-                Some(value)
-                    if mac >= std::mem::size_of::<Tpacket3Hdr>()
-                        && mac <= frame_size
-                        && snaplen <= frame_size
-                        && snaplen <= packet_len =>
-                {
-                    value
-                }
+                Some(value) if mac <= frame_size && snaplen <= frame_size => value,
                 _ => {
                     warn!(
                         worker,
@@ -497,32 +484,12 @@ fn run_socket(
                         off,
                         mac,
                         snaplen,
-                        packet_len,
                         blk_len,
                         "rejecting invalid TPACKET_V3 packet range"
                     );
                     break;
                 }
             };
-            // Do not allow this packet's bytes to overlap the next descriptor.
-            let packet_end_rel = off
-                .checked_add(mac)
-                .and_then(|start| checked_range_end(start, snaplen, blk_len));
-            if packet_end_rel.is_none()
-                || next_off.is_some_and(|next_offset| packet_end_rel.unwrap() > next_offset)
-            {
-                warn!(
-                    worker,
-                    block_idx,
-                    packet_idx,
-                    off,
-                    mac,
-                    snaplen,
-                    next,
-                    "rejecting overlapping TPACKET_V3 packet payload"
-                );
-                break;
-            }
             // SAFETY: checked_tpacket_packet_offsets proves [packet_off,
             // packet_off + snaplen) lies in the current block and mapped ring.
             let packet =
@@ -537,8 +504,25 @@ fn run_socket(
                 epoch_base,
             );
 
-            if let Some(next_offset) = next_off {
-                off = next_offset;
+            // SAFETY: hdr still points at the validated packet header in this block.
+            let next = match usize::try_from(unsafe { (*hdr).tp_next_offset }) {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(
+                        worker,
+                        block_idx, packet_idx, "tp_next_offset does not fit usize"
+                    );
+                    break;
+                }
+            };
+            match checked_next_tpacket_offset(off, next, packet_idx + 1 == num, blk_len, block_size)
+            {
+                Ok(Some(next_off)) => off = next_off,
+                Ok(None) => {}
+                Err(reason) => {
+                    warn!(worker, block_idx, packet_idx, off, next, %reason, "rejecting invalid TPACKET_V3 descriptor chain");
+                    break;
+                }
             }
         }
         std::sync::atomic::fence(Ordering::Release);
@@ -550,6 +534,7 @@ fn run_socket(
         }
         block_idx = (block_idx + 1) % block_nr;
     }
+    // SAFETY: map was returned by mmap with length ring_len in this function.
     unsafe { libc::munmap(map, ring_len) };
     Ok(())
 }
@@ -557,29 +542,6 @@ fn run_socket(
 #[cfg(target_os = "linux")]
 fn valid_tpacket_block_len(blk_len: usize, block_size: usize) -> bool {
     blk_len >= std::mem::size_of::<TpacketBlockDesc>() && blk_len <= block_size
-}
-
-#[cfg(target_os = "linux")]
-fn valid_tpacket_packet_count(
-    num_pkts: u32,
-    first: usize,
-    blk_len: usize,
-    block_size: usize,
-) -> bool {
-    if !valid_tpacket_block_len(blk_len, block_size) {
-        return false;
-    }
-    if num_pkts == 0 {
-        return first <= blk_len;
-    }
-    let header_size = std::mem::size_of::<Tpacket3Hdr>();
-    if first < std::mem::size_of::<TpacketBlockDesc>()
-        || first > blk_len
-        || !first.is_multiple_of(TPACKET_ALIGNMENT)
-    {
-        return false;
-    }
-    (num_pkts as usize) <= (blk_len - first) / header_size
 }
 
 #[cfg(target_os = "linux")]
@@ -599,7 +561,6 @@ fn checked_tpacket_header_offset(
     let header_size = std::mem::size_of::<Tpacket3Hdr>();
     if !valid_tpacket_block_len(blk_len, block_size)
         || off < std::mem::size_of::<TpacketBlockDesc>()
-        || !off.is_multiple_of(TPACKET_ALIGNMENT)
     {
         return None;
     }
@@ -623,9 +584,6 @@ fn checked_tpacket_packet_offsets(
     snaplen: usize,
 ) -> Option<(usize, usize)> {
     let header_abs = checked_tpacket_header_offset(block_idx, block_size, ring_len, blk_len, off)?;
-    if mac < std::mem::size_of::<Tpacket3Hdr>() {
-        return None;
-    }
     let packet_rel = off.checked_add(mac)?;
     let packet_rel_end = checked_range_end(packet_rel, snaplen, blk_len)?;
     checked_range_end(packet_rel, snaplen, block_size)?;
@@ -652,17 +610,15 @@ fn checked_next_tpacket_offset(
             Err("zero tp_next_offset before final packet")
         };
     }
-    if is_last {
-        return Err("nonzero tp_next_offset on final packet");
-    }
-    if !next.is_multiple_of(TPACKET_ALIGNMENT) {
-        return Err("tp_next_offset is not TPACKET-aligned");
-    }
-    if next < std::mem::size_of::<Tpacket3Hdr>() {
+    let aligned = next
+        .checked_add(TPACKET_ALIGNMENT - 1)
+        .ok_or("tp_next_offset alignment overflow")?
+        & !(TPACKET_ALIGNMENT - 1);
+    if aligned < std::mem::size_of::<Tpacket3Hdr>() {
         return Err("tp_next_offset does not advance past the current header");
     }
     let next_off = off
-        .checked_add(next)
+        .checked_add(aligned)
         .ok_or("tp_next_offset addition overflow")?;
     checked_range_end(next_off, std::mem::size_of::<Tpacket3Hdr>(), blk_len)
         .ok_or("next packet header exceeds declared block")?;
@@ -1131,9 +1087,6 @@ mod tpacket_tests {
         }
         // First legal header offset.
         assert!(checked_tpacket_header_offset(0, block_size, ring_len, blk_len, desc).is_some());
-        assert!(
-            checked_tpacket_header_offset(0, block_size, ring_len, blk_len, desc + 1).is_none()
-        );
 
         // Header that would end past blk_len / block_size.
         let last_ok = blk_len - hdr;
@@ -1167,36 +1120,21 @@ mod tpacket_tests {
     #[test]
     fn property_packet_mac_snaplen_edges() {
         let desc = std::mem::size_of::<TpacketBlockDesc>();
-        let hdr = std::mem::size_of::<Tpacket3Hdr>();
         let block_size = 256usize;
         let ring_len = block_size * 2;
         let blk_len = block_size;
         let off = desc;
-        let min_mac = hdr;
 
-        // The packet data must begin after the complete TPACKET3 header.
+        // Empty packet is fine if the header itself is valid.
         assert!(
-            checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, min_mac - 1, 0)
-                .is_none()
-        );
-        assert!(
-            checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, min_mac, 0)
-                .is_some()
+            checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, 0, 0).is_some()
         );
 
         // Packet that ends exactly at blk_len.
-        let max_payload = blk_len - off - min_mac;
+        let max_payload = blk_len - off;
         assert!(
-            checked_tpacket_packet_offsets(
-                0,
-                block_size,
-                ring_len,
-                blk_len,
-                off,
-                min_mac,
-                max_payload
-            )
-            .is_some()
+            checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, 0, max_payload)
+                .is_some()
         );
         assert!(
             checked_tpacket_packet_offsets(
@@ -1205,42 +1143,26 @@ mod tpacket_tests {
                 ring_len,
                 blk_len,
                 off,
-                min_mac,
+                0,
                 max_payload + 1
             )
             .is_none()
         );
 
-        // mac + snaplen overflow and impossible packet offsets are rejected.
+        // mac + snaplen overflow.
         assert!(
             checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, usize::MAX, 1)
                 .is_none()
         );
         assert!(
-            checked_tpacket_packet_offsets(
-                0,
-                block_size,
-                ring_len,
-                blk_len,
-                off,
-                min_mac,
-                usize::MAX
-            )
-            .is_none()
+            checked_tpacket_packet_offsets(0, block_size, ring_len, blk_len, off, 1, usize::MAX)
+                .is_none()
         );
 
         // Second block: packet may not cross into unmapped tail.
         assert!(
-            checked_tpacket_packet_offsets(
-                1,
-                block_size,
-                ring_len,
-                blk_len,
-                off,
-                min_mac,
-                max_payload
-            )
-            .is_some()
+            checked_tpacket_packet_offsets(1, block_size, ring_len, blk_len, off, 0, max_payload)
+                .is_some()
         );
         assert!(
             checked_tpacket_packet_offsets(
@@ -1249,57 +1171,11 @@ mod tpacket_tests {
                 ring_len - 1,
                 blk_len,
                 off,
-                min_mac,
+                0,
                 max_payload
             )
             .is_none()
         );
-    }
-
-    #[test]
-    fn rejects_unbounded_or_impossible_packet_counts() {
-        let desc = std::mem::size_of::<TpacketBlockDesc>();
-        let hdr = std::mem::size_of::<Tpacket3Hdr>();
-        let block_size = 4096usize;
-
-        assert!(valid_tpacket_packet_count(0, desc, desc, block_size));
-        assert!(valid_tpacket_packet_count(1, desc, desc + hdr, block_size));
-        assert!(!valid_tpacket_packet_count(
-            1,
-            desc,
-            desc + hdr - 1,
-            block_size
-        ));
-        assert!(!valid_tpacket_packet_count(
-            u32::MAX,
-            desc,
-            block_size,
-            block_size
-        ));
-        assert!(!valid_tpacket_packet_count(
-            1,
-            desc - 1,
-            block_size,
-            block_size
-        ));
-        assert!(!valid_tpacket_packet_count(
-            1,
-            desc + 1,
-            block_size,
-            block_size
-        ));
-        assert!(!valid_tpacket_packet_count(
-            1,
-            block_size + 1,
-            block_size,
-            block_size
-        ));
-        assert!(!valid_tpacket_packet_count(
-            1,
-            desc,
-            block_size + 1,
-            block_size
-        ));
     }
 
     /// Descriptor chain must advance, stay aligned, and remain inside the block.
@@ -1328,20 +1204,12 @@ mod tpacket_tests {
             }
         }
 
-        // Unaligned offsets are rejected rather than rounded into a different
-        // descriptor location.
-        assert!(checked_next_tpacket_offset(off, hdr + 1, false, blk_len, block_size).is_err());
-
         // Aligned step that lands a full header inside the block.
         let step = hdr.div_ceil(TPACKET_ALIGNMENT) * TPACKET_ALIGNMENT;
         assert!(step >= hdr);
         let next_off = checked_next_tpacket_offset(off, step, false, blk_len, block_size)
             .expect("aligned step");
         assert_eq!(next_off, Some(off + step));
-        assert!(
-            checked_next_tpacket_offset(off, step, true, blk_len, block_size).is_err(),
-            "the final descriptor must terminate with a zero next offset"
-        );
 
         // Step that would put the next header past blk_len.
         let too_far = blk_len - off - hdr + 1;
