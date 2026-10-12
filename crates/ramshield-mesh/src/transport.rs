@@ -305,13 +305,14 @@ impl MeshHandle {
     /// of the attempt; repeated tick calls must not restart an in-flight repair.
     pub async fn request_full_sync(&self, peer: SocketAddr, boundary_lsn: u64) {
         let now = self.sync_epoch.elapsed();
-        if let Some(state) = self.sync_states.lock().await.get_mut(&peer) {
-            if state.recovery_boundary_lsn.is_none() && state.completed_recovery.is_none() {
-                state.generation = state.generation.wrapping_add(1);
-                state.cursor = None;
-                state.recovery_boundary_lsn = Some(boundary_lsn);
-                state.planner.condition(SyncCondition::LocalMutation, now);
-            }
+        if let Some(state) = self.sync_states.lock().await.get_mut(&peer)
+            && state.recovery_boundary_lsn.is_none()
+            && state.completed_recovery.is_none()
+        {
+            state.generation = state.generation.wrapping_add(1);
+            state.cursor = None;
+            state.recovery_boundary_lsn = Some(boundary_lsn);
+            state.planner.condition(SyncCondition::LocalMutation, now);
         }
     }
 
