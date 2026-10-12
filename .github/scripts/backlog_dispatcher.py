@@ -121,6 +121,15 @@ def select_task(backlog: str, prs: list[dict[str, object]]) -> tuple[Task | None
 
     for task in sorted(tasks, key=lambda item: (item.priority, int(item.task_id[2:]))):
         if task.task_id in merged:
+            if (
+                task.status in ACTIONABLE
+                or task.status.startswith("IN PROGRESS")
+                or task.status.startswith("BLOCKED")
+            ):
+                return None, (
+                    f"{task.task_id} has a merged task PR but backlog status is "
+                    f"{task.status}; reconcile acceptance before continuing"
+                )
             continue
         if task.status.startswith("IN PROGRESS") or task.status.startswith("BLOCKED"):
             return None, f"{task.task_id} is {task.status}; manual status/review required"
@@ -322,8 +331,6 @@ def dispatch(state_dir: Path, release_pr: str | None, *, dry_run: bool) -> int:
                         codex,
                         "exec",
                         "--json",
-                        "--sandbox",
-                        "workspace-write",
                         "--approve-for-me",
                         "-C",
                         str(worktree),
