@@ -54,7 +54,13 @@ These commits are progress, not a feature acceptance decision. The current isola
 
 
 
-## Design decision — recovery without mutable-map pagination (2026-10-12)\n\nDo not pursue keyset/cursor pagination over the live mutable CRDT maps. That approach is dropped. The intended direction is WAL-led incremental catch-up per peer, using the peer's acknowledged source-WAL LSN when history is retained. When retention has created a gap, recover from a fixed recovery generation/boundary using a deterministic bounded snapshot stream, verify receiver completion, then replay WAL after the boundary. Transport framing may split the immutable recovery stream into bounded frames, but do not use a moving live-map cursor as the correctness mechanism. A recovery-completion handshake and fault-injection evidence are required before acceptance.\n\nPR #19 currently contains a keyset snapshot-cursor experiment. Treat that code as prototype material to replace or remove; do not treat it as the chosen design merely because its CI passes.\n\n## Mesh backlog
+## Design decision — recovery without mutable-map pagination (2026-10-12)
+
+Do not pursue keyset/cursor pagination over the live mutable CRDT maps. That approach is dropped. The intended direction is WAL-led incremental catch-up per peer, using the peer's acknowledged source-WAL LSN when history is retained. When retention has created a gap, recover from a fixed recovery generation/boundary using a deterministic bounded snapshot stream, verify receiver completion, then replay WAL after the boundary. Transport framing may split the immutable recovery stream into bounded frames, but do not use a moving live-map cursor as the correctness mechanism. A recovery-completion handshake and fault-injection evidence are required before acceptance.
+
+PR #19 currently contains a keyset snapshot-cursor experiment. Treat that code as prototype material to replace or remove; do not treat it as the chosen design merely because its CI passes.
+
+## Mesh backlog
 
 
 
@@ -83,6 +89,8 @@ These commits are progress, not a feature acceptance decision. The current isola
 - [ ] **M-012: End-to-end convergence under large state.** Test recovery streams spanning many bounded frames, repeated sync, loss/reconnect, tombstones, concurrent mutation, state larger than one frame and the configured workload, and eventual convergence without relying on a mutable-map page cursor.
 
 - [ ] **M-013: Frame-boundary tests.** Exact maximum, one byte over, delimiter split across reads, clean EOF, partial EOF, malformed JSON, and oversized input must have deterministic expected outcomes.
+
+- [ ] **M-014: Condition-driven WAL sync acceptance.** The isolated PR #19 prototype wires per-peer condition triggers, WAL catch-up, application ACKs, and periodic repair. Validate end-to-end service callbacks, recovery completion, retry/backoff behavior, and convergence under injected network/process faults before acceptance.
 
 
 
