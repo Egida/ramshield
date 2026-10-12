@@ -4,17 +4,14 @@
 EnforceCommand (from detection/forecasting)
            │
            ↓
-    EnforcementService::run()  ←── tokio mpsc::channel(4096)
+    EnforcementService actor
            │
-    ┌──────┴──────┐
-    ↓             ↓
- Store.update   XdpApplier.apply
-    │               │
-    ↓               ↓
- WAL.append    XDP kernel map
-    │
-    ↓
- TTL ring scheduler (auto-unblock after TTL)
+           ↓
+    WAL append (optional)
+           ↓
+    Store mutation + TTL scheduling
+           ↓
+    XDP projection
 ```
 
 ## Why it exists
@@ -25,7 +22,10 @@ Detection and forecasting produce decisions — "block this IP for 3600 seconds"
 
 ### EnforcementService
 
-An actor that runs on a dedicated tokio task. It receives `EnforceCommand`s through an `mpsc::channel(4096)` — large enough to buffer burst decisions during an attack without backpressure blocking detection:
+An actor that owns enforcement state and serializes enforcement decisions. The
+runtime supplies the command channel; its capacity is a runtime configuration
+detail and should not be treated as a lossless buffer or as proof that detection
+cannot experience backpressure.
 
 ```rust
 pub struct EnforcementService {
@@ -56,15 +56,28 @@ Every incoming command is checked against `processed_results` — a `HashMap<Uui
 
 Processing path:
 
-1. **Block command**: `store.update_ip()` sets `BlockState::Blocked`, then `wal.append()` writes the decision, then `xdp.apply_block()` pushes to the kernel XDP map. If the XDP interface is unavailable, enforcement degrades to in-band only — the Store's `blocked_set` is still updated, and IPC responses still report blocked status.
+1. **Block command**: after validation and any configured checkpoint barrier,
+   the WAL append occurs first when WAL is configured. Only then is userspace
+   state mutated and TTL scheduled. XDP is attempted as a projection after the
+   commit. A failed projection is reported as not applied and marks projection
+   health stale; it does not undo the durable userspace decision. Whether the
+   daemon starts or continues without XDP depends on its XDP fallback settings.
 
-2. **Unblock command**: `store.update_ip()` sets `BlockState::Unblocked`, `wal.append()` records the unblock, `xdp.apply_unblock()` removes from XDP, and the expiration entry is removed.
+2. **Unblock command**: the configured checkpoint barrier and WAL append happen
+   before userspace state changes. Expiration state is removed and the XDP
+   projection is attempted afterward. A projection failure is observable and
+   requires reconciliation; it is not evidence that the authoritative state
+   was rolled back.
 
 ### TTL Ring
 
 Block decisions include a `ttl_secs` field. When a block is applied, `schedule_expiration(ip, instant)` places the IP into a second-bucketed `BTreeMap<u64, Vec<IpAddr>>`. The bucket second is derived from the expiry Unix-ns timestamp, bucketed by whole second. This makes re-block (TTL refresh) O(1): detach via swap-remove from the old bucket, attach to the new. A background loop wakes every second, checks the earliest bucket, and issues unblock commands for any IPs whose TTL has elapsed.
 
-The expiry uses monotonic `Instant` — not `SystemTime` — so NTP adjustments don't cause premature or delayed unblocks. The bucketed-PQ trick (position tracking in `expirations: HashMap<IpAddr, (u64, usize)>`) avoids O(N) scans of the whole expiry map.
+IP expiry uses monotonic `Instant` — not `SystemTime` — so wall-clock
+adjustments do not change its deadline. The bucketed index tracks bucket and
+position to avoid scanning all pending IP expirations on every tick. Expiry
+resolution is bucketed at one-second granularity. CIDR expirations are tracked
+separately.
 
 ### WAL Replay
 
@@ -107,9 +120,15 @@ Each reason maps to a stable string (`"high_rps"`, `"subnet_burst"`, `"forecast_
 
 **Deduplication prevents block storms.** During a DDoS, detection may fire the same block decision hundreds of times per second. The `processed_results` HashMap ensures each `decision_id` is applied exactly once — preventing redundant XDP map writes and WAL appends that would consume disk and CPU.
 
-**Time-bucketed TTL ring.** Most TTL systems scan the full expiration map every second. This one groups IPs by expiry second in a `BTreeMap<u64, Vec<IpAddr>>` — checking only the earliest bucket. When thousands of IPs share the same TTL (common in subnet blocks), the scan is O(1) instead of O(N).
+**Time-bucketed IP expiry.** IP expirations are grouped by deadline second in
+a `BTreeMap`; due buckets can be drained without scanning every pending IP.
+CIDR expiry uses its own index.
 
-**Graceful degradation.** If XDP fails to load (wrong kernel, missing permissions), enforcement falls back to in-band mode — the Store still tracks blocks, IPC still reports them, only the kernel-level packet drop is lost. The daemon runs degraded but functional.
+**Projection separation.** The userspace decision remains authoritative if an
+XDP update fails, and projection health exposes the failure. Startup fallback
+is controlled by configuration: deployments that require kernel enforcement
+must verify XDP is active and must not assume an in-band decision drops packets
+in the kernel.
 
 ## Dependencies
 
@@ -125,4 +144,7 @@ No standalone benchmarks — enforcement latency is measured end-to-end in `benc
 
 ## Testing
 
-28 tests covering: dedup by decision_id, TTL ring expiry timing, WAL replay round-trip, `StubXdpApplier` mock behavior, concurrent block+unblock race conditions, graceful degradation when XDP is unavailable, per-IP XDP drop counters, mesh blocklist CRDT merge, and checkpoint coordination.
+The crate tests cover decision idempotency, TTL expiry, WAL replay, XDP
+projection success and failure, concurrent block/unblock, mesh projection, and
+checkpoint coordination. Test count changes as cases are added; use Cargo's
+current test output instead of relying on a count in this document.

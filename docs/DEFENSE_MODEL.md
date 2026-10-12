@@ -72,22 +72,25 @@ RamShield deliberately has no authoritative:
 
 Trusted peers may share observations/state, but every such action is attributable to authenticated fleet evidence. The detector remains independent of any public reputation source.
 
-## Capability closure matrix
+## Capability matrix (source support, not deployment qualification)
 
-| Capability | 0.6 foundation | Architectural rule |
+The implementation status below describes code paths present in this repository.
+It does not assert that a deployment enabled, connected, or qualified them.
+
+| Capability | Source status | Boundary / qualification requirement |
 |---|---|---|
-| Host-local L3/L4 cold-start protection | **Implemented** | XDP packet/SYN/UDP budgets before userspace |
-| Proxy/application telemetry | **Implemented** | bounded IPC; L7 metadata preserved into detection |
-| Volumetric uplink protection | **Escalation boundary** | FlowSpec/RTBH/scrubbing remains upstream |
-| CGNAT/shared subnet resilience | **Hardened** | 256K slots / 8 probes; projection failure never fabricates success |
-| Full HTTP WAF | **Not claimed** | add bounded native parsers before OWASP-class rules |
-| HTTP/2 Rapid Reset | **Telemetry detector** | native frame handling remains a later parser module |
-| HTTP/3 / QUIC | **Not claimed** | UDP-aware guard exists; QUIC parser is separate work |
-| WebSocket inspection | **Not claimed** | requires bounded L7 state machine |
-| TLS JA3/JA4 | **Not claimed** | requires packet/TLS ClientHello observation |
-| Native TLS/mTLS management plane | **Not claimed** | current public deployment requires an external TLS boundary |
-| BGP FlowSpec / RTBH | **Adapter boundary** | daemon emits vendor-neutral escalation; provider integration owns BGP credentials |
-| Multi-node consensus | **Not claimed** | authenticated fleet state is not a consensus protocol |
-| Community threat intelligence | **Intentionally absent** | no public reputation source may authorize mitigation |
+| Host-local L3/L4 packet budgets | **Implemented behind XDP/autonomous configuration** | Verify native mode, interface attachment, privileges, map health, and per-CPU budget sizing. This is not upstream link protection. |
+| Proxy/application telemetry | **Supported by bounded event fields** | Producer integration and event coverage are deployment responsibilities. |
+| Volumetric uplink protection | **Not provided by host-local code** | FlowSpec/RTBH/scrubbing remains an external upstream integration. |
+| CGNAT/shared-subnet projection | **Implemented** | SHM table has 262,144 slots and a four-slot bounded probe. Full table/probe exhaustion is a projection failure; qualify capacity and monitor it. |
+| Full HTTP WAF | **Not claimed** | No complete native HTTP parser/rule engine; add bounded protocol parsers before making this claim. |
+| HTTP/2 Rapid Reset | **Telemetry-based detector inputs** | Counts/ratios arrive from a producer; RamShield does not parse native HTTP/2 frames. |
+| HTTP/3 / QUIC | **Not claimed** | UDP packet handling is not QUIC parsing. |
+| WebSocket inspection | **Not claimed** | Requires a bounded L7 state machine and producer/parser support. |
+| TLS JA3/JA4 | **Not claimed** | Requires TLS ClientHello observation and fingerprinting. |
+| Native TLS/mTLS management plane | **Not claimed** | Terminate TLS/mTLS at an external controlled boundary. |
+| BGP FlowSpec / RTBH | **External integration boundary** | Provider integration and BGP credentials remain outside the daemon. |
+| Multi-node consensus | **Not claimed** | Authenticated mesh state is not a consensus protocol or production mesh acceptance. |
+| Community threat intelligence | **Intentionally absent** | No public reputation source may authorize mitigation. |
 
 This matrix is part of the product contract: an unimplemented row must not be marketed as a completed security capability.

@@ -158,3 +158,25 @@ daemon is healthy
 XDP is active when kernel enforcement is required
 persistence is healthy when restart durability is required
 ```
+
+## Deployment assumptions
+
+- **Telemetry:** detection only sees events delivered by the configured ingest
+  path. Verify the proxy/application producer and its bounded event fields;
+  source support alone does not mean telemetry is connected.
+- **Durability:** enable and qualify WAL if blocks must survive restart. Without
+  WAL, do not claim WAL-backed recovery. Keep WAL storage writable, sized, and
+  monitored; verify replay after upgrades in staging.
+- **Kernel enforcement:** XDP requires a supported Linux kernel, interface,
+  driver mode, permissions, and available map capacity. If kernel packet drops
+  are required, configure startup to fail when XDP cannot attach and verify the
+  reported protection state after every restart.
+- **Management network:** HMAC authenticates IPC but does not encrypt it. Keep
+  management listeners on trusted networks or terminate TLS/mTLS at a controlled
+  proxy. Dashboard cookie security flags do not encrypt HTTP traffic.
+- **Capacity and policy:** detection thresholds, memory limits, telemetry rate,
+  and shared-egress behavior vary by deployment. Qualify false positives,
+  queue pressure, and XDP/SHM projection capacity under representative load.
+- **Mesh:** mesh functionality is experimental and has separate acceptance
+  requirements. Do not interpret enabled mesh code or green core workflows as
+  production multi-node qualification.

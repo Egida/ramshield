@@ -1,16 +1,24 @@
 # RamShield code bible
 
+Maintainer contract refreshed against the implementation on 2026-10-12. This
+records source-level invariants; deployment qualification and runtime health
+must still be checked on the target host.
+
 This document is the maintainer contract. The objective is not maximum abstraction; it is maximum correctness with the smallest number of moving parts.
 
 ## 1. Core authority rule
 
-The durable userspace state and WAL are authoritative. XDP and SHM are projections. Never reverse that relationship.
+Userspace block state is authoritative. When WAL is configured, it is the
+durable log for that state. XDP and CGNAT shared memory (SHM) are projections;
+never treat a projection as the source of truth. Without WAL, the running
+process has no WAL-backed restart durability guarantee.
 
 ```text
 telemetry
   → detection
   → enforcement decision
-  → WAL durability
+  → configured checkpoint barrier
+  → WAL append (when configured)
   → userspace state
   → projection (XDP/SHM)
 ```
@@ -56,7 +64,10 @@ projection attempt
 projection-health update
 ```
 
-Do not move XDP mutation inside the durability transaction merely to make the code look synchronous. Kernel projection is not the authority.
+Do not move XDP mutation inside the durability transaction merely to make the
+code look synchronous. Kernel projection is not the authority. A committed
+userspace block is not proof that XDP applied it; inspect the projection result
+and health. XDP startup fallback is configuration-dependent.
 
 ## 4. XDP cursor invariant
 
@@ -82,6 +93,8 @@ When active XDP mutation fails, projection health becomes stale immediately. Suc
 - The baseline is frozen during an active breach streak.
 - Hysteresis is explicit; a single noisy sample must not silently become a sustained breach.
 - Configuration values used in floating-point decisions must be finite and domain-valid.
+- Keep optional relative detection disabled until qualified against
+  representative traffic; absolute detection remains the baseline contract.
 
 ## 7. WAL invariants
 
@@ -117,7 +130,23 @@ Prefer boring Rust:
 
 Do not enable all of Clippy's restriction/pedantic lints blindly. The project uses `-D warnings` for the selected lint set; Clippy itself notes that restriction lints can conflict with reasonable code.
 
-## 10. Change protocol
+## 10. Runtime and qualification assumptions
+
+- Telemetry availability and representativeness are deployment properties.
+  Source-level support does not prove that a proxy or packet source is wired in.
+- A healthy process is not proof of active XDP enforcement, durable WAL, or
+  healthy SHM projection. Check each required boundary independently.
+- XDP capabilities depend on kernel, driver/mode, privileges, map capacity, and
+  configuration. A failed optional projection must remain visible.
+- Dashboard and IPC authentication do not encrypt transport. Put externally
+  reachable management interfaces behind TLS/mTLS; a cookie security flag is
+  not wire encryption.
+- Mesh code is experimental and does not imply production consensus or
+  multi-node acceptance. Follow the separate mesh qualification plan.
+- Detection thresholds, memory limits, queue capacity, and event rates require
+  target-specific load and false-positive qualification.
+
+## 11. Change protocol
 
 Every security-sensitive change must have:
 
