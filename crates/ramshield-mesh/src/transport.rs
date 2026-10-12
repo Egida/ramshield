@@ -316,6 +316,18 @@ impl MeshHandle {
         }
     }
 
+    /// True while WAL replay must remain paused for a retention-gap recovery.
+    /// Per-frame ACKs are not a substitute for the receiver-wide completion proof.
+    pub async fn recovery_completion_pending(&self, peer: SocketAddr) -> bool {
+        self.sync_states
+            .lock()
+            .await
+            .get(&peer)
+            .is_some_and(|state| {
+                state.recovery_boundary_lsn.is_some() || state.acked_recovery_transfer.is_some()
+            })
+    }
+
     /// Consume a completed full-state rotation. Completion is published only
     /// after every bounded frame in the current generation was application-ACKed.
     pub async fn take_acked_recovery_transfer(&self, peer: SocketAddr) -> Option<(u64, u64)> {
