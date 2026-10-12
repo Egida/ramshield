@@ -1,7 +1,7 @@
 # Repository scan report
 
-**Repository:** `ramshield/beta/rs`  
-**Scan date:** 2026-10-12  
+**Repository:** `ramshield/beta/rs`
+**Scan date:** 2026-10-12
 **Scope:** Repository-wide static inventory, graph-based structural scan, cached Git ref comparison, Rust formatting, strict Clippy, and the full Rust workspace test suite with `full` features. This is not a penetration test or production runtime verification.
 
 ## Executive summary
