@@ -119,7 +119,8 @@ jobs:
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Always summarize core result
         if: always()
-        run: echo "CORE result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "CORE result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
 
   mesh:
     name: MESH — isolated crate and all targets
@@ -145,7 +146,8 @@ jobs:
         run: cargo test --locked -p ramshield-mesh --all-targets
       - name: Always summarize mesh result
         if: always()
-        run: echo "MESH result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "MESH result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
 
   integration:
     name: INTEGRATION — mesh/full/all-feature matrix
@@ -188,7 +190,8 @@ jobs:
         run: cargo build --workspace --locked --all-targets --all-features
       - name: Always summarize integration result
         if: always()
-        run: echo "INTEGRATION result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "INTEGRATION result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
 
   audit:
     name: AUDIT — advisories, licenses, and dependency policy
@@ -241,7 +244,8 @@ jobs:
         run: git diff --check ${{ github.event.pull_request.base.sha || github.event.before }}...HEAD
       - name: Always summarize quality result
         if: always()
-        run: echo "QUALITY result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "QUALITY result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
 
   report:
     name: REPORT — consolidate lane outcomes
