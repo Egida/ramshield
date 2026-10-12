@@ -4,6 +4,12 @@
 **Branch:** prototype/condition-driven-mesh-sync-20261011
 **Decision rule:** use WAL state and measured convergence/failure behavior as evidence. Do not declare readiness from green compilation or a single-node test.
 
+## Durable execution ledger
+
+The detailed recovery contract, acceptance matrix, file ownership, and exact-SHA handoff process are maintained in [MESH_RECOVERY_ACCEPTANCE_MATRIX.md](MESH_RECOVERY_ACCEPTANCE_MATRIX.md). Update that ledger through bounded commits as implementation and evidence land; do not mark a case passed without an observed result.
+
+Current coordination baseline before this roadmap update: recovery acceptance-matrix commit `552017a5f8cbc0aca6eaeaf342475fe3616af8b9`. This is documentation progress only. It does not implement the completion handshake or satisfy Rust/network acceptance.
+
 ## Target architecture
 
 - **Authority:** the WAL is the durable mutation history; append + required sync happens before publishing a local mutation.
