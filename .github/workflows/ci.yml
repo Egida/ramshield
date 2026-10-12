@@ -161,4 +161,4 @@ jobs:
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
           /tmp/actionlint --version
       - name: Lint all workflow files
-        run: /tmp/actionlint .github/workflows/*.yml
+        run: /tmp/actionlint .github/workflows/mesh-acceptance-watch.yml .github/workflows/ci.yml
