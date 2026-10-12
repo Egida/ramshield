@@ -1535,7 +1535,7 @@ mod frame_tests {
     }
 
     #[test]
-    fn full_sync_recovery_completes_at_captured_boundary_after_frame_acks() {
+    fn full_sync_recovery_waits_for_receiver_completion_after_frame_acks() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1620,6 +1620,10 @@ mod frame_tests {
             assert_eq!(
                 boundary_lsn, 17,
                 "recovery must retain its captured boundary"
+            );
+            assert!(
+                sender.recovery_completion_pending(receiver_addr).await,
+                "frame ACKs alone must not release the WAL cursor"
             );
             assert!(
                 receiver_state.is_blocked(&ip, now_ms()),
