@@ -268,7 +268,12 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
     assert_eq!(transfer.1, boundary_lsn);
     assert!(
         sender.recovery_completion_pending(receiver_addr).await,
-        "ACKs for all snapshot frames are not receiver-confirmed whole-recovery completion"
+        "verified completion must remain gated until the WAL cursor owner consumes its boundary"
+    );
+    sender.acknowledge_recovery_cursor(receiver_addr, transfer.0, transfer.1).await;
+    assert!(
+        !sender.recovery_completion_pending(receiver_addr).await,
+        "only the receiver-confirmed completion proof may release the WAL replay gate"
     );
 
     sender.shutdown();
@@ -343,7 +348,12 @@ async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
     );
     assert!(
         sender.recovery_completion_pending(receiver_addr).await,
-        "ACKs for every bounded frame still do not prove whole-recovery completion"
+        "verified completion must remain gated until the WAL cursor owner consumes its boundary"
+    );
+    sender.acknowledge_recovery_cursor(receiver_addr, generation, boundary).await;
+    assert!(
+        !sender.recovery_completion_pending(receiver_addr).await,
+        "receiver-confirmed proof must permit the cursor owner to release the WAL replay gate"
     );
 
     sender.shutdown();
