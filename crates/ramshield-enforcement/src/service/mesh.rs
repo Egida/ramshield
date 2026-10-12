@@ -115,7 +115,7 @@ impl EnforcementService {
             if !inserted {
                 continue;
             }
-            if let Some((_generation, boundary_lsn)) = handle.take_completed_recovery(peer).await {
+            if let Some((_generation, boundary_lsn)) = handle.take_acked_recovery_transfer(peer).await {
                 if let Ok(mut values) = cursors.lock() {
                     let current = values.get(&peer).copied().unwrap_or(0);
                     if boundary_lsn >= current {
@@ -123,7 +123,7 @@ impl EnforcementService {
                         info!(
                             peer = %peer,
                             boundary_lsn,
-                            "full CRDT recovery rotation completed; WAL tail resumes at boundary + 1"
+                            "all recovery snapshot frames ACKed; awaiting receiver-wide completion proof before WAL tail resumes"
                         );
                     } else {
                         warn!(
