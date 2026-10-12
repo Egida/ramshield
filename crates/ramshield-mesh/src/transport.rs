@@ -1,4 +1,4 @@
-use crate::aworset::{AworsetBlocklist, ClusterBlockDelta, ClusterUnblockDelta, StateCursor};
+use crate::aworset::{AworsetBlocklist, AworsetSnapshot, ClusterBlockDelta, ClusterUnblockDelta};
 use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -125,10 +125,10 @@ struct Envelope {
 }
 struct PeerSyncState {
     planner: ConditionSyncPlanner,
-    cursor: Option<StateCursor>,
+    recovery_snapshot: Option<Arc<AworsetSnapshot>>,
     delivery_failed: bool,
-    /// Invalidates an in-flight page when retention recovery requests a full
-    /// snapshot, preventing an older completion from overwriting cursor=None.
+    /// Invalidates an in-flight repair when retention recovery requests a fixed
+    /// snapshot, preventing an older completion from finishing the new generation.
     generation: u64,
     /// Sender WAL boundary captured when the recovery attempt starts.
     recovery_boundary_lsn: Option<u64>,
@@ -310,7 +310,7 @@ impl MeshHandle {
             && state.completed_recovery.is_none()
         {
             state.generation = state.generation.wrapping_add(1);
-            state.cursor = None;
+            state.recovery_snapshot = Some(Arc::new(self.blocklist.export_snapshot()));
             state.recovery_boundary_lsn = Some(boundary_lsn);
             state.planner.condition(SyncCondition::LocalMutation, now);
         }
@@ -490,15 +490,14 @@ impl MeshHandle {
 
     async fn broadcast_sync(&self) {
         let now = self.sync_epoch.elapsed();
-        let due_peers: Vec<(SocketAddr, Option<StateCursor>, u64)> = {
+        let due_peers: Vec<(SocketAddr, Option<Arc<AworsetSnapshot>>, u64)> = {
             let mut states = self.sync_states.lock().await;
             states
                 .iter_mut()
                 .filter_map(|(peer, state)| {
-                    state
-                        .planner
-                        .take_due(now)
-                        .map(|_| (*peer, state.cursor.clone(), state.generation))
+                    state.planner.take_due(now).map(|_| {
+                        (*peer, state.recovery_snapshot.clone(), state.generation)
+                    })
                 })
                 .collect()
         };
@@ -506,21 +505,23 @@ impl MeshHandle {
             return;
         }
 
-        // One bounded page task per due peer. The shared writer semaphore caps
-        // active network work; a slow peer cannot serialize all other peers.
+        // One full immutable snapshot per peer/repair attempt. The transport
+        // splits it into bounded frames, but does not page a live mutable map.
+        // Each frame requires a receiver application ACK before the repair can
+        // complete; a failed frame causes the fixed recovery snapshot to retry.
         let mut tasks = JoinSet::new();
-        for (peer, cursor, generation) in due_peers.iter().cloned() {
+        for (peer, snapshot, generation) in due_peers.iter().cloned() {
             let handle = self.clone();
             tasks.spawn(async move {
-                let (next_cursor, success) = handle.send_sync_page(peer, cursor).await;
-                (peer, next_cursor, success, generation)
+                let success = handle.send_sync_snapshot(peer, snapshot).await;
+                (peer, success, generation)
             });
         }
 
         let mut completed = Vec::with_capacity(due_peers.len());
         while let Some(joined) = tasks.join_next().await {
             match joined {
-                Ok((peer, next_cursor, success, generation)) => {
+                Ok((peer, success, generation)) => {
                     completed.push(peer);
                     let completed_at = self.sync_epoch.elapsed();
                     let mut states = self.sync_states.lock().await;
@@ -529,27 +530,15 @@ impl MeshHandle {
                             state.planner.complete(completed_at, success);
                             state.delivery_failed = !success;
                             if success {
-                                state.cursor = next_cursor;
-                                if state.cursor.is_some() {
-                                    state
-                                        .planner
-                                        .condition(SyncCondition::LocalMutation, completed_at);
-                                } else if let Some(boundary_lsn) =
-                                    state.recovery_boundary_lsn.take()
-                                {
-                                    // This generation completed a full rotation. The enforcement
-                                    // actor advances its WAL cursor to the captured boundary, not
-                                    // to the WAL's newer current end.
+                                if let Some(boundary_lsn) = state.recovery_boundary_lsn.take() {
                                     state.completed_recovery = Some((generation, boundary_lsn));
+                                    state.recovery_snapshot = None;
                                 }
                             }
                         } else {
-                            // A full sync was requested while this older page
-                            // was in flight. Release the planner but preserve
-                            // the reset cursor and schedule the full rotation.
+                            // A newer fixed-boundary recovery superseded this send.
                             state.planner.complete(completed_at, true);
                             state.delivery_failed = false;
-                            state.cursor = None;
                             state
                                 .planner
                                 .condition(SyncCondition::LocalMutation, completed_at);
@@ -562,8 +551,6 @@ impl MeshHandle {
             }
         }
 
-        // A panicked/cancelled task must not leave its planner permanently
-        // in-flight. Treat missing task outcomes as failed delivery.
         let completed_at = self.sync_epoch.elapsed();
         let mut states = self.sync_states.lock().await;
         for (peer, _, generation) in due_peers {
@@ -577,7 +564,6 @@ impl MeshHandle {
                 } else {
                     state.planner.complete(completed_at, true);
                     state.delivery_failed = false;
-                    state.cursor = None;
                     state
                         .planner
                         .condition(SyncCondition::LocalMutation, completed_at);
@@ -586,47 +572,53 @@ impl MeshHandle {
         }
     }
 
-    async fn send_sync_page(
+    async fn send_sync_snapshot(
         &self,
         peer: SocketAddr,
-        cursor: Option<StateCursor>,
-    ) -> (Option<StateCursor>, bool) {
-        let page = self
-            .blocklist
-            .snapshot_page(cursor.as_ref(), MAX_SYNC_ENTRIES);
-        let messages = chunk_sync(&page.blocks, &page.unblocks);
+        fixed_snapshot: Option<Arc<AworsetSnapshot>>,
+    ) -> bool {
+        let snapshot = fixed_snapshot
+            .unwrap_or_else(|| Arc::new(self.blocklist.export_snapshot()));
+        let mut messages = chunk_sync(&snapshot.blocks, &snapshot.unblocks);
         if messages.is_empty() {
-            return (None, true);
+            // Even an empty snapshot must be application-acknowledged so the
+            // sender does not treat a failed connection as successful repair.
+            messages.push(MeshMessage::Sync {
+                blocks: Vec::new(),
+                unblocks: Vec::new(),
+            });
         }
 
         let mut shutdown = self.shutdown_tx.subscribe();
         if *shutdown.borrow() {
-            return (cursor, false);
+            return false;
         }
         let permit = tokio::select! {
             permit = self.writers.clone().acquire_owned() => match permit {
                 Ok(permit) => permit,
-                Err(_) => return (cursor, false),
+                Err(_) => return false,
             },
-            _ = shutdown.changed() => return (cursor, false),
+            _ = shutdown.changed() => return false,
         };
 
         for message in messages {
-            let send_result = tokio::select! {
-                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to(peer, message)) => result,
+            let result = tokio::select! {
+                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, async {
+                    self.send_to_ack(peer, message).await.map(|_| ())
+                }) => result,
                 changed = shutdown.changed() => {
                     let _ = changed;
                     Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown"))
                 }
             };
-            if let Err(error) = send_result {
-                warn!(peer = %peer, error = %error, "condition-driven mesh sync page failed");
+            if let Err(error) = result {
+                warn!(peer = %peer, error = %error, "condition-driven mesh snapshot failed");
                 drop(permit);
-                return (cursor, false);
+                return false;
             }
         }
         drop(permit);
-        (page.next_cursor, true)
+        true
     }
     async fn send_to(&self, peer: SocketAddr, body: MeshMessage) -> std::io::Result<()> {
         self.send_to_ack(peer, body).await.map(|_| ())
