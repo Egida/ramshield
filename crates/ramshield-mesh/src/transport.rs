@@ -22,7 +22,6 @@ use tracing::{debug, warn};
 type HmacSha256 = Hmac<Sha256>;
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_CLOCK_SKEW_MS: u64 = 30_000;
-const MAX_SYNC_ENTRIES: usize = 4096;
 const MAX_SYNC_FRAME_ENTRIES: usize = 16;
 const MAX_INCOMING_QUEUE: usize = 2048;
 const MAX_PEER_READERS: usize = 256;
