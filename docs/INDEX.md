@@ -8,6 +8,7 @@ This is the canonical documentation map for RamShield 0.6.0. The repository is a
 2. [Operations](OPERATIONS.md) — routine production procedures.
 3. [Configuration](CONFIGURATION.md) — configuration reference and environment overrides.
 4. [Troubleshooting](TROUBLESHOOTING.md) — failure-oriented diagnosis.
+5. [Deployment Commands](DEPLOYMENT_COMMANDS.md) — build, config, health, CLI, WAL, systemd reference.
 
 ## Engineers
 
@@ -18,6 +19,7 @@ This is the canonical documentation map for RamShield 0.6.0. The repository is a
 - [Threat classes](THREAT_CLASSES.md) — detection claims and coverage.
 - [Small-scale detection](SMALL_SCALE_DETECTION.md) — opt-in relative detector scope.
 - [Development](DEVELOPMENT.md) — build/test workflow.
+- [CGNAT](crates/ramshield-cgnat/README.md) — shared-infrastructure classification (RFC 6598).
 
 ## Security and Release
 
@@ -52,9 +54,6 @@ All documented features undergo a structured validation:
 Never infer kernel qualification from a userspace unit test.
 
 - [0.5.0 L7 / mesh / upstream](FEATURE_0.5_L7_MESH_UPSTREAM.md) — integrated feature expansion.
-
 - [Defense Model](DEFENSE_MODEL.md) — autonomous packet guard, L7 boundary, upstream escalation, management-plane and mesh model.
-
 - [Security Gateway](SECURITY_GATEWAY.md) — autonomous observation, kernel defense, WAF boundary, and upstream BGP escalation.
-
 - [Workspace scope (A-021)](WORKSPACE_SCOPE.md) — root product vs nested `rs/`
