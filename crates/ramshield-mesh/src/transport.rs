@@ -214,7 +214,7 @@ impl MeshHandle {
                             peer,
                             PeerSyncState {
                                 planner,
-                                cursor: None,
+                                recovery_snapshot: None,
                                 delivery_failed: false,
                                 generation: 0,
                                 recovery_boundary_lsn: None,
