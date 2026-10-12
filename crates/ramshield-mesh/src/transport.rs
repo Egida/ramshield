@@ -533,7 +533,9 @@ impl MeshHandle {
                                     state
                                         .planner
                                         .condition(SyncCondition::LocalMutation, completed_at);
-                                } else if let Some(boundary_lsn) = state.recovery_boundary_lsn.take() {
+                                } else if let Some(boundary_lsn) =
+                                    state.recovery_boundary_lsn.take()
+                                {
                                     // This generation completed a full rotation. The enforcement
                                     // actor advances its WAL cursor to the captured boundary, not
                                     // to the WAL's newer current end.
