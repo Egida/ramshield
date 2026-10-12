@@ -32,27 +32,21 @@ pub(crate) async fn handle_connection(
     // so parse never fails here. Clients reconnect to pick up rotated keys.
     // P2: resolve key roles once per connection. Keys not listed default to
     // Telemetry (least privilege) — explicit config always wins over naming.
-    let (live_keys, role_map) = {
-        let cfg = config.config.load();
-        match parse_ipc_keys(&cfg) {
-            Ok(k) => {
-                let mut roles: HashMap<String, KeyRole> = HashMap::new();
-                for kr in &cfg.ipc.key_roles {
-                    roles.insert(kr.key_id.clone(), kr.role);
-                }
-                (k, roles)
-            }
-            Err(e) => {
-                error!(error = %e, "IPC auth keys invalid in live config — closing connection");
-                let resp = Response::Error {
-                    code: 500,
-                    message: "internal configuration error: invalid auth state".into(),
-                };
-                let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
-                return Err(std::io::Error::other(format!(
-                    "invalid runtime auth keys: {e}"
-                )));
-            }
+    let ResolvedIpcAuth {
+        keys: live_keys,
+        roles: role_map,
+    } = match resolve_live_auth(&config) {
+        Ok(auth) => auth,
+        Err(e) => {
+            error!(error = %e, "IPC auth keys invalid in live config — closing connection");
+            let resp = Response::Error {
+                code: 500,
+                message: "internal configuration error: invalid auth state".into(),
+            };
+            let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
+            return Err(std::io::Error::other(format!(
+                "invalid runtime auth keys: {e}"
+            )));
         }
     };
     let auth_enforced = !live_keys.is_empty();
@@ -82,18 +76,9 @@ pub(crate) async fn handle_connection(
         // cannot make one read() hand us more than 2 MiB. Reborrow — Take<&mut
         // TcpStream> borrows for this expression only; socket stays owned for
         // the write_resp calls below (take(self) would move it).
-        let n = match timeout(
-            config.read_timeout,
-            (&mut socket).take(2 * 1024 * 1024).read(&mut chunk),
-        )
-        .await
-        {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                debug!("Read timeout");
-                return Ok(());
-            }
+        let n = match read_chunk(&mut socket, &mut chunk, &config).await? {
+            Some(n) => n,
+            None => return Ok(()),
         };
 
         if n == 0 {
@@ -121,84 +106,20 @@ pub(crate) async fn handle_connection(
             // supplies the authenticated key_id and its configured role; open-
             // loopback path has none, so enforcement attribution falls back
             // (see process_request).
-            let (req, principal) = if auth_enforced {
-                // HMAC auth gate: enforced only when keys configured. The auth
-                // object rides OUTSIDE the Request enum so deny_unknown_fields
-                // on the wire contract stays intact.
-                match verify_frame_auth(&live_keys, &frame, &config.replay_store) {
-                    // P1-5: verify_frame_auth returns the auth-stripped Value
-                    // and the authenticated key_id; from_value deserializes
-                    // without a second JSON parse.
-                    Ok((v, key_id)) => match serde_json::from_value::<Request>(v) {
-                        Ok(req) => {
-                            // P2: look up configured role; default to Telemetry
-                            // (least privilege). Keys without explicit config get
-                            // the default — explicit always wins over naming.
-                            let role = role_map.get(&key_id).copied().unwrap_or(KeyRole::Telemetry);
-                            (req, Some(Principal { key_id, role }))
-                        }
-                        Err(e) => {
-                            trace!(
-                                error = %e,
-                                frame_bytes = frame.len(),
-                                "frame rejected: auth-stripped payload does not match Request"
-                            );
-                            engine.metrics.inc_frames_rejected();
-                            let resp = Response::Error {
-                                code: 1,
-                                message: format!("parse: {e}"),
-                            };
-                            if timeout(config.write_timeout, write_resp(&mut socket, &resp))
-                                .await
-                                .is_err()
-                            {
-                                return Ok(());
-                            }
-                            continue;
-                        }
-                    },
-                    Err(reason) => {
-                        warn!("IPC auth rejected: {}", reason);
-                        engine.metrics.inc_rejected(1);
-                        engine.metrics.inc_ipc_auth_rejections(1);
-                        let resp = Response::Error {
-                            code: 401,
-                            message: format!("unauthorized: {}", reason),
-                        };
-                        if timeout(config.write_timeout, write_resp(&mut socket, &resp))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                }
-            } else {
-                // No auth keys configured - accept all frames
-                match serde_json::from_slice(&frame) {
-                    Ok(req) => (req, None),
-                    Err(e) => {
-                        trace!(
-                            error = %e,
-                            frame_bytes = frame.len(),
-                            "frame rejected: unparseable Request"
-                        );
-                        engine.metrics.inc_frames_rejected();
-                        let resp = Response::Error {
-                            code: 1,
-                            message: format!("parse: {e}"),
-                        };
-                        if timeout(config.write_timeout, write_resp(&mut socket, &resp))
-                            .await
-                            .is_err()
-                        {
-                            debug!("Write timeout on error response");
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                }
+            let parsed = parse_frame(
+                &frame,
+                auth_enforced,
+                &live_keys,
+                &role_map,
+                &config,
+                &engine,
+                &mut socket,
+            )
+            .await;
+            let (req, principal) = match parsed {
+                Ok(Some(request)) => request,
+                Ok(None) => continue,
+                Err(()) => return Ok(()),
             };
 
             engine.metrics.inc_requests();
@@ -218,6 +139,125 @@ pub(crate) async fn handle_connection(
                 debug!("Write timeout");
                 return Ok(());
             }
+        }
+    }
+}
+
+/// Snapshot the configured authentication keys and role assignments once per connection.
+/// Clients reconnect to pick up rotated keys; unspecified roles default to Telemetry later.
+struct ResolvedIpcAuth {
+    keys: Vec<(String, Vec<u8>)>,
+    roles: HashMap<String, KeyRole>,
+}
+
+fn resolve_live_auth(config: &ConnectionConfig) -> Result<ResolvedIpcAuth, String> {
+    let cfg = config.config.load();
+    let keys = parse_ipc_keys(&cfg)?;
+    let roles = cfg
+        .ipc
+        .key_roles
+        .iter()
+        .map(|key_role| (key_role.key_id.clone(), key_role.role))
+        .collect();
+    Ok(ResolvedIpcAuth { keys, roles })
+}
+
+/// Authenticate and deserialize a frame. A rejected frame is `Ok(None)` when its
+/// error response was written; `Err(())` means the response write timed out.
+async fn parse_frame(
+    frame: &[u8],
+    auth_enforced: bool,
+    live_keys: &[(String, Vec<u8>)],
+    role_map: &HashMap<String, KeyRole>,
+    config: &ConnectionConfig,
+    engine: &Engine,
+    socket: &mut TcpStream,
+) -> Result<Option<(Request, Option<Principal>)>, ()> {
+    if !auth_enforced {
+        return match serde_json::from_slice(frame) {
+            Ok(request) => Ok(Some((request, None))),
+            Err(error) => {
+                trace!(error = %error, frame_bytes = frame.len(), "frame rejected: unparseable Request");
+                engine.metrics.inc_frames_rejected();
+                let response = Response::Error {
+                    code: 1,
+                    message: format!("parse: {error}"),
+                };
+                if timeout(config.write_timeout, write_resp(socket, &response))
+                    .await
+                    .is_err()
+                {
+                    debug!("Write timeout on error response");
+                    Err(())
+                } else {
+                    Ok(None)
+                }
+            }
+        };
+    }
+
+    // The authentication object remains outside Request so its wire contract is unchanged.
+    match verify_frame_auth(live_keys, frame, &config.replay_store) {
+        Ok((value, key_id)) => match serde_json::from_value::<Request>(value) {
+            Ok(request) => {
+                let role = role_map.get(&key_id).copied().unwrap_or(KeyRole::Telemetry);
+                Ok(Some((request, Some(Principal { key_id, role }))))
+            }
+            Err(error) => {
+                trace!(error = %error, frame_bytes = frame.len(), "frame rejected: auth-stripped payload does not match Request");
+                engine.metrics.inc_frames_rejected();
+                let response = Response::Error {
+                    code: 1,
+                    message: format!("parse: {error}"),
+                };
+                if timeout(config.write_timeout, write_resp(socket, &response))
+                    .await
+                    .is_err()
+                {
+                    Err(())
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+        Err(reason) => {
+            warn!("IPC auth rejected: {}", reason);
+            engine.metrics.inc_rejected(1);
+            engine.metrics.inc_ipc_auth_rejections(1);
+            let response = Response::Error {
+                code: 401,
+                message: format!("unauthorized: {}", reason),
+            };
+            if timeout(config.write_timeout, write_resp(socket, &response))
+                .await
+                .is_err()
+            {
+                Err(())
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Read at most 2 MiB at a time, preserving the connection's configured read timeout.
+/// `None` means the read timed out; EOF remains `Some(0)` for the caller to handle.
+async fn read_chunk(
+    socket: &mut TcpStream,
+    chunk: &mut [u8],
+    config: &ConnectionConfig,
+) -> Result<Option<usize>, std::io::Error> {
+    match timeout(
+        config.read_timeout,
+        (&mut *socket).take(2 * 1024 * 1024).read(chunk),
+    )
+    .await
+    {
+        Ok(Ok(n)) => Ok(Some(n)),
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            debug!("Read timeout");
+            Ok(None)
         }
     }
 }

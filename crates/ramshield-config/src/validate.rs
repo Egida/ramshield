@@ -10,6 +10,14 @@ const MAX_SEASONALITY_PERIOD: usize = 86_400;
 impl Config {
     /// Validate configuration with sensible bounds and error messages.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_engine()?;
+        self.validate_xdp_and_detection()?;
+        self.validate_mesh()?;
+        self.validate_protection_features()?;
+        self.validate_ipc_forecasting_and_dashboard()?;
+        Ok(())
+    }
+    fn validate_engine(&self) -> anyhow::Result<()> {
         // Engine config validation
         if self.engine.ram_limit_mb < 64 {
             anyhow::bail!("engine.ram_limit_mb must be at least 64 MB");
@@ -24,6 +32,10 @@ impl Config {
             );
         }
 
+        Ok(())
+    }
+
+    fn validate_xdp_and_detection(&self) -> anyhow::Result<()> {
         // XDP mode validation
         match self.xdp.mode.as_str() {
             "skb" | "drv" | "native" => {}
@@ -134,6 +146,10 @@ impl Config {
             anyhow::bail!("detection.l7_rules.max_effective_rps must be > 0");
         }
 
+        Ok(())
+    }
+
+    fn validate_mesh(&self) -> anyhow::Result<()> {
         if self.mesh.enabled {
             if self.mesh.node_id == 0 {
                 anyhow::bail!("mesh.node_id must be non-zero when mesh is enabled");
@@ -181,6 +197,10 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_protection_features(&self) -> anyhow::Result<()> {
         if self.xdp.trusted_overlay_cidrs.len() > 256 {
             anyhow::bail!("xdp.trusted_overlay_cidrs must contain at most 256 prefixes");
         }
@@ -282,6 +302,10 @@ impl Config {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_ipc_forecasting_and_dashboard(&self) -> anyhow::Result<()> {
         // IPC config validation
         if self.ipc.max_connections == 0 {
             anyhow::bail!("ipc.max_connections must be > 0");
@@ -413,7 +437,6 @@ impl Config {
         {
             anyhow::bail!("ipc.max_line_length must be >= 256 bytes or None (default 32MB)");
         }
-
         Ok(())
     }
 

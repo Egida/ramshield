@@ -37,9 +37,51 @@ pub(crate) fn process_request(
     // When no principal is available (open loopback / unauthenticated path),
     // fall back to the historical hard-coded actor so behaviour is unchanged
     // for the zero-config dev path. P2 closes that gap with real authorization.
-    let actor = principal
-        .map(|p| p.key_id.clone())
-        .unwrap_or_else(|| "admin".to_string());
+    let context = RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events: &dropped_events,
+        actor: principal
+            .map(|p| p.key_id.clone())
+            .unwrap_or_else(|| "admin".to_string()),
+    };
+
+    match req {
+        request @ Request::CheckIp { .. } => handle_check_ip(request, &context),
+        request @ Request::BlockIp { .. } => handle_block_ip(request, &context),
+        request @ Request::BlockCidr { .. } => handle_block_cidr(request, &context),
+        request @ Request::UnblockIp { .. } => handle_unblock_ip(request, &context),
+        request @ Request::UnblockCidr { .. } => handle_unblock_cidr(request, &context),
+        request @ Request::GetIpStats { .. } => handle_get_ip_stats(request, &context),
+        request @ Request::GetStats => handle_get_stats(request, &context),
+        request @ Request::GetStatus => handle_get_status(request, &context),
+        request @ Request::ReportConnection { .. } => handle_report_connection(request, &context),
+        request @ Request::ReportConnections { .. } => handle_report_connections(request, &context),
+        request @ Request::Flush => handle_flush(request, &context),
+    }
+}
+
+struct RequestContext<'a> {
+    engine: &'a Arc<Engine>,
+    event_tx: &'a Sender<ConnectionEvent>,
+    store: &'a Store,
+    enforcement_tx: &'a mpsc::Sender<EnforceCommand>,
+    dropped_events: &'a Arc<AtomicU64>,
+    actor: String,
+}
+
+fn handle_check_ip(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
     match req {
         Request::CheckIp { ip } => {
             let ip_addr = match ip.parse() {
@@ -85,6 +127,21 @@ pub(crate) fn process_request(
                 reason,
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_block_ip(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::BlockIp {
             ip,
             reason,
@@ -143,6 +200,21 @@ pub(crate) fn process_request(
                 },
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_block_cidr(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::BlockCidr {
             cidr,
             reason,
@@ -194,6 +266,21 @@ pub(crate) fn process_request(
                 },
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_unblock_ip(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::UnblockIp { ip } => {
             let ip_addr = match ip.parse() {
                 Ok(addr) => addr,
@@ -229,6 +316,21 @@ pub(crate) fn process_request(
                 },
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_unblock_cidr(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::UnblockCidr { cidr } => {
             let network = match cidr.parse::<IpNetwork>() {
                 Ok(network) => network,
@@ -263,6 +365,21 @@ pub(crate) fn process_request(
                 },
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_get_ip_stats(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::GetIpStats { ip } => {
             let ip_addr = match ip.parse() {
                 Ok(addr) => addr,
@@ -298,6 +415,21 @@ pub(crate) fn process_request(
                 })
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_get_stats(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::GetStats => {
             let stats = store.get_stats();
             Response::Stats(crate::ipc::Stats {
@@ -309,10 +441,40 @@ pub(crate) fn process_request(
                 evictions: stats.evictions,
             })
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_get_status(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::GetStatus => Response::Ok {
             message: "ok".into(),
             state: None,
         },
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_report_connection(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::ReportConnection {
             ip,
             bytes,
@@ -374,6 +536,21 @@ pub(crate) fn process_request(
                 }
             }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_report_connections(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::ReportConnections { events } => {
             let now = now_ms() * 1_000_000;
             let total = events.len() as u32;
@@ -469,9 +646,25 @@ pub(crate) fn process_request(
             }
             Response::BatchOk { accepted, rejected }
         }
+        _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+
+fn handle_flush(req: Request, ctx: &RequestContext<'_>) -> Response {
+    #[allow(unused_variables)]
+    let RequestContext {
+        engine,
+        event_tx,
+        store,
+        enforcement_tx,
+        dropped_events,
+        actor,
+    } = ctx;
+    match req {
         Request::Flush => Response::Ok {
             message: "no-op: flush is automatic (pre_aggs window)".into(),
             state: None,
         },
+        _ => unreachable!("request variant dispatched to the wrong handler"),
     }
 }

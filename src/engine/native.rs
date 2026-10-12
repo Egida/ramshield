@@ -400,8 +400,13 @@ fn run_socket(
             unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*block_ptr).hdr.block_status)) };
         if status & TP_STATUS_USER == 0 {
             let rc = unsafe { libc::poll(&mut pollfd, 1, 50) };
-            if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                break;
+            if rc < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    // SAFETY: map was returned by mmap with length ring_len here.
+                    unsafe { libc::munmap(map, ring_len) };
+                    return Err(error);
+                }
             }
             continue;
         }
@@ -465,13 +470,9 @@ fn run_socket(
                 }
             };
             // SAFETY: same hdr validity as above.
-            let mac = match usize::try_from(unsafe { (*hdr).tp_mac }) {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(worker, block_idx, packet_idx, "tp_mac does not fit usize");
-                    break;
-                }
-            };
+            // `tp_mac` is u16, which fits in `usize` on every supported Linux
+            // target. The range check below validates the value against the ring.
+            let mac = unsafe { (*hdr).tp_mac as usize };
             let (_header_abs, packet_off) = match checked_tpacket_packet_offsets(
                 block_idx, block_size, ring_len, blk_len, off, mac, snaplen,
             ) {
@@ -561,6 +562,7 @@ fn checked_tpacket_header_offset(
     let header_size = std::mem::size_of::<Tpacket3Hdr>();
     if !valid_tpacket_block_len(blk_len, block_size)
         || off < std::mem::size_of::<TpacketBlockDesc>()
+        || !off.is_multiple_of(std::mem::align_of::<Tpacket3Hdr>())
     {
         return None;
     }
@@ -1008,6 +1010,7 @@ mod tpacket_tests {
         let hdr = std::mem::size_of::<Tpacket3Hdr>();
         assert!(checked_tpacket_header_offset(0, 128, 128, 128, 128).is_none());
         assert!(checked_tpacket_header_offset(0, 128, 128, 128, 128 - hdr + 1).is_none());
+        assert!(checked_tpacket_header_offset(0, 128, 128, 128, desc + 1).is_none());
         assert!(checked_tpacket_header_offset(0, 128, 128, 128, desc).is_some());
     }
 
