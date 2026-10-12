@@ -45,7 +45,7 @@ permissions:
 concurrency:
   # Keep concurrency deterministic without conditional expression parsing.
   group: mesh-acceptance-watch-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
