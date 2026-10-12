@@ -1515,4 +1515,90 @@ mod frame_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(frame.len(), MAX_FRAME);
     }
+
+    #[test]
+    fn full_sync_recovery_completes_at_captured_boundary_after_page_acks() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let probe = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve receiver address");
+            let receiver_addr = probe.local_addr().expect("receiver address");
+            drop(probe);
+
+            let sender_state = Arc::new(AworsetBlocklist::new(1));
+            let receiver_state = Arc::new(AworsetBlocklist::new(2));
+            let ip = IpAddr::V6(Ipv6Addr::from(0xfeedbeefu128));
+            sender_state.record_ban(ip, 60_000, 2);
+
+            let sender = MeshHandle::bind(
+                1,
+                sender_state,
+                "127.0.0.1:0".parse().expect("sender listen address"),
+                vec![receiver_addr],
+                vec![7; 32],
+            )
+            .await
+            .expect("bind sender");
+            let receiver = MeshHandle::bind(
+                2,
+                receiver_state.clone(),
+                receiver_addr,
+                Vec::new(),
+                vec![7; 32],
+            )
+            .await
+            .expect("bind receiver");
+
+            sender.request_full_sync(receiver_addr, 17).await;
+            // A repeated tick must not replace the captured boundary with a
+            // newer WAL end while the same repair attempt is in flight.
+            sender.request_full_sync(receiver_addr, 99).await;
+            assert!(sender.take_completed_recovery(receiver_addr).await.is_none());
+
+            let (generation, boundary_lsn) = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    for received in receiver.drain_with_ack().await {
+                        match received.message.clone() {
+                            MeshMessage::Block(delta) => {
+                                receiver_state.merge_delta(&delta);
+                            }
+                            MeshMessage::Unblock(delta) => {
+                                receiver_state.merge_unblock_delta(&delta);
+                            }
+                            MeshMessage::Sync { blocks, unblocks } => {
+                                for delta in blocks {
+                                    receiver_state.merge_delta(&delta);
+                                }
+                                for delta in unblocks {
+                                    receiver_state.merge_unblock_delta(&delta);
+                                }
+                            }
+                            MeshMessage::WalBatch { .. } => {}
+                        }
+                        received.acknowledge(true);
+                    }
+                    if let Some(completed) = sender.take_completed_recovery(receiver_addr).await {
+                        break completed;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("full recovery rotation should complete after acknowledged pages");
+
+            assert!(generation > 0, "recovery must invalidate any older page task");
+            assert_eq!(boundary_lsn, 17, "recovery must retain its captured boundary");
+            assert!(
+                receiver_state.is_blocked(&ip, now_ms()),
+                "receiver must have applied the transferred CRDT state"
+            );
+            sender.shutdown();
+            receiver.shutdown();
+        });
+    }
+
 }
