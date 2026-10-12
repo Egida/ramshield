@@ -1,14 +1,3 @@
-# Safety deadline hard-failure handling
-# If a command attempts a destructive operation (DANGEROUS), abort with non-zero exit and stdout.
-# The caller script expects a 1-digit exit code: 0 for SUCCESS, non-zero for ERROR.
-# No repair/revert on errors — for human-deviated workflows only.
-# TO RETURN SUCCESS AND PRODUCE A JSON REPORT, CALL: /home/m/out/audit_co/uwz/.hermes/hash-aqvm/008/aqvm_uwz_setup_research.py
-# To MARK THE AUDIT AS DONE, CALL: /home/m/out/audit_co/uwz/.hermes/hash-aqvm/008/aqvm_uwz_exercise_audit.py
-# Document execution checkpoints in:
-# /home/m/out/audit_co/audit_core/run_results.json
-# Then /home/m/out/audit_co/audit_core/diagnostics.md
-#
-
 #!/usr/bin/env python3
 """
 Audit of RamShield "Factory Tests" — Safety Access Commitment (SEC-01..17).
@@ -31,11 +20,12 @@ import subprocess
 import sys
 import json
 import time
+from pathlib import Path
 
 # Constants
-WORKSPACE = "/home/m/vehicle_of_rationalism/ramshield/beta/rs"
+WORKSPACE = str(Path(__file__).resolve().parent)
 SAFETY_LEVELS = {
-    "dangerous": {"rustup default", "cargo install", "sudo", "#"},
+    "dangerous": {"rustup default", "cargo install", "sudo"},
 }
 
 # Track execution

@@ -48,6 +48,16 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, bool, bool)> {
     Ok((config_path, no_xdp, doctor))
 }
 
+/// Doctor defaults to the canonical baseline profile. An explicit CLI config
+/// remains authoritative and carries any test-specific overrides.
+fn doctor_config_path(config_path: Option<String>, doctor: bool) -> Option<String> {
+    if doctor && config_path.is_none() {
+        Some("config.baseline.toml".into())
+    } else {
+        config_path
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     ramshield::install_panic_hook();
@@ -64,6 +74,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let (config_path, no_xdp, doctor) = parse_args(&args)?;
+    let config_path = doctor_config_path(config_path, doctor);
 
     let mut config = match config_path {
         Some(path) => {
@@ -109,7 +120,7 @@ async fn main() -> Result<()> {
     }
 
     if doctor {
-        run_doctor();
+        run_doctor(&config);
         return Ok(());
     }
 
@@ -217,8 +228,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Check host readiness non-interactively. Exit 0 if all gates pass.
-fn run_doctor() {
+fn command_succeeded(command: &mut std::process::Command) -> bool {
+    command.output().is_ok_and(|output| output.status.success())
+}
+
+/// Check host readiness against the already resolved, validated config.
+/// Exit 0 if all gates pass.
+fn run_doctor(config: &Config) {
     let mut problems: Vec<String> = Vec::new();
     // kernel
     let krn = std::process::Command::new("uname")
@@ -227,35 +243,26 @@ fn run_doctor() {
         .map(|o| String::from_utf8(o.stdout).unwrap_or_else(|_| "unknown".into()))
         .unwrap_or("unknown".into());
     info!("doctor: kernel {krn}");
-    // config
-    let cfg_path = std::env::var("RAMSHIELD_DOCTOR_CONFIG").unwrap_or("config.toml".into());
-    let cfg = Config::load(cfg_path.as_str()).ok();
-    if let Some(c) = cfg {
-        let wal_dir = c.wal.dir;
-        if std::path::Path::new(&wal_dir).exists() {
-            info!("doctor: WAL dir {wal_dir} exists");
-        } else {
-            problems.push(format!("WAL dir {wal_dir}: not found"));
-        }
-        if !c.ipc.auth_keys.is_empty() {
-            info!("doctor: IPC auth configured");
-        } else {
-            problems.push("IPC auth_keys empty".into());
-        }
-        let iface = c.xdp.interface;
-        let iface_ok = std::process::Command::new("ip")
-            .arg("link")
-            .arg("show")
-            .arg(iface.clone())
-            .output()
-            .is_ok();
-        if iface_ok {
-            info!("doctor: XDP interface {iface} exists");
-        } else {
-            problems.push(format!("XDP interface {iface}: not found"));
-        }
+    // Use the exact effective config loaded by main; do not reload a second path.
+    let wal_dir = &config.wal.dir;
+    if std::path::Path::new(wal_dir).exists() {
+        info!("doctor: WAL dir {wal_dir} exists");
     } else {
-        problems.push(format!("config load failed: {cfg_path}"));
+        problems.push(format!("WAL dir {wal_dir}: not found"));
+    }
+    if !config.ipc.auth_keys.is_empty() {
+        info!("doctor: IPC auth configured");
+    } else {
+        problems.push("IPC auth_keys empty".into());
+    }
+    let iface = &config.xdp.interface;
+    let mut iface_check = std::process::Command::new("ip");
+    iface_check.args(["link", "show"]).arg(iface);
+    let iface_ok = command_succeeded(&mut iface_check);
+    if iface_ok {
+        info!("doctor: XDP interface {iface} exists");
+    } else {
+        problems.push(format!("XDP interface {iface}: not found"));
     }
     // caps
     let bin = std::env::args().next().unwrap_or("ramshield".into());
@@ -292,6 +299,38 @@ mod cli_tests {
 
     fn cfg(v: &[&str]) -> Option<String> {
         parse_args(&args(v)).unwrap().0
+    }
+
+    #[test]
+    fn command_succeeded_requires_zero_exit_status() {
+        let mut success = std::process::Command::new("sh");
+        success.args(["-c", "exit 0"]);
+        assert!(super::command_succeeded(&mut success));
+
+        let mut failure = std::process::Command::new("sh");
+        failure.args(["-c", "exit 1"]);
+        assert!(!super::command_succeeded(&mut failure));
+    }
+
+    #[test]
+    fn doctor_without_explicit_config_uses_canonical_baseline() {
+        assert_eq!(
+            super::doctor_config_path(None, true),
+            Some("config.baseline.toml".into())
+        );
+    }
+
+    #[test]
+    fn doctor_preserves_explicit_test_config() {
+        assert_eq!(
+            super::doctor_config_path(Some("target/test-config.toml".into()), true),
+            Some("target/test-config.toml".into())
+        );
+    }
+
+    #[test]
+    fn non_doctor_without_config_keeps_builtin_default_path() {
+        assert_eq!(super::doctor_config_path(None, false), None);
     }
 
     #[test]

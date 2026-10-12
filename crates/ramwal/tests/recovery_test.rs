@@ -1264,6 +1264,78 @@ fn disk_full_append_maps_to_diskfull_error() {
     clean(&d);
 }
 
+/// A disk-full append after a durable checkpoint must not invalidate the
+/// published checkpoint or lose the durable prefix. Reopen repairs the
+/// writer state, excludes the failed append, and accepts subsequent writes.
+#[test]
+fn disk_full_after_checkpoint_preserves_checkpoint_and_durable_prefix() {
+    let d = test_dir();
+    let checkpoint_lsn = {
+        let wal = Wal::open(wal_cfg(&d)).unwrap();
+        let lsn = wal.append(b"durable-before-checkpoint").unwrap();
+        wal.sync().unwrap();
+        wal.checkpoint(lsn).unwrap();
+        assert_eq!(
+            wal.ckpt_lsn(),
+            lsn,
+            "checkpoint must be published before fault"
+        );
+
+        wal.fail_next_diskfull();
+        assert!(
+            matches!(wal.append(b"failed-after-checkpoint"), Err(Error::DiskFull)),
+            "injected ENOSPC must surface after checkpoint"
+        );
+        assert!(wal.is_poisoned(), "write failure must poison this instance");
+        lsn
+    };
+
+    let recovered = Wal::open(wal_cfg(&d)).unwrap();
+    assert!(
+        !recovered.is_poisoned(),
+        "reopen must restore a healthy writer"
+    );
+    assert_eq!(
+        recovered.ckpt_lsn(),
+        checkpoint_lsn,
+        "disk-full recovery must preserve the published checkpoint"
+    );
+    let recovered_payloads: Vec<_> = recovered
+        .recovery_report()
+        .records
+        .iter()
+        .map(|record| record.payload.as_slice())
+        .collect();
+    assert!(
+        recovered_payloads.contains(&b"durable-before-checkpoint".as_slice()),
+        "durable pre-checkpoint record must survive"
+    );
+    assert!(
+        !recovered_payloads.contains(&b"failed-after-checkpoint".as_slice()),
+        "failed append must not appear after recovery"
+    );
+
+    let next_lsn = recovered.append(b"after-recovery").unwrap();
+    recovered.sync().unwrap();
+    assert!(
+        next_lsn > checkpoint_lsn,
+        "recovered writer must continue LSN order"
+    );
+    drop(recovered);
+
+    let reopened = Wal::open(wal_cfg(&d)).unwrap();
+    let final_payloads: Vec<_> = reopened
+        .recovery_report()
+        .records
+        .iter()
+        .map(|record| record.payload.as_slice())
+        .collect();
+    assert!(final_payloads.contains(&b"durable-before-checkpoint".as_slice()));
+    assert!(final_payloads.contains(&b"after-recovery".as_slice()));
+    assert!(!final_payloads.contains(&b"failed-after-checkpoint".as_slice()));
+    clean(&d);
+}
+
 /// A directory fsync failure after rotation leaves a segment whose existence
 /// is not guaranteed on disk; the WAL must surface the error and poison.
 #[test]
@@ -1544,5 +1616,136 @@ fn wal_lsn_invariants() {
     );
     assert_wal_invariants(&wal);
 
+    clean(&d);
+}
+
+/// A-018: crash/restart equivalence at the checkpoint + durability boundary.
+///
+/// Sequence: append+sync+checkpoint, then unsynced appends, then drop (crash).
+/// Reopen must recover only the durable prefix, restore the checkpoint LSN,
+/// and accept new appends without poisoning.
+#[test]
+fn crash_restart_preserves_checkpoint_and_durable_prefix() {
+    let d = test_dir();
+    let ckpt_lsn;
+    let durable_file_len;
+    {
+        let mut cfg = wal_cfg(&d);
+        cfg.durability = ramwal::config::Durability::Explicit;
+        let wal = Wal::open(cfg).unwrap();
+
+        let _a = wal.append(b"durable-a").unwrap();
+        let b = wal.append(b"durable-b").unwrap();
+        wal.sync().unwrap();
+        wal.checkpoint(b).unwrap();
+        ckpt_lsn = b;
+
+        // Byte length of the segment after the durable barrier. A real power-loss
+        // after this point can lose any later buffered appends; we inject that
+        // by truncating back to this length after the process "crashes".
+        durable_file_len = std::fs::metadata(seg_path(&d, 1))
+            .expect("segment after sync")
+            .len();
+
+        // Unsynced tail — must not become durable after crash.
+        let _ = wal.append(b"volatile-c").unwrap();
+        let _ = wal.append(b"volatile-d").unwrap();
+        assert!(wal.current_lsn() > wal.durable_lsn());
+        assert_eq!(wal.ckpt_lsn(), ckpt_lsn);
+        // Crash: drop without sync (OS may still flush buffers on close).
+    }
+
+    // Deterministic crash boundary: discard any bytes past the last sync.
+    // This models power loss of the unsynced tail, independent of OS buffering.
+    let on_disk = std::fs::metadata(seg_path(&d, 1))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        on_disk >= durable_file_len,
+        "segment must at least contain the durable prefix"
+    );
+    truncate_file(&d, 1, durable_file_len);
+
+    let wal = Wal::open(wal_cfg(&d)).unwrap();
+    assert!(!wal.is_poisoned());
+    assert_eq!(
+        wal.ckpt_lsn(),
+        ckpt_lsn,
+        "checkpoint must survive crash/reopen"
+    );
+    let payloads: Vec<_> = wal
+        .recovery_report()
+        .records
+        .iter()
+        .map(|r| r.payload.clone())
+        .collect();
+    assert_eq!(
+        payloads,
+        vec![b"durable-a".to_vec(), b"durable-b".to_vec()],
+        "recovery must be exactly the synced prefix; got {payloads:?}"
+    );
+    assert!(
+        !payloads
+            .iter()
+            .any(|p| p == b"volatile-c" || p == b"volatile-d"),
+        "unsynced tail must not survive the crash boundary: {payloads:?}"
+    );
+
+    // Writer is healthy post-recovery.
+    let next = wal.append(b"after-reopen").unwrap();
+    wal.sync().unwrap();
+    assert!(next > ckpt_lsn);
+    clean(&d);
+}
+
+/// A-018: disk-full poison + checkpoint boundary — prior durable state remains.
+#[test]
+fn disk_full_after_checkpoint_preserves_prior_state() {
+    let d = test_dir();
+    let durable;
+    {
+        let wal = Wal::open(wal_cfg(&d)).unwrap();
+        durable = wal.append(b"before-enospc").unwrap();
+        wal.sync().unwrap();
+        wal.checkpoint(durable).unwrap();
+
+        wal.fail_next_diskfull();
+        assert!(matches!(wal.append(b"enospc"), Err(Error::DiskFull)));
+        assert!(wal.is_poisoned());
+        assert!(matches!(wal.checkpoint(durable), Err(Error::Poisoned)));
+    }
+
+    let wal = Wal::open(wal_cfg(&d)).unwrap();
+    assert!(!wal.is_poisoned());
+    assert_eq!(wal.ckpt_lsn(), durable);
+    let recs = &wal.recovery_report().records;
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].payload, b"before-enospc");
+    clean(&d);
+}
+
+/// A-018: truncated segment after a clean prefix repairs and matches oracle.
+#[test]
+fn truncated_tail_after_synced_prefix_is_repaired() {
+    let d = test_dir();
+    // Build two complete records via the fixture helper so we know exact ends.
+    let data = vec![b"keep".to_vec(), b"tail-record".to_vec()];
+    let (path, recs) = build_fixture(&d, &data);
+    assert_eq!(recs.len(), 2);
+    // Tear only into the second record (after first record end).
+    let cut = recs[0].rec_end + 4; // mid-header/payload of second
+    assert!(cut < recs[1].rec_end);
+    truncate_file(&d, 1, cut);
+
+    let report = recover_dir(&d).expect("torn tail must be repairable");
+    assert!(report.truncated_bytes > 0, "expected repair truncate");
+    assert_eq!(report.records.len(), 1);
+    assert_eq!(report.records[0].payload, b"keep");
+
+    // Second pass is idempotent (no further truncate).
+    let report2 = recover_dir(&d).unwrap();
+    assert_eq!(report2.truncated_bytes, 0);
+    assert_eq!(report2.records.len(), 1);
+    let _ = path;
     clean(&d);
 }

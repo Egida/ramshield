@@ -14,7 +14,8 @@
 use crate::{EnforcementError, ReconciliationState, XdpApplier, XdpDropEvent};
 use aya::Ebpf;
 use aya::maps::{
-    Array as AyaArray, HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues, RingBuf,
+    Array as AyaArray, HashMap as AyaHashMap, IterableMap, MapError, PerCpuArray, PerCpuValues,
+    RingBuf,
     lpm_trie::{Key as LpmKey, LpmTrie},
 };
 use aya::programs::Xdp;
@@ -176,7 +177,10 @@ fn bpf_elem_attr(fd: std::os::fd::RawFd, key: u64, value_or_next: u64, flags: u6
 ///
 /// # Safety
 /// `fd` must be a valid BPF map file descriptor whose key size equals
-/// `size_of::<K>()`.
+/// `size_of::<K>()`. Every byte pattern the kernel can return for a key
+/// must be a valid initialized representation of `K`, because successful
+/// syscalls write raw map-key bytes into `MaybeUninit<K>` before
+/// `assume_init` is called.
 unsafe fn raw_get_next_key<K: Copy>(
     fd: std::os::fd::RawFd,
     prev: Option<&K>,
@@ -308,11 +312,32 @@ impl AyaXdpApplier {
         f(&mut trie).map_err(map_err)
     }
 
-    pub fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
-        let bpf = self.bpf.as_mut().ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
-        let map = bpf.map_mut("AUTONOMOUS_CONFIG").ok_or_else(|| EnforcementError::Xdp("AUTONOMOUS_CONFIG map missing".into()))?;
+    pub fn configure_autonomous(
+        &mut self,
+        enabled: bool,
+        syn_pps_per_cpu: u64,
+        udp_pps_per_cpu: u64,
+        packet_pps_per_cpu: u64,
+        window_ms: u64,
+    ) -> Result<(), EnforcementError> {
+        let bpf = self
+            .bpf
+            .as_mut()
+            .ok_or_else(|| EnforcementError::Xdp("not loaded".into()))?;
+        let map = bpf
+            .map_mut("AUTONOMOUS_CONFIG")
+            .ok_or_else(|| EnforcementError::Xdp("AUTONOMOUS_CONFIG map missing".into()))?;
         let mut cfg: AyaArray<_, [u64; 4]> = AyaArray::try_from(map).map_err(map_err)?;
-        let values = if enabled { [syn_pps_per_cpu, udp_pps_per_cpu, packet_pps_per_cpu, window_ms] } else { [0, 0, 0, 0] };
+        let values = if enabled {
+            [
+                syn_pps_per_cpu,
+                udp_pps_per_cpu,
+                packet_pps_per_cpu,
+                window_ms,
+            ]
+        } else {
+            [0, 0, 0, 0]
+        };
         cfg.set(0, values, 0).map_err(map_err)
     }
 
@@ -398,7 +423,14 @@ impl XdpApplier for AyaXdpApplier {
         ))
     }
 
-    fn configure_autonomous(&mut self, enabled: bool, syn_pps_per_cpu: u64, udp_pps_per_cpu: u64, packet_pps_per_cpu: u64, window_ms: u64) -> Result<(), EnforcementError> {
+    fn configure_autonomous(
+        &mut self,
+        enabled: bool,
+        syn_pps_per_cpu: u64,
+        udp_pps_per_cpu: u64,
+        packet_pps_per_cpu: u64,
+        window_ms: u64,
+    ) -> Result<(), EnforcementError> {
         // B01: delegate to the inherent method, which programs the real
         // AUTONOMOUS_CONFIG map and surfaces "not loaded"/"map missing" as
         // errors. Previously this logged a warning and returned Ok(()),
@@ -416,7 +448,7 @@ impl XdpApplier for AyaXdpApplier {
     fn apply_block(
         &mut self,
         ip: IpAddr,
-        decision_id: Uuid,
+        _decision_id: Uuid,
         ttl_seconds: u64,
     ) -> Result<(), EnforcementError> {
         // CLOCK_MONOTONIC — same clock as BPF's bpf_ktime_get_ns, so the
@@ -637,6 +669,14 @@ mod tests {
             super::xdp_map_for("2001:db8::1".parse().unwrap()),
             "BLOCKLIST6"
         );
+    }
+
+    #[test]
+    fn cidr_routes_to_dedicated_map() {
+        let v4 = IpNetwork::new("10.0.0.0".parse().unwrap(), 8).unwrap();
+        let v6 = IpNetwork::new("2001:db8::".parse().unwrap(), 32).unwrap();
+        assert_eq!(super::cidr_map_for(v4), "BLOCKCIDR");
+        assert_eq!(super::cidr_map_for(v6), "BLOCKCIDR6");
     }
 
     /// Task 5: reconcile must never sweep one family's keys against the

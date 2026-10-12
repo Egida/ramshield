@@ -9,13 +9,13 @@
 use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use uuid::Uuid;
 
 pub type Dot = u64;
-
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
-}
+pub(crate) type BlockKey = (IpAddr, u32, Uuid);
+pub(crate) type BlockState = (u64, u64, u64, u8);
+type SnapshotKey = (IpAddr, u32, Uuid, u8);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Element {
@@ -24,11 +24,17 @@ pub struct Element {
     pub removed: bool,
 }
 
-/// Per-node logical timestamp: (node id, HLC logical sequence).
+/// Operation identity is `(node_id, incarnation, counter)`. Each blocklist
+/// instance receives a fresh random incarnation so a process restart cannot
+/// reuse old dots even when the configured node ID and counter restart. The
+/// counter remains monotonic within one incarnation and independent of HLC time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterDot {
     pub node_id: u32,
-    pub counter: u32,
+    /// Random process incarnation; nil is reserved for invalid/legacy messages.
+    #[serde(default)]
+    pub incarnation: Uuid,
+    pub counter: u64,
 }
 
 /// One ban decision, gossip-able across the fleet.
@@ -36,12 +42,16 @@ pub struct ClusterDot {
 pub struct ClusterBlockDelta {
     pub ip: IpAddr,
     pub dot: ClusterDot,
+    /// Physical HLC time when the ban was created (not its expiry time).
+    /// Defaults to zero when reading legacy wire messages.
+    #[serde(default)]
+    pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub tier: u8,
 }
 
 /// Observed-remove tombstone propagated to peers. A peer must discard any
-/// block dot for the same (ip,node) whose counter is <= this counter.
+/// block dot for the same (ip,node,incarnation) whose counter is <= this counter.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterUnblockDelta {
     pub ip: IpAddr,
@@ -103,43 +113,68 @@ impl Default for Aworset {
     }
 }
 
-/// IP-keyed blocklist CRDT: ban dots per (ip, node), HLC-ordered so the
-/// highest counter per node wins on merge. Internal map is
-/// DashMap<(IpAddr, node_id), (seq, expires_at_ms)>.
+/// IP-keyed blocklist CRDT: operation dots per (ip, node), ordered by the
+/// per-node operation counter. HLC physical time is retained separately for
+/// TTL calculation. Internal map is DashMap<(IpAddr, node_id, incarnation),
+/// (operation_counter, created_at_ms, expires_at_ms)>.
 pub struct AworsetBlocklist {
     node_id: u32,
+    incarnation: Uuid,
     hlc: Hlc,
-    pub(crate) entries: DashMap<(IpAddr, u32), (u32, u64)>,
-    pub(crate) tombstones: DashMap<(IpAddr, u32), u32>,
-    tombstone_times: DashMap<(IpAddr, u32), u64>,
+    pub(crate) entries: DashMap<BlockKey, BlockState>,
+    /// Per-key high-water marks. These are deliberately retained until a
+    /// causal-stability/peer-acknowledgement protocol exists; timer-only GC can
+    /// resurrect an old ban from a disconnected peer.
+    pub(crate) tombstones: DashMap<BlockKey, u64>,
+    next_dot_counter: AtomicU64,
+    snapshot_cursor: AtomicUsize,
 }
 
 impl AworsetBlocklist {
     pub fn new(node_id: u32) -> Self {
         Self {
             node_id,
+            incarnation: Uuid::new_v4(),
             hlc: Hlc::new(),
             entries: DashMap::new(),
             tombstones: DashMap::new(),
-            tombstone_times: DashMap::new(),
+            next_dot_counter: AtomicU64::new(0),
+            snapshot_cursor: AtomicUsize::new(0),
         }
     }
 
     /// Record a local ban. Returns the delta to broadcast to peers.
     pub fn record_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
-        let (phys_ms, seq) = self.hlc.tick(0, 0);
-        let expires_at_ms = if ttl_ms == 0 { u64::MAX } else { phys_ms.saturating_add(ttl_ms) };
+        let (created_at_ms, _) = self.hlc.tick(0, 0);
+        // Never reuse an operation dot when physical time advances. Exhaustion
+        // fails closed instead of wrapping and silently violating CRDT identity.
+        let previous = self
+            .next_dot_counter
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("mesh dot counter exhausted; refusing to emit a duplicate CRDT dot");
+        let counter = previous + 1;
+        let expires_at_ms = if ttl_ms == 0 {
+            u64::MAX
+        } else {
+            created_at_ms.saturating_add(ttl_ms)
+        };
 
         let dot = ClusterDot {
             node_id: self.node_id,
-            counter: seq,
+            incarnation: self.incarnation,
+            counter,
         };
-        self.entries
-            .insert((ip, self.node_id), (seq, expires_at_ms));
+        self.entries.insert(
+            (ip, self.node_id, self.incarnation),
+            (counter, created_at_ms, expires_at_ms, tier),
+        );
 
         ClusterBlockDelta {
             ip,
             dot,
+            created_at_ms,
             expires_at_ms,
             tier,
         }
@@ -147,8 +182,13 @@ impl AworsetBlocklist {
 
     /// Absorb a peer delta. True if it changed local state.
     pub fn merge_delta(&self, delta: &ClusterBlockDelta) -> bool {
-        self.hlc.tick(delta.expires_at_ms, delta.dot.counter);
-        let key = (delta.ip, delta.dot.node_id);
+        if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
+            return false;
+        }
+        // HLC time and operation identity are separate domains. The dot counter
+        // must not be interpreted as the HLC's 32-bit logical component.
+        self.hlc.tick(delta.created_at_ms, 0);
+        let key = (delta.ip, delta.dot.node_id, delta.dot.incarnation);
         if self
             .tombstones
             .get(&key)
@@ -161,16 +201,25 @@ impl AworsetBlocklist {
         let mut inserted = false;
         self.entries
             .entry(key)
-            .and_modify(|(existing_seq, existing_exp)| {
-                if delta.dot.counter > *existing_seq {
-                    *existing_seq = delta.dot.counter;
-                    *existing_exp = delta.expires_at_ms;
-                    inserted = true;
-                }
-            })
+            .and_modify(
+                |(existing_seq, existing_created, existing_exp, existing_tier)| {
+                    if delta.dot.counter > *existing_seq {
+                        *existing_seq = delta.dot.counter;
+                        *existing_created = delta.created_at_ms;
+                        *existing_exp = delta.expires_at_ms;
+                        *existing_tier = delta.tier;
+                        inserted = true;
+                    }
+                },
+            )
             .or_insert_with(|| {
                 inserted = true;
-                (delta.dot.counter, delta.expires_at_ms)
+                (
+                    delta.dot.counter,
+                    delta.created_at_ms,
+                    delta.expires_at_ms,
+                    delta.tier,
+                )
             });
 
         inserted
@@ -179,7 +228,7 @@ impl AworsetBlocklist {
     pub fn is_blocked(&self, ip: &IpAddr, now_ms: u64) -> bool {
         self.entries
             .iter()
-            .any(|entry| entry.key().0 == *ip && entry.value().1 > now_ms)
+            .any(|entry| entry.key().0 == *ip && entry.value().2 > now_ms)
     }
 
     pub fn len(&self) -> usize {
@@ -194,47 +243,60 @@ impl AworsetBlocklist {
         self.entries.is_empty()
     }
 
-    /// Drop entries whose ban has expired (GC pass on the 250ms tick).
+    /// Prune expired active entries while preserving a per-key high-water mark.
     ///
-    /// F6-fix (audit /tmp/oo Frontier 2): entries are pruned only after
-    /// TOMBSTONE_HORIZON_MS past expiry, not at the exact expiry ms.
-    /// Premature deletion + delayed gossip = resurrection: a peer's stale
-    /// ban delta arriving after local pruning is treated as NEW and
-    /// re-bans the IP. The horizon must exceed max network delay + clock
-    /// skew across the fleet.
+    /// An elapsed timer is not proof that every disconnected peer has observed
+    /// a removal. Therefore this method never deletes tombstones/high-water
+    /// marks. Expired entries are converted into watermarks after the horizon,
+    /// so delayed/replayed deltas cannot recreate old state. This intentionally
+    /// favors convergence safety over bounded tombstone memory until a peer-ack
+    /// or epoch-based causal-stability protocol is implemented.
     pub fn purge_expired(&self, now_ms: u64) {
         const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
-        self.entries
-            .retain(|_, (_, exp)| now_ms.saturating_sub(*exp) < TOMBSTONE_HORIZON_MS);
-        self.tombstone_times.retain(|key, created| {
-            let keep = now_ms.saturating_sub(*created) < TOMBSTONE_HORIZON_MS;
-            if !keep { self.tombstones.remove(key); }
-            keep
-        });
+        let expired: Vec<((IpAddr, u32, Uuid), u64)> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let (_, _, expires_at_ms, _) = *entry.value();
+                (now_ms.saturating_sub(expires_at_ms) >= TOMBSTONE_HORIZON_MS)
+                    .then_some((*entry.key(), entry.value().0))
+            })
+            .collect();
+
+        for (key, counter) in expired {
+            self.entries.remove(&key);
+            self.tombstones
+                .entry(key)
+                .and_modify(|existing| *existing = (*existing).max(counter))
+                .or_insert(counter);
+        }
     }
 
     /// Local unblock: create a tombstone delta for the observed local dot.
     /// Callers must gossip the returned delta; removing the local entry alone
     /// cannot make an AWORSet converge across peers.
     pub fn record_unban(&self, ip: IpAddr) -> Vec<ClusterUnblockDelta> {
-        let observed: Vec<(u32, u32)> = self
+        let observed: Vec<(u32, Uuid, u64)> = self
             .entries
             .iter()
             .filter(|entry| entry.key().0 == ip)
-            .map(|entry| (entry.key().1, entry.value().0))
+            .map(|entry| (entry.key().1, entry.key().2, entry.value().0))
             .collect();
         let mut deltas = Vec::with_capacity(observed.len());
-        for (node_id, counter) in observed {
-            let key = (ip, node_id);
+        for (node_id, incarnation, counter) in observed {
+            let key = (ip, node_id, incarnation);
             self.entries.remove(&key);
             self.tombstones
                 .entry(key)
                 .and_modify(|existing| *existing = (*existing).max(counter))
                 .or_insert(counter);
-            self.tombstone_times.insert(key, now_ms());
             deltas.push(ClusterUnblockDelta {
                 ip,
-                dot: ClusterDot { node_id, counter },
+                dot: ClusterDot {
+                    node_id,
+                    incarnation,
+                    counter,
+                },
             });
         }
         deltas
@@ -242,8 +304,11 @@ impl AworsetBlocklist {
 
     /// Merge an observed-remove tombstone.
     pub fn merge_unblock_delta(&self, delta: &ClusterUnblockDelta) -> bool {
-        self.hlc.tick(0, delta.dot.counter);
-        let key = (delta.ip, delta.dot.node_id);
+        if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
+            return false;
+        }
+        self.hlc.tick(0, 0);
+        let key = (delta.ip, delta.dot.node_id, delta.dot.incarnation);
         let mut changed = false;
         self.tombstones
             .entry(key)
@@ -257,7 +322,6 @@ impl AworsetBlocklist {
                 changed = true;
                 delta.dot.counter
             });
-        if changed { self.tombstone_times.insert(key, now_ms()); }
         // ponytail: avoid let-chains; drop the DashMap guard before remove.
         if self
             .entries
@@ -268,23 +332,71 @@ impl AworsetBlocklist {
         }
         changed
     }
-    /// Bounded anti-entropy snapshot used by the authenticated transport.
+    /// Return a bounded, rotating anti-entropy page.
+    ///
+    /// Items are sorted before paging so a stable state has deterministic order.
+    /// The cursor advances between calls, preventing a fixed map prefix from
+    /// starving keys beyond the per-sync budget. Concurrent state changes can
+    /// cause duplicates or temporary skips; repeated rotations repair those
+    /// changes, while delivery acknowledgement is a separate concern.
     pub fn snapshot(&self, limit: usize) -> (Vec<ClusterBlockDelta>, Vec<ClusterUnblockDelta>) {
-        let mut blocks = Vec::new();
-        for e in self.entries.iter().take(limit) {
-            blocks.push(ClusterBlockDelta {
-                ip: e.key().0,
-                dot: ClusterDot { node_id: e.key().1, counter: e.value().0 },
-                expires_at_ms: e.value().1,
-                tier: 1,
-            });
+        enum SnapshotItem {
+            Block(ClusterBlockDelta),
+            Unblock(ClusterUnblockDelta),
         }
-        let mut unblocks = Vec::new();
-        for e in self.tombstones.iter().take(limit.saturating_sub(blocks.len())) {
-            unblocks.push(ClusterUnblockDelta {
-                ip: e.key().0,
-                dot: ClusterDot { node_id: e.key().1, counter: *e.value() },
-            });
+
+        if limit == 0 {
+            return (Vec::new(), Vec::new());
+        }
+
+        let mut items: Vec<(SnapshotKey, SnapshotItem)> =
+            Vec::with_capacity(self.entries.len() + self.tombstones.len());
+        for entry in self.entries.iter() {
+            let key = *entry.key();
+            items.push((
+                (key.0, key.1, key.2, 0),
+                SnapshotItem::Block(ClusterBlockDelta {
+                    ip: key.0,
+                    dot: ClusterDot {
+                        node_id: key.1,
+                        incarnation: key.2,
+                        counter: entry.value().0,
+                    },
+                    created_at_ms: entry.value().1,
+                    expires_at_ms: entry.value().2,
+                    tier: entry.value().3,
+                }),
+            ));
+        }
+        for tombstone in self.tombstones.iter() {
+            let key = *tombstone.key();
+            items.push((
+                (key.0, key.1, key.2, 1),
+                SnapshotItem::Unblock(ClusterUnblockDelta {
+                    ip: key.0,
+                    dot: ClusterDot {
+                        node_id: key.1,
+                        incarnation: key.2,
+                        counter: *tombstone.value(),
+                    },
+                }),
+            ));
+        }
+        items.sort_unstable_by_key(|(key, _)| *key);
+
+        let total = items.len();
+        if total == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let start = self.snapshot_cursor.fetch_add(limit, Ordering::Relaxed) % total;
+        let count = limit.min(total);
+        let mut blocks = Vec::with_capacity(count);
+        let mut unblocks = Vec::with_capacity(count);
+        for offset in 0..count {
+            match &items[(start + offset) % total].1 {
+                SnapshotItem::Block(block) => blocks.push(block.clone()),
+                SnapshotItem::Unblock(unblock) => unblocks.push(unblock.clone()),
+            }
         }
         (blocks, unblocks)
     }
@@ -293,6 +405,14 @@ impl AworsetBlocklist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
 
     #[test]
     fn basic_operations() {
@@ -334,6 +454,117 @@ mod tests {
     }
 
     #[test]
+    fn permanent_remote_ban_does_not_poison_local_hlc() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let permanent_ip = IpAddr::from([198, 51, 100, 11]);
+        let finite_ip = IpAddr::from([198, 51, 100, 12]);
+
+        let permanent = sender.record_ban(permanent_ip, 0, 3);
+        assert_eq!(permanent.expires_at_ms, u64::MAX);
+        assert!(receiver.merge_delta(&permanent));
+
+        let finite = receiver.record_ban(finite_ip, 60_000, 1);
+        assert_ne!(finite.expires_at_ms, u64::MAX);
+        assert_eq!(
+            finite.expires_at_ms.saturating_sub(finite.created_at_ms),
+            60_000
+        );
+    }
+
+    #[test]
+    fn explicit_unban_watermark_survives_gc_horizon_and_rejects_replay() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 61]);
+        let old_ban = sender.record_ban(ip, 60_000, 1);
+        assert!(receiver.merge_delta(&old_ban));
+        let unban = receiver.record_unban(ip);
+        assert_eq!(unban.len(), 1);
+
+        receiver.purge_expired(now_ms().saturating_add(86_400_001));
+        assert!(!receiver.merge_delta(&old_ban));
+        assert!(!receiver.is_blocked(&ip, now_ms()));
+    }
+
+    #[test]
+    fn expired_entry_becomes_watermark_before_it_is_pruned() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 62]);
+        let old_ban = sender.record_ban(ip, 1, 1);
+        assert!(receiver.merge_delta(&old_ban));
+
+        receiver.purge_expired(old_ban.expires_at_ms.saturating_add(86_400_000));
+        assert!(receiver.entries.is_empty());
+        assert_eq!(
+            receiver
+                .tombstones
+                .get(&(ip, sender.node_id, old_ban.dot.incarnation))
+                .map(|v| *v),
+            Some(old_ban.dot.counter)
+        );
+        assert!(
+            !receiver.merge_delta(&old_ban),
+            "expired stale delta must not return"
+        );
+    }
+
+    #[test]
+    fn nil_incarnation_deltas_are_rejected() {
+        let mesh = AworsetBlocklist::new(18);
+        let ip = IpAddr::from([192, 0, 2, 20]);
+        let now = now_ms();
+        let block = ClusterBlockDelta {
+            ip,
+            dot: ClusterDot {
+                node_id: 7,
+                incarnation: Uuid::nil(),
+                counter: 1,
+            },
+            created_at_ms: now,
+            expires_at_ms: now.saturating_add(60_000),
+            tier: 1,
+        };
+        assert!(!mesh.merge_delta(&block));
+
+        let unblock = ClusterUnblockDelta { ip, dot: block.dot };
+        assert!(!mesh.merge_unblock_delta(&unblock));
+    }
+
+    #[test]
+    fn restarted_instance_uses_a_distinct_dot_incarnation() {
+        let ip = IpAddr::from([192, 0, 2, 19]);
+        let first_instance = AworsetBlocklist::new(17);
+        let old_ban = first_instance.record_ban(ip, 60_000, 1);
+        let restarted_instance = AworsetBlocklist::new(17);
+        let new_ban = restarted_instance.record_ban(ip, 60_000, 1);
+
+        assert_eq!(old_ban.dot.node_id, new_ban.dot.node_id);
+        assert_eq!(old_ban.dot.counter, new_ban.dot.counter);
+        assert_ne!(old_ban.dot.incarnation, new_ban.dot.incarnation);
+
+        let receiver = AworsetBlocklist::new(18);
+        assert!(receiver.merge_delta(&old_ban));
+        assert!(receiver.merge_delta(&new_ban));
+        assert_eq!(receiver.len(), 2);
+    }
+
+    #[test]
+    fn local_dot_counter_stays_monotonic_when_hlc_physical_time_advances() {
+        let mesh = AworsetBlocklist::new(17);
+        let first = mesh.record_ban(IpAddr::from([192, 0, 2, 17]), 60_000, 1);
+
+        // Simulate the wall clock/HLC moving forward independently of the
+        // operation sequence. A later ban must not reuse/reset its dot.
+        mesh.hlc.tick(now_ms().saturating_add(10_000), 0);
+        let second = mesh.record_ban(IpAddr::from([192, 0, 2, 18]), 60_000, 1);
+
+        assert!(second.dot.counter > first.dot.counter);
+        assert_eq!(first.dot.node_id, second.dot.node_id);
+    }
+
+    #[test]
     fn delta_merge_wins_by_counter() {
         let a = AworsetBlocklist::new(1);
         let ip = IpAddr::from([198, 51, 100, 7]);
@@ -343,6 +574,7 @@ mod tests {
         // Peer node 2 sees it and re-bans with a longer TTL.
         let mut d2 = d1.clone();
         d2.dot.node_id = 2;
+        d2.dot.incarnation = Uuid::new_v4();
         d2.dot.counter += 1;
         d2.expires_at_ms += 60_000;
 
@@ -352,6 +584,61 @@ mod tests {
         d3.dot.counter -= 1;
         assert!(!a.merge_delta(&d3), "lower counter must be rejected");
     }
+    #[test]
+    fn concurrent_bans_converge_independent_of_merge_order() {
+        let node_a = AworsetBlocklist::new(1);
+        let node_b = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 44]);
+        let a = node_a.record_ban(ip, 60_000, 1);
+        let b = node_b.record_ban(ip, 90_000, 2);
+
+        let left = AworsetBlocklist::new(3);
+        let right = AworsetBlocklist::new(4);
+        assert!(left.merge_delta(&a));
+        assert!(left.merge_delta(&b));
+        assert!(right.merge_delta(&b));
+        assert!(right.merge_delta(&a));
+
+        let normalize = |mesh: &AworsetBlocklist| {
+            let mut state: Vec<_> = mesh
+                .entries
+                .iter()
+                .map(|entry| (*entry.key(), *entry.value()))
+                .collect();
+            state.sort_by_key(|(key, value)| (key.0, key.1, key.2, value.0));
+            state
+        };
+        assert_eq!(normalize(&left), normalize(&right));
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_and_reordered_deltas_are_idempotent() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 45]);
+        let old = sender.record_ban(ip, 60_000, 1);
+        let mut newer = sender.record_ban(ip, 90_000, 2);
+        newer.dot.counter = old.dot.counter + 1;
+
+        assert!(receiver.merge_delta(&newer));
+        assert!(
+            !receiver.merge_delta(&newer),
+            "duplicate delta must be idempotent"
+        );
+        assert!(
+            !receiver.merge_delta(&old),
+            "reordered stale delta must be ignored"
+        );
+        let entry = receiver
+            .entries
+            .get(&(ip, sender.node_id, old.dot.incarnation))
+            .unwrap();
+        assert_eq!(entry.value().0, newer.dot.counter);
+        assert_eq!(entry.value().2, newer.expires_at_ms);
+    }
+
     #[test]
     fn unban_tombstone_rejects_delayed_old_ban() {
         let peer = AworsetBlocklist::new(2);
@@ -369,18 +656,88 @@ mod tests {
         );
     }
     #[test]
+    fn newer_local_ban_after_unban_is_accepted() {
+        let sender = AworsetBlocklist::new(1);
+        let receiver = AworsetBlocklist::new(2);
+        let ip = IpAddr::from([198, 51, 100, 43]);
+
+        let first = sender.record_ban(ip, 60_000, 1);
+        assert!(receiver.merge_delta(&first));
+
+        let unblocks = sender.record_unban(ip);
+        assert_eq!(unblocks.len(), 1);
+        assert!(receiver.merge_unblock_delta(&unblocks[0]));
+        assert!(!receiver.is_blocked(&ip, now_ms().saturating_add(1)));
+
+        let rebanned = sender.record_ban(ip, 60_000, 1);
+        assert!(rebanned.dot.counter > first.dot.counter);
+        assert!(receiver.merge_delta(&rebanned));
+        assert!(receiver.is_blocked(&ip, now_ms()));
+    }
+
+    #[test]
+    fn snapshot_rotates_through_more_entries_than_one_sync_budget() {
+        const TOTAL: usize = 5_000;
+        const PAGE: usize = 1_024;
+        let mesh = AworsetBlocklist::new(7);
+        for n in 0..TOTAL {
+            let ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
+            mesh.record_ban(ip, 60_000, 1);
+        }
+
+        let mut observed = std::collections::HashSet::new();
+        for _ in 0..TOTAL.div_ceil(PAGE) {
+            let (blocks, unblocks) = mesh.snapshot(PAGE);
+            assert!(blocks.len() + unblocks.len() <= PAGE);
+            observed.extend(blocks.into_iter().map(|delta| delta.ip));
+        }
+        assert_eq!(observed.len(), TOTAL);
+    }
+
+    #[test]
+    fn snapshot_rotates_through_mixed_blocks_and_tombstones() {
+        const EACH: usize = 2_500;
+        const PAGE: usize = 1_024;
+        let mesh = AworsetBlocklist::new(7);
+        let block_incarnation = Uuid::new_v4();
+        let tombstone_incarnation = Uuid::new_v4();
+        for n in 0..EACH {
+            let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
+            mesh.entries.insert(
+                (block_ip, 7, block_incarnation),
+                (n as u64 + 1, 0, u64::MAX, 2),
+            );
+
+            let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
+            mesh.tombstones
+                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
+        }
+
+        let mut observed_blocks = std::collections::HashSet::new();
+        let mut observed_tombstones = std::collections::HashSet::new();
+        for _ in 0..(EACH * 2).div_ceil(PAGE) {
+            let (blocks, unblocks) = mesh.snapshot(PAGE);
+            assert!(blocks.len() + unblocks.len() <= PAGE);
+            observed_blocks.extend(blocks.into_iter().map(|delta| delta.ip));
+            observed_tombstones.extend(unblocks.into_iter().map(|delta| delta.ip));
+        }
+        assert_eq!(observed_blocks.len(), EACH);
+        assert_eq!(observed_tombstones.len(), EACH);
+    }
+
+    #[test]
     fn snapshot_carries_active_dot_and_tombstone() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
-        let ban = mesh.record_ban(ip, 60_000, 1);
+        let ban = mesh.record_ban(ip, 60_000, 3);
         let (blocks, _) = mesh.snapshot(16);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].dot, ban.dot);
+        assert_eq!(blocks[0].tier, ban.tier);
         let unblocks = mesh.record_unban(ip);
         assert_eq!(unblocks.len(), 1);
         let (_, tombstones) = mesh.snapshot(16);
         assert_eq!(tombstones.len(), 1);
         assert_eq!(tombstones[0].dot, ban.dot);
     }
-
 }

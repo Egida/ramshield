@@ -1,0 +1,14 @@
+{
+  "name": "ramshield-agent-flow-contract",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Schema contract for machine-readable RamShield agent handoffs",
+  "scripts": {
+    "test": "node --test *.test.mjs",
+    "validate": "node validate.mjs handoff.example.json"
+  },
+  "dependencies": {
+    "zod": "4.1.12"
+  }
+}

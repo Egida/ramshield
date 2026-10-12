@@ -1,0 +1,81 @@
+name: Agent Flow Contract
+
+on:
+  push:
+    branches:
+      - "automation/**"
+  pull_request:
+    branches: [audit-branch]
+    paths:
+      - ".github/agent-flow/**"
+      - ".github/agents/**"
+      - ".github/workflows/agent-flow-contract.yml"
+      - "docs/development/AGENT_FLOW_RUNBOOK.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-flow-contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate handoff contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      result: ${{ steps.record.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pinned schema dependency
+        run: npm install --prefix .github/agent-flow --ignore-scripts --no-audit --no-fund
+
+      - name: Test contract invariants
+        run: npm --prefix .github/agent-flow test
+
+      - name: Validate example handoff
+        run: npm --prefix .github/agent-flow run validate
+
+      - name: Record validation outcome
+        id: record
+        if: always()
+        env:
+          JOB_RESULT: ${{ job.status }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          echo "result=$JOB_RESULT" >> "$GITHUB_OUTPUT"
+          mkdir -p .agent-flow-output
+          cat > .agent-flow-output/state.json <<EOF
+          {
+            "schema_version": 1,
+            "candidate_sha": "$CANDIDATE_SHA",
+            "workflow": "${GITHUB_WORKFLOW}",
+            "run_id": ${GITHUB_RUN_ID},
+            "run_attempt": ${GITHUB_RUN_ATTEMPT},
+            "validation_result": "$JOB_RESULT",
+            "run_url": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          }
+          EOF
+          {
+            echo "### Agent-flow contract"
+            echo "- Candidate SHA: `$CANDIDATE_SHA`"
+            echo "- Validation result: **$JOB_RESULT**"
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- This validates the handoff schema only; it does not certify Rust or recovery correctness."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish machine-readable flow state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-flow-state-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .agent-flow-output/state.json
+          if-no-files-found: error
+          retention-days: 14

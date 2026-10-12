@@ -80,26 +80,42 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
             );
             match applier.load_and_attach() {
                 Ok(()) => {
-                    if cfg_snapshot.autonomous.enabled {
-                        if let Err(e) = crate::engine::rss::rebalance(
+                    if cfg_snapshot.autonomous.enabled
+                        && let Err(e) = crate::engine::rss::rebalance(
                             &cfg_snapshot.xdp.interface,
                             cfg_snapshot.xdp.require_rss_rebalance,
-                        ) {
-                            if hard_xdp {
-                                return Err(std::io::Error::other(format!("RSS rebalance required but unavailable: {e}")));
-                            }
-                            tracing::warn!(error = %e, "RSS rebalance unavailable");
+                        )
+                    {
+                        if hard_xdp {
+                            return Err(std::io::Error::other(format!(
+                                "RSS rebalance required but unavailable: {e}"
+                            )));
                         }
+                        tracing::warn!(error = %e, "RSS rebalance unavailable");
                     }
-                    if let Err(e) = applier.configure_trusted_overlay(&cfg_snapshot.xdp.trusted_overlay_cidrs) {
+                    if let Err(e) =
+                        applier.configure_trusted_overlay(&cfg_snapshot.xdp.trusted_overlay_cidrs)
+                    {
                         tracing::error!(error = %e, "failed to configure trusted overlay source prefixes");
                         if hard_xdp {
-                            return Err(std::io::Error::other(format!("trusted overlay configuration failed: {e}")));
+                            return Err(std::io::Error::other(format!(
+                                "trusted overlay configuration failed: {e}"
+                            )));
                         }
                     }
-                    if let Err(e) = applier.configure_autonomous(cfg_snapshot.autonomous.enabled, cfg_snapshot.autonomous.syn_pps_per_cpu, cfg_snapshot.autonomous.udp_pps_per_cpu, cfg_snapshot.autonomous.packet_pps_per_cpu, cfg_snapshot.autonomous.window_ms) {
+                    if let Err(e) = applier.configure_autonomous(
+                        cfg_snapshot.autonomous.enabled,
+                        cfg_snapshot.autonomous.syn_pps_per_cpu,
+                        cfg_snapshot.autonomous.udp_pps_per_cpu,
+                        cfg_snapshot.autonomous.packet_pps_per_cpu,
+                        cfg_snapshot.autonomous.window_ms,
+                    ) {
                         tracing::error!(error = %e, "failed to configure autonomous XDP guard");
-                        if hard_xdp { return Err(std::io::Error::other(format!("autonomous XDP configuration failed: {e}"))); }
+                        if hard_xdp {
+                            return Err(std::io::Error::other(format!(
+                                "autonomous XDP configuration failed: {e}"
+                            )));
+                        }
                     }
                     tracing::info!(iface = %cfg_snapshot.xdp.interface, mode = %cfg_snapshot.xdp.mode, autonomous = cfg_snapshot.autonomous.enabled, "XDP dataplane active");
                     engine.xdp_active.store(true, Ordering::Release);
@@ -140,33 +156,54 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     } else {
         Box::new(StubXdpApplier)
     };
+    #[cfg(feature = "mesh")]
     let mesh_blocklist = if cfg_snapshot.mesh.enabled {
         Some(Arc::new(AworsetBlocklist::new(cfg_snapshot.mesh.node_id)))
     } else {
         None
     };
+    #[cfg(feature = "mesh")]
     let mesh_handle = if cfg_snapshot.mesh.enabled {
         let listen = cfg_snapshot.mesh.listen_addr.parse().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh.listen_addr: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid mesh.listen_addr: {e}"),
+            )
         })?;
         let mut peers = Vec::with_capacity(cfg_snapshot.mesh.peers.len());
         for peer in &cfg_snapshot.mesh.peers {
             peers.push(peer.parse().map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh peer {peer}: {e}"))
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid mesh peer {peer}: {e}"),
+                )
             })?);
         }
         let key = hex::decode(cfg_snapshot.mesh.auth_key.trim()).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("invalid mesh.auth_key: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid mesh.auth_key: {e}"),
+            )
         })?;
-        let blocklist = mesh_blocklist.as_ref().cloned().ok_or_else(|| {
-            std::io::Error::other("mesh enabled without a blocklist")
-        })?;
-        Some(MeshHandle::bind(cfg_snapshot.mesh.node_id, blocklist, listen, peers, key).await.map_err(|e| {
-            std::io::Error::other(format!("mesh bind failed: {e}"))
-        })?)
+        let blocklist = mesh_blocklist
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("mesh enabled without a blocklist"))?;
+        Some(
+            MeshHandle::bind(cfg_snapshot.mesh.node_id, blocklist, listen, peers, key)
+                .await
+                .map_err(|e| std::io::Error::other(format!("mesh bind failed: {e}")))?,
+        )
     } else {
         None
     };
+    #[cfg(not(feature = "mesh"))]
+    if cfg_snapshot.mesh.enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mesh.enabled=true but this binary was built without the mesh feature",
+        ));
+    }
 
     let mut enforcement = EnforcementService::new(
         store.clone(),
@@ -174,9 +211,11 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         xdp_box,
         enforcement_shutdown.clone(),
     );
+    #[cfg(feature = "mesh")]
     if let Some(mesh) = mesh_blocklist {
         enforcement = enforcement.with_mesh_blocklist(mesh);
     }
+    #[cfg(feature = "mesh")]
     if let Some(handle) = mesh_handle {
         enforcement = enforcement.with_mesh_handle(handle);
     }
@@ -386,7 +425,6 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         }
     });
 
-
     let detection = Arc::new(DetectionEngine::try_new(
         store.clone(),
         cfg_handle.clone(),
@@ -395,22 +433,25 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         engine.shutdown.clone(),
     )?);
     let event_tx = detection.event_sender();
-    if cfg_snapshot.native_ingest.enabled {
-        if let Err(e) = crate::engine::native::spawn(
+    if cfg_snapshot.native_ingest.enabled
+        && let Err(e) = crate::engine::native::spawn(
             cfg_snapshot.native_ingest.interface.clone(),
             cfg_snapshot.native_ingest.max_events_per_sec,
             cfg_snapshot.xdp.trusted_overlay_cidrs.clone(),
             event_tx.clone(),
             engine.shutdown.clone(),
-        ) {
-            return Err(std::io::Error::other(format!("native ingest start failed: {e}")));
-        }
+        )
+    {
+        return Err(std::io::Error::other(format!(
+            "native ingest start failed: {e}"
+        )));
     }
-    if cfg_snapshot.synproxy.enabled {
-        if let Err(e) = crate::engine::synproxy::install(&cfg_snapshot.synproxy, &cfg_snapshot.xdp.interface) {
-            engine.shutdown.store(true, Ordering::Release);
-            return Err(std::io::Error::other(format!("synproxy setup failed: {e}")));
-        }
+    if cfg_snapshot.synproxy.enabled
+        && let Err(e) =
+            crate::engine::synproxy::install(&cfg_snapshot.synproxy, &cfg_snapshot.xdp.interface)
+    {
+        engine.shutdown.store(true, Ordering::Release);
+        return Err(std::io::Error::other(format!("synproxy setup failed: {e}")));
     }
     let detection_started = detection
         .clone()
@@ -472,7 +513,8 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         store,
         engine.enforcement_tx.clone(),
     )
-    .await {
+    .await
+    {
         Ok(server) => server,
         Err(e) => {
             if cfg_snapshot.synproxy.enabled {
@@ -597,10 +639,10 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
             }
         }
     }
-    if cfg_snapshot.synproxy.enabled {
-        if let Err(e) = crate::engine::synproxy::uninstall() {
-            tracing::warn!(error = %e, "failed to remove RamShield SYNPROXY ruleset during shutdown");
-        }
+    if cfg_snapshot.synproxy.enabled
+        && let Err(e) = crate::engine::synproxy::uninstall()
+    {
+        tracing::warn!(error = %e, "failed to remove RamShield SYNPROXY ruleset during shutdown");
     }
     Ok(())
 }

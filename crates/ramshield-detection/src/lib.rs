@@ -96,6 +96,14 @@ const STATUS_BUCKET: [u8; 600] = {
 /// duplicate the number elsewhere.
 pub const CHANNEL_CAPACITY: u64 = 64_000;
 
+// Bound distinct pending mitigation keys at admission time, not only after
+// a flush. The lock makes the check/evict/insert sequence atomic across the
+// normal, L7, and emergency emission paths.
+#[cfg(not(test))]
+pub(crate) const PENDING_MITIGATION_CAP: usize = 1_048_576;
+#[cfg(test)]
+pub(crate) const PENDING_MITIGATION_CAP: usize = 64;
+
 /// Item 3: worker-local buffers merge into shared pre_aggs at least this
 /// often even if neither time nor shared-size triggers fire — bounds the
 /// per-worker head-of-line to ~8k uniques (~600KB) during an
@@ -114,6 +122,9 @@ pub struct DetectionEngine {
     /// Pre-aggregation buffer — DashMap is internally thread-safe, no Arc needed.
     /// ahash (item 1): every event hashes its IP here under attacker volume.
     pre_aggs: DashMap<IpAddr, IpAgg, ahash::RandomState>,
+    /// Serializes production merges with flush drains so the configured
+    /// pre-aggregation entry limit is a hard bound, not a racy trigger.
+    pre_aggs_merge_lock: std::sync::Mutex<()>,
     last_pre_aggs_flush_ns: AtomicU64,
     /// F1: single-flusher gate (N batch workers share the flush trigger).
     flushing: AtomicBool,
@@ -132,6 +143,9 @@ pub struct DetectionEngine {
     /// apply every flush window. Queue rejection removes the key so the
     /// next window retries instead of suppressing forever.
     pending_mitigations: DashMap<(IpAddr, BlockReason), u64, ahash::RandomState>,
+    /// Serializes capacity check/evict/insert so concurrent detector paths
+    /// cannot exceed PENDING_MITIGATION_CAP between a len() check and insert.
+    pending_mitigation_lock: std::sync::Mutex<()>,
 }
 
 /// Releases the single-flusher gate even on early return/panic.
@@ -144,7 +158,13 @@ impl Drop for FlushGuard<'_> {
 
 impl DetectionEngine {
     /// Compatibility constructor for tests and legacy callers.
-    /// Production boot uses `try_new` so SHM failures reach the boot error path.
+    ///
+    /// Prefer [`Self::try_new`]: this panics if SHM initialization fails and
+    /// must not be used on production boot paths.
+    #[deprecated(
+        since = "0.6.0",
+        note = "use DetectionEngine::try_new; new() panics on SHM init failure"
+    )]
     pub fn new(
         store: Arc<Store>,
         config: ConfigHandle,
@@ -158,12 +178,36 @@ impl DetectionEngine {
         }
     }
 
+    /// Fallible constructor used by production boot and tests.
+    ///
+    /// SHM open failures surface as `Err` so callers can fail closed without a panic.
     pub fn try_new(
         store: Arc<Store>,
         config: ConfigHandle,
         enforcement_tx: mpsc::Sender<EnforceCommand>,
         metrics: Arc<Metrics>,
         shutdown: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        Self::try_new_with_shm_path(
+            store,
+            config,
+            enforcement_tx,
+            metrics,
+            shutdown,
+            &ramshield_cgnat::ShmTableManager::default_path(),
+        )
+    }
+
+    /// Like [`Self::try_new`] but opens the SHM table at `shm_path`.
+    ///
+    /// Used by tests to prove initialization failures propagate as `Err`.
+    pub fn try_new_with_shm_path(
+        store: Arc<Store>,
+        config: ConfigHandle,
+        enforcement_tx: mpsc::Sender<EnforceCommand>,
+        metrics: Arc<Metrics>,
+        shutdown: Arc<AtomicBool>,
+        shm_path: &std::path::Path,
     ) -> std::io::Result<Self> {
         let bloom_bits = config.load().detection.bloom_bits;
         // Patch A: publish capacity up front so bloom_fp_ppm has a
@@ -176,9 +220,7 @@ impl DetectionEngine {
         // ponytail: hardcoded; lift to Config.detection.batch_channel_capacity
         // when traffic profiles diverge.
         let (tx, rx) = bounded::<ConnectionEvent>(CHANNEL_CAPACITY as usize);
-        let shm_table = Arc::new(ramshield_cgnat::ShmTableManager::open_or_create(
-            &ramshield_cgnat::ShmTableManager::default_path(),
-        )?);
+        let shm_table = Arc::new(ramshield_cgnat::ShmTableManager::open_or_create(shm_path)?);
         // pre_aggs writers = batch workers (≤ cores), so 64 shards removes
         // every realistic cross-thread collision. The old derivation
         // (bloom_bits/1024) sized the shard array off an UNRELATED
@@ -196,6 +238,7 @@ impl DetectionEngine {
             bloom: ArcSwap::from_pointee(BloomFilter::new(bloom_bits)),
             shutdown,
             pre_aggs: DashMap::with_hasher_and_shard_amount(ahash::RandomState::new(), 64),
+            pre_aggs_merge_lock: std::sync::Mutex::new(()),
             last_pre_aggs_flush_ns: AtomicU64::new(now_ns()),
             flushing: AtomicBool::new(false),
             worker_handles: std::sync::Mutex::new(Vec::new()),
@@ -206,6 +249,7 @@ impl DetectionEngine {
                 ahash::RandomState::new(),
                 32,
             ),
+            pending_mitigation_lock: std::sync::Mutex::new(()),
         })
     }
 

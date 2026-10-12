@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 pub const SHM_TABLE_CAPACITY: usize = 262_144; // 256K rule slots (~16 MiB at 64 B/slot)
-pub const SHM_PROBE_LIMIT: usize = 8;
+pub const SHM_PROBE_LIMIT: usize = 4;
 
 /// Stable Rust/C slot key for an IPv4 network prefix.
 pub fn subnet_key(network: u32, prefix_len: u8) -> u64 {
@@ -41,10 +41,25 @@ pub struct ShmRuleEntry {
     pub max_rps: AtomicU16,       // 0 = Block, >0 = Rate Limit
     pub tier: AtomicU8,           // 0: Allow, 1: Challenge (429+JS), 2: XDP Drop, 3: Block
     pub flags: AtomicU8,          // Bit 0: Shared Infrastructure / CGNAT
-    pub _padding: [u8; 20], // Exact 64-byte slot alignment
+    pub _padding: [u8; 20],       // Exact 64-byte slot alignment
 }
 
-
+// Compile-time ABI assertions also run when this crate is cross-compiled. This
+// catches architecture-dependent atomic alignment/offset changes before a
+// target binary can be produced.
+const _: () = {
+    assert!(std::mem::size_of::<ShmRuleEntry>() == 64);
+    assert!(std::mem::align_of::<ShmRuleEntry>() == 64);
+    assert!(std::mem::offset_of!(ShmRuleEntry, seq) == 0);
+    assert!(std::mem::offset_of!(ShmRuleEntry, client_hash) == 8);
+    assert!(std::mem::offset_of!(ShmRuleEntry, expires_at_ms) == 16);
+    assert!(std::mem::offset_of!(ShmRuleEntry, challenge_seed_lo) == 24);
+    assert!(std::mem::offset_of!(ShmRuleEntry, challenge_seed_hi) == 32);
+    assert!(std::mem::offset_of!(ShmRuleEntry, max_rps) == 40);
+    assert!(std::mem::offset_of!(ShmRuleEntry, tier) == 42);
+    assert!(std::mem::offset_of!(ShmRuleEntry, flags) == 43);
+    assert!(std::mem::offset_of!(ShmRuleEntry, _padding) == 44);
+};
 
 #[cfg(test)]
 mod abi_asserts {
@@ -52,10 +67,10 @@ mod abi_asserts {
 
     #[test]
     fn challenge_seed_lo_is_naturally_aligned() {
-        use std::mem::{size_of, align_of};
+        use std::mem::{align_of, size_of};
         assert_eq!(align_of::<ShmRuleEntry>(), 64);
         assert_eq!(size_of::<ShmRuleEntry>(), 64);
-        let entry = ShmRuleEntry { 
+        let entry = ShmRuleEntry {
             seq: AtomicU32::new(0),
             client_hash: AtomicU64::new(0),
             expires_at_ms: AtomicU64::new(0),
@@ -74,7 +89,7 @@ mod abi_asserts {
 
     #[test]
     fn challenge_seed_hi_is_naturally_aligned() {
-        let entry = ShmRuleEntry { 
+        let entry = ShmRuleEntry {
             seq: AtomicU32::new(0),
             client_hash: AtomicU64::new(0),
             expires_at_ms: AtomicU64::new(0),
@@ -240,9 +255,7 @@ impl ShmTableManager {
         // refreshed this slot between our probe and the CAS.
         let existing = slot.client_hash.load(Ordering::Acquire);
         let expires = slot.expires_at_ms.load(Ordering::Acquire);
-        let claimable = existing == 0
-            || existing == client_hash
-            || expires <= now_ms;
+        let claimable = existing == 0 || existing == client_hash || expires <= now_ms;
         if !claimable {
             // Release writer lock without mutating payload (seq odd → even).
             slot.seq.fetch_add(1, Ordering::Release);
@@ -269,7 +282,6 @@ impl ShmTableManager {
         slot.seq.fetch_add(1, Ordering::Release); // odd → even
         true
     }
-
 }
 
 #[cfg(test)]
@@ -390,6 +402,95 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_writers_preserve_even_seq_and_no_torn_hash() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-stress-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manager = Arc::new(ShmTableManager::open_or_create(&path).unwrap());
+        let mut handles = Vec::new();
+        for t_id in 0..8u64 {
+            let mgr = Arc::clone(&manager);
+            handles.push(thread::spawn(move || {
+                for i in 0..200u64 {
+                    // Distinct hashes that still collide into nearby probe windows.
+                    let hash = (t_id << 16) ^ i.wrapping_mul(0x9E37_79B9);
+                    let _ = mgr.publish_rule(hash, 60_000, 3, 0, false);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        // Every occupied slot must end on an even seq; client_hash must be
+        // stable under a double-read (seqlock reader pattern).
+        for idx in 0..SHM_TABLE_CAPACITY {
+            let slot = manager.get_slot(idx);
+            let s1 = slot.seq.load(Ordering::Acquire);
+            if s1 & 1 != 0 {
+                // Transient writer should not remain after join.
+                panic!("slot {idx} left with odd seq after writers finished");
+            }
+            let h1 = slot.client_hash.load(Ordering::Acquire);
+            let s2 = slot.seq.load(Ordering::Acquire);
+            assert_eq!(s1, s2, "seq changed mid-read on slot {idx}");
+            if h1 != 0 {
+                let h2 = slot.client_hash.load(Ordering::Acquire);
+                assert_eq!(h1, h2, "torn client_hash on slot {idx}");
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_same_hash_writers_leave_consistent_rule() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = std::env::temp_dir().join(format!(
+            "ramshield-shm-samehash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manager = Arc::new(ShmTableManager::open_or_create(&path).unwrap());
+        let hash = 42u64;
+        let mut handles = Vec::new();
+        for tier in 0..4u8 {
+            let mgr = Arc::clone(&manager);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    let _ = mgr.publish_rule(hash, 30_000, tier, 10, false);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+        let slot = manager.get_slot(hash as usize);
+        let seq = slot.seq.load(Ordering::Acquire);
+        assert_eq!(seq % 2, 0, "must finish even");
+        assert_eq!(
+            slot.client_hash.load(Ordering::Acquire),
+            hash,
+            "same-hash writers must leave the canonical hash"
+        );
+        let tier = slot.tier.load(Ordering::Acquire);
+        assert!(tier <= 3, "tier out of range: {tier}");
         let _ = std::fs::remove_file(path);
     }
 }

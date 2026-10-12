@@ -75,19 +75,55 @@ impl DetectionEngine {
         } else {
             (ttl_secs.saturating_mul(1_000_000_000) / 2).max(1_000_000_000)
         };
-        let suppressed = self
+        // The check/evict/insert must be one critical section: separate
+        // DashMap operations allow concurrent emitters to all observe spare
+        // capacity and then exceed the hard limit.
+        let _guard = self
+            .pending_mitigation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if self
             .pending_mitigations
             .get(&key)
-            .is_some_and(|g| now.saturating_sub(*g) < cooldown_ns);
-        if suppressed {
+            .is_some_and(|g| now.saturating_sub(*g) < cooldown_ns)
+        {
             return false;
         }
+
+        // Strictly bound memory without a full-map sweep on every new key.
+        // At saturation, evict one existing admission before inserting. This
+        // uses a shard iterator and avoids deliberate full-map scans,
+        // unlike retain()+min_by_key(), which makes each flood key trigger one
+        // or two O(capacity) scans. Eviction can allow an earlier
+        // duplicate mitigation, but enforcement remains authoritative and
+        // queue admission still bounds delivery.
+        if !self.pending_mitigations.contains_key(&key) {
+            while self.pending_mitigations.len() >= PENDING_MITIGATION_CAP {
+                let victim = self
+                    .pending_mitigations
+                    .iter()
+                    .next()
+                    .map(|entry| *entry.key());
+                match victim {
+                    Some(victim) => {
+                        self.pending_mitigations.remove(&victim);
+                    }
+                    None => break,
+                }
+            }
+        }
+
         self.pending_mitigations.insert(key, now);
         true
     }
 
     /// Undo an admission whose command never reached the enforcement queue.
     pub(crate) fn retreat_mitigation(&self, key: (IpAddr, BlockReason)) {
+        let _guard = self
+            .pending_mitigation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.pending_mitigations.remove(&key);
     }
 
@@ -130,5 +166,16 @@ impl DetectionEngine {
                 self.metrics.inc_enforcement_dropped();
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_mitigations_len(&self) -> usize {
+        // Read under the same admission lock as insert/evict so concurrent
+        // tests observe a stable count rather than DashMap's mid-mutation view.
+        let _guard = self
+            .pending_mitigation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.pending_mitigations.len()
     }
 }

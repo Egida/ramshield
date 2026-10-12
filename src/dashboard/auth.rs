@@ -22,6 +22,16 @@ use tracing::warn;
 
 const COOKIE_NAME: &str = "rs_session";
 
+/// Build the Set-Cookie value for a session token. Pure so unit tests can
+/// assert HttpOnly / SameSite / Secure / Path / Max-Age without the full
+/// login handler.
+pub(crate) fn session_cookie_value(token: &str, ttl_secs: u64, secure: bool) -> String {
+    let secure_flag = if secure { "; Secure" } else { "" };
+    format!(
+        "{COOKIE_NAME}={token}; HttpOnly; SameSite=Lax{secure_flag}; Path=/; Max-Age={ttl_secs}"
+    )
+}
+
 #[derive(Clone)]
 pub struct AuthState {
     /// Argon2 PHC string from config. RwLock so a hot-reloaded config can
@@ -38,6 +48,9 @@ pub struct AuthState {
     /// every admin with 50 garbage POSTs (process-wide DoS). Windowed per IP:
     /// failures older than LOCKOUT_WINDOW decay and the slot is reclaimed.
     failures: Arc<DashMap<IpAddr, FailureWindow, ahash::RandomState>>,
+    /// Serializes failure-window admission so unique-source floods cannot race
+    /// past the hard entry cap.
+    failure_lock: Arc<std::sync::Mutex<()>>,
     /// Last time the session store was swept. Used by validate() to throttle
     /// the O(n) retain to once per SWEEP_INTERVAL instead of every request.
     last_sweep: Arc<std::sync::atomic::AtomicI64>,
@@ -50,7 +63,7 @@ pub struct AuthState {
     pub(crate) metrics: Arc<ramshield_metrics::Metrics>,
     /// Max concurrent Argon2 hash operations (default 4). Prevents a flood of
     /// bad logins from saturating the blocking pool with 100ms CPU-bound hashes.
-    /// 0 = unlimited (original behavior).
+    /// Constructor inputs below 1 are clamped to 1; zero never disables the bound.
     argon2_parallelism: u32,
     /// Semaphore to limit Argon2 concurrent operations.
     argon2_semaphore: Arc<Semaphore>,
@@ -117,14 +130,20 @@ impl AuthState {
             }
         }
         let parallelism = argon2_parallelism.max(1);
+        // Production floors at 60s. Tests allow 1s to prove expiry without long sleeps.
+        #[cfg(not(test))]
+        let min_ttl = 60u64;
+        #[cfg(test)]
+        let min_ttl = 1u64;
         Self {
             password_hash: Arc::new(std::sync::RwLock::new(password_hash)),
-            ttl: Duration::from_secs(ttl_secs.max(60)),
+            ttl: Duration::from_secs(ttl_secs.max(min_ttl)),
             sessions: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             max_login_attempts,
             max_password_length,
             trusted_proxies: Arc::new(trusted_proxies),
             failures: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
+            failure_lock: Arc::new(std::sync::Mutex::new(())),
             last_sweep: Arc::new(std::sync::atomic::AtomicI64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -141,18 +160,25 @@ impl AuthState {
     pub fn enabled(&self) -> bool {
         self.password_hash
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
+            .map(|guard| guard.is_some())
+            .unwrap_or(true) // Poisoned state must never disable authentication.
     }
 
     /// Hot-swap the password hash without restarting the dashboard.
     /// Callers must have already validated the new PHC string.
+    ///
+    /// A poisoned lock remains fail-closed until this explicit replacement.
+    /// The replacement is written while holding the recovered write guard,
+    /// then poison is cleared so readers can resume with the known-good value.
     pub fn set_password_hash(&self, new_hash: Option<String>) {
-        let mut guard = self
-            .password_hash
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = new_hash;
+        match self.password_hash.write() {
+            Ok(mut guard) => *guard = new_hash,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = new_hash;
+                self.password_hash.clear_poison();
+            }
+        }
     }
 
     /// True when this IP is currently locked out. Entries for IPs whose
@@ -173,28 +199,41 @@ impl AuthState {
     }
 
     fn note_failure(&self, ip: IpAddr) {
-        // P3 fix: entries were only reclaimed when the SAME ip returned —
-        // a many-source (IPv6-rotating) bad-password flood grew the map
-        // without bound. Cheap cap: sweep expired windows past 10k entries.
-        if self.failures.len() > 10_000 {
-            self.failures
-                .retain(|_, w| w.first_fail.elapsed() < LOCKOUT_WINDOW);
+        // The write lock makes capacity admission atomic across concurrent
+        // login handlers. Existing IPs keep their window; new IPs at capacity
+        // evict one tracked slot rather than growing memory or scanning the
+        // whole map on every attacker-controlled source address.
+        const MAX_TRACKED_FAILURE_IPS: usize = 10_000;
+        let _guard = self
+            .failure_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(mut window) = self.failures.get_mut(&ip) {
+            if window.first_fail.elapsed() >= LOCKOUT_WINDOW {
+                window.count = 1;
+                window.first_fail = Instant::now();
+            } else {
+                window.count = window.count.saturating_add(1);
+            }
+            return;
         }
-        self.failures
-            .entry(ip)
-            .and_modify(|w| {
-                if w.first_fail.elapsed() >= LOCKOUT_WINDOW {
-                    // Window expired — restart it with this failure.
-                    w.count = 1;
-                    w.first_fail = Instant::now();
-                } else {
-                    w.count += 1;
-                }
-            })
-            .or_insert(FailureWindow {
+
+        let victim = self.failures.iter().next().map(|entry| *entry.key());
+        if self.failures.len() >= MAX_TRACKED_FAILURE_IPS
+            && let Some(victim) = victim
+        {
+            // Drop the DashMap iterator/ref before removing the key; otherwise
+            // a shard read guard can be held while remove waits for that shard.
+            self.failures.remove(&victim);
+        }
+        self.failures.insert(
+            ip,
+            FailureWindow {
                 count: 1,
                 first_fail: Instant::now(),
-            });
+            },
+        );
     }
 
     /// Pure password verification — no shared state, safe to run on a
@@ -202,12 +241,9 @@ impl AuthState {
     /// inline on an async handler blocks the Tokio worker for every other
     /// request on that thread.
     fn verify_password(&self, password: &str) -> Option<String> {
-        let hash = self
-            .password_hash
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()?
-            .clone();
+        // A poisoned lock means the hash may have been left in an unknown
+        // state. Deny login until set_password_hash installs a known-good hash.
+        let hash = self.password_hash.read().ok()?.as_ref()?.clone();
         let parsed = argon2::PasswordHash::new(&hash).ok()?;
         // Constant-time verify inside argon2; cap work on garbage input.
         if password.len() > self.max_password_length {
@@ -399,14 +435,7 @@ async fn login_submit(
     match verified {
         Some(token) => {
             auth.register_session(&token);
-            let secure = if auth.secure_cookie { "; Secure" } else { "" };
-            let cookie = format!(
-                "{}={}; HttpOnly; SameSite=Lax{}; Path=/; Max-Age={}",
-                COOKIE_NAME,
-                token,
-                secure,
-                auth.ttl.as_secs()
-            );
+            let cookie = session_cookie_value(&token, auth.ttl.as_secs(), auth.secure_cookie);
             // ponytail: cookie value is a hex token (header::HeaderValue::from_str
             // accepts it); attrs are ASCII constants. The match is
             // belt-and-suspenders. If the cookie ever embeds user-supplied bytes,
@@ -490,6 +519,22 @@ mod tests {
     }
 
     #[test]
+    fn zero_argon2_parallelism_is_clamped_to_one() {
+        let auth = AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            0,
+        );
+        assert_eq!(auth.argon2_parallelism, 1);
+        assert_eq!(auth.argon2_semaphore.available_permits(), 1);
+    }
+
+    #[test]
     fn disabled_auth_has_no_sessions() {
         let a = AuthState::new(
             None,
@@ -528,5 +573,194 @@ mod tests {
         // Same Arc-shared state seen through a clone.
         let b = a.clone();
         assert!(b.is_locked(attacker));
+    }
+
+    #[test]
+    fn failure_tracking_is_hard_bounded_under_unique_ip_flood() {
+        const WORKERS: u32 = 8;
+        const IPS_PER_WORKER: u32 = 2_000;
+        let a = AuthState::new(
+            Some("not-a-valid-phc-hash".into()),
+            3600,
+            3,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|worker| {
+                let auth = a.clone();
+                std::thread::spawn(move || {
+                    for i in 0..IPS_PER_WORKER {
+                        let ip = IpAddr::from([
+                            10,
+                            worker as u8,
+                            ((i >> 8) & 0xff) as u8,
+                            (i & 0xff) as u8,
+                        ]);
+                        auth.note_failure(ip);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("failure-tracking worker");
+        }
+
+        assert!(
+            a.failures.len() <= 10_000,
+            "unique-source login flood exceeded hard cap: {}",
+            a.failures.len()
+        );
+        assert_eq!(
+            a.failures.len(),
+            10_000,
+            "the map should fill to, but never exceed, its configured cap"
+        );
+    }
+
+    #[test]
+    fn session_expires_after_ttl() {
+        let a = AuthState::new(
+            Some(hash_of("hunter2")),
+            1,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+        let tok = login(&a, "hunter2").expect("login");
+        assert!(a.validate(&tok));
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(!a.validate(&tok), "session must expire after TTL");
+    }
+
+    #[test]
+    fn cookie_flags_http_only_samesite_secure_and_path() {
+        let c = session_cookie_value("abc123", 3600, true);
+        assert!(c.contains("HttpOnly"), "{c}");
+        assert!(c.contains("SameSite=Lax"), "{c}");
+        assert!(c.contains("Secure"), "{c}");
+        assert!(c.contains("Path=/"), "{c}");
+        assert!(c.contains("Max-Age=3600"), "{c}");
+        assert!(c.starts_with("rs_session=abc123"), "{c}");
+        let plain = session_cookie_value("tok", 60, false);
+        assert!(!plain.contains("Secure"), "{plain}");
+        assert!(
+            plain.contains("HttpOnly") && plain.contains("SameSite=Lax"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn login_lockout_blocks_after_max_attempts() {
+        let a = AuthState::new(
+            Some(hash_of("hunter2")),
+            3600,
+            3,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+        let ip = IpAddr::from([9, 9, 9, 9]);
+        for _ in 0..3 {
+            a.note_failure(ip);
+        }
+        assert!(a.is_locked(ip));
+        assert!(!a.is_locked(IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn invalid_phc_hash_never_authenticates() {
+        let a = AuthState::new(
+            Some("not-a-valid-phc-hash".into()),
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+        assert!(a.enabled());
+        assert!(login(&a, "anything").is_none());
+    }
+
+    #[test]
+    fn poisoned_auth_fails_closed_until_valid_hash_replacement() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let a = AuthState::new(
+            Some(hash_of("old-password")),
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = a.password_hash.write().unwrap();
+            panic!("simulate panic while mutating auth state");
+        }));
+
+        assert!(a.enabled(), "poisoned state must keep auth enabled");
+        assert!(
+            a.verify_password("old-password").is_none(),
+            "poisoned state must deny login"
+        );
+
+        a.set_password_hash(Some(hash_of("new-password")));
+        assert!(a.enabled());
+        assert!(a.verify_password("old-password").is_none());
+        assert!(
+            a.verify_password("new-password").is_some(),
+            "explicit replacement should clear poison and restore login"
+        );
+    }
+
+    #[test]
+    fn oversized_password_is_rejected() {
+        let a = AuthState::new(
+            Some(hash_of("hunter2")),
+            3600,
+            50,
+            16,
+            vec![],
+            true,
+            Arc::new(ramshield_metrics::Metrics::new()),
+            4,
+        );
+        assert!(a.verify_password(&"x".repeat(32)).is_none());
+    }
+
+    #[test]
+    fn sanitize_html_neutralizes_markup() {
+        let s = sanitize_html(r#"<script>alert(1)</script>&""#);
+        assert!(!s.contains('<') && !s.contains('>'), "{s}");
+        assert!(s.contains("&amp;"), "{s}");
+    }
+
+    #[test]
+    fn deployment_defaults_are_loopback_with_finite_ttl_and_lockout() {
+        let d = ramshield_config::DashboardConfig::default();
+        assert!(
+            d.http_addr.starts_with("127.0.0.1"),
+            "default bind must be loopback: {}",
+            d.http_addr
+        );
+        assert_eq!(d.session_ttl_secs, 28_800);
+        assert_eq!(d.max_login_attempts, 50);
+        assert!(d.admin_password_hash.is_none());
+        assert_eq!(d.cookie_secure, None);
     }
 }

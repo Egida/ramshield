@@ -2,6 +2,46 @@ use super::*;
 use serial_test::serial;
 
 #[test]
+fn pre_aggregation_map_size_has_hard_ceiling() {
+    let mut cfg = Config::default();
+    cfg.detection.pre_aggs_max_size = 1_000_000;
+    cfg.validate().expect("documented ceiling must be accepted");
+
+    cfg.detection.pre_aggs_max_size = 1_000_001;
+    let err = cfg
+        .validate()
+        .expect_err("size above ceiling must be rejected");
+    assert!(err.to_string().contains("pre_aggs_max_size"), "{err}");
+
+    cfg.detection.pre_aggs_max_size = usize::MAX;
+    let err = cfg
+        .validate()
+        .expect_err("effectively unbounded pre-aggregation must be rejected");
+    assert!(err.to_string().contains("pre_aggs_max_size"), "{err}");
+}
+
+#[test]
+fn forecasting_seasonality_has_hard_allocation_ceiling() {
+    let mut cfg = Config::default();
+    cfg.forecasting.enabled = true;
+    cfg.forecasting.seasonality_period = 86_400;
+    cfg.validate()
+        .expect("one-day seasonal vector must be accepted");
+
+    cfg.forecasting.seasonality_period = 86_401;
+    let err = cfg
+        .validate()
+        .expect_err("seasonal vector above one day must be rejected");
+    assert!(err.to_string().contains("seasonality_period"), "{err}");
+
+    cfg.forecasting.seasonality_period = usize::MAX;
+    let err = cfg
+        .validate()
+        .expect_err("effectively unbounded seasonal vector must be rejected");
+    assert!(err.to_string().contains("seasonality_period"), "{err}");
+}
+
+#[test]
 fn wal_volatile_fallback_defaults_false() {
     assert!(!WalConfig::default().allow_volatile_fallback);
     let parsed: WalConfig = toml::from_str(
@@ -220,6 +260,7 @@ fn clear_env_vars() {
         "RAMSHIELD_DASHBOARD__ENABLED",
         "RAMSHIELD_DASHBOARD__HTTP_ADDR",
         "RAMSHIELD_FORECASTING__ENABLED",
+        "RAMSHIELD_SYNPROXY__PORTS",
     ];
     for k in &keys {
         unsafe {
@@ -427,5 +468,59 @@ fn env_override_invalid_value_is_rejected() {
         err.to_string().contains("RAMSHIELD_ENGINE__RAM_LIMIT_MB"),
         "{err}"
     );
+    clear_env_vars();
+}
+
+#[test]
+#[serial]
+fn env_override_invalid_synproxy_port_is_rejected() {
+    clear_env_vars();
+    unsafe {
+        std::env::set_var("RAMSHIELD_SYNPROXY__PORTS", "80,not-a-port,443");
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let err =
+        Config::load(tmpfile).expect_err("malformed SYNPROXY port override must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("RAMSHIELD_SYNPROXY__PORTS"), "{message}");
+    assert!(message.contains("item 2"), "{message}");
+    clear_env_vars();
+}
+
+#[test]
+#[serial]
+fn env_override_blank_synproxy_ports_clears_defaults() {
+    clear_env_vars();
+    unsafe {
+        std::env::set_var("RAMSHIELD_SYNPROXY__PORTS", "  ");
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let cfg = Config::load(tmpfile).expect("blank list explicitly clears SYNPROXY ports");
+    assert!(cfg.synproxy.ports.is_empty());
+    clear_env_vars();
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn env_override_non_unicode_synproxy_ports_is_rejected() {
+    use std::os::unix::ffi::OsStringExt;
+
+    clear_env_vars();
+    unsafe {
+        std::env::set_var(
+            "RAMSHIELD_SYNPROXY__PORTS",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+    }
+    let tmpfile = "/tmp/ramshield_test_config.toml";
+    std::fs::write(tmpfile, "").unwrap();
+    let err =
+        Config::load(tmpfile).expect_err("non-UTF-8 SYNPROXY port override must fail startup");
+    let message = err.to_string();
+    assert!(message.contains("RAMSHIELD_SYNPROXY__PORTS"), "{message}");
+    assert!(message.contains("not valid UTF-8"), "{message}");
     clear_env_vars();
 }

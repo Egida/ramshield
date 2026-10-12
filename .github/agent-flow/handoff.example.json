@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "task_id": "PR19-B1",
+  "role": "coordinator",
+  "status": "blocked",
+  "head_sha": "dff085bd591be27e4df90074f8e121492bd27cdb",
+  "summary": "Example handoff only; not evidence that the recovery task is verified.",
+  "changed_files": [],
+  "checks": [
+    {
+      "name": "exact-head CI",
+      "outcome": "not_run"
+    },
+    {
+      "name": "independent review",
+      "outcome": "not_run"
+    }
+  ],
+  "blockers": [
+    "Fixture only; replace with evidence from the actual candidate before using a handoff operationally."
+  ],
+  "created_at": "2026-10-12T12:00:00Z"
+}
