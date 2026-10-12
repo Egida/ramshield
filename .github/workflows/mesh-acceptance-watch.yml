@@ -226,10 +226,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout candidate
+      - name: Checkout candidate with history for diff checks
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.candidate_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@v1
         with:
