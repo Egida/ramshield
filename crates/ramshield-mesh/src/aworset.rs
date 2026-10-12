@@ -885,6 +885,29 @@ mod tests {
     }
 
     #[test]
+    fn exported_recovery_snapshot_is_immutable_after_capture() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip_a = IpAddr::from([192, 0, 2, 70]);
+        let ip_b = IpAddr::from([192, 0, 2, 71]);
+        mesh.record_ban(ip_a, 60_000, 1);
+
+        let captured = mesh.export_snapshot();
+        let captured_bytes = serde_json::to_vec(&captured).expect("serialize captured snapshot");
+
+        mesh.record_unban(ip_a);
+        mesh.record_ban(ip_b, 60_000, 2);
+
+        assert_eq!(
+            serde_json::to_vec(&captured).expect("serialize captured snapshot again"),
+            captured_bytes,
+            "mutations after capture must not alter the recovery payload"
+        );
+        assert_eq!(captured.blocks.len(), 1);
+        assert_eq!(captured.blocks[0].ip, ip_a);
+        assert!(mesh.is_blocked(&ip_b, now_ms()));
+    }
+
+    #[test]
     fn snapshot_carries_active_dot_and_tombstone() {
         let mesh = AworsetBlocklist::new(7);
         let ip = IpAddr::from([192, 0, 2, 7]);
