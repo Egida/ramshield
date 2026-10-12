@@ -43,7 +43,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: mesh-acceptance-watch-${{ github.event_name == 'schedule' && 'nightly-audit-branch' || github.ref }}
+  # Keep concurrency deterministic without conditional expression parsing.
+  group: mesh-acceptance-watch-${{ github.ref }}
   cancel-in-progress: false
 
 env:
