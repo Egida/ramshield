@@ -60,6 +60,17 @@ impl MeshApplyReport {
     }
 }
 
+fn capture_mesh_recovery_snapshot(
+    wal: &ramshield_storage::wal::Wal,
+    shared: Option<&Arc<ramshield_storage::checkpoint_shared::CheckpointShared>>,
+    blocklist: Option<&Arc<ramshield_mesh::aworset::AworsetBlocklist>>,
+) -> Option<(u64, ramshield_mesh::aworset::AworsetSnapshot)> {
+    let shared = shared?;
+    let blocklist = blocklist?;
+    let _guard = shared.barrier.lock().unwrap_or_else(|error| error.into_inner());
+    Some((wal.durable_lsn(), blocklist.export_snapshot()))
+}
+
 impl EnforcementService {
     /// Apply a tombstone that does not release the effective IP because
     /// another origin dot is still live. WAL append, fsync and CRDT merge are
@@ -106,11 +117,18 @@ impl EnforcementService {
         };
         let cursors = self.mesh_wal_cursors.clone();
         let inflight = self.mesh_wal_inflight.clone();
+        let checkpoint_shared = self.checkpoint_shared.clone();
+        let blocklist = self.mesh_blocklist.clone();
 
         for peer in handle.peers() {
-            // Never advance/replay the WAL tail merely because every snapshot
-            // frame was ACKed. Resume only after the receiver-wide recovery
-            // completion handshake clears this pending state.
+            if let Some((generation, boundary_lsn)) = handle.completed_recovery(peer).await {
+                if let Ok(mut values) = cursors.lock() {
+                    let current = values.get(&peer).copied().unwrap_or(0);
+                    values.insert(peer, current.max(boundary_lsn));
+                    drop(values);
+                    handle.acknowledge_recovery_cursor(peer, generation, boundary_lsn).await;
+                }
+            }
             if handle.recovery_completion_pending(peer).await {
                 continue;
             }
@@ -135,6 +153,9 @@ impl EnforcementService {
                     peer,
                     peers: peer_inflight,
                 };
+                let capture_recovery = || capture_mesh_recovery_snapshot(
+                    &peer_wal, peer_checkpoint_shared.as_ref(), peer_blocklist.as_ref()
+                );
                 let next_cursor = async {
                     let latest_lsn = peer_wal.durable_lsn();
                     if cursor >= latest_lsn {
@@ -147,14 +168,13 @@ impl EnforcementService {
                         None => cursor < latest_lsn,
                     };
                     if history_gap {
-                        peer_handle.request_full_sync(peer, latest_lsn).await;
-                        warn!(
-                            peer = %peer,
-                            cursor_lsn = cursor,
-                            oldest_lsn = ?oldest_lsn,
-                            boundary_lsn = latest_lsn,
-                            "mesh WAL cursor fell behind retention; requested full CRDT anti-entropy and retained cursor pending completion"
-                        );
+                        let Some((boundary_lsn, snapshot)) = capture_recovery() else {
+                            warn!(peer = %peer, "recovery snapshot capture unavailable; do not advance cursor");
+                            return None;
+                        };
+                        peer_handle.request_full_sync(peer, boundary_lsn, snapshot).await;
+                        warn!(peer = %peer, cursor_lsn = cursor, oldest_lsn = ?oldest_lsn, boundary_lsn,
+                            "retention gap recovery requested; awaiting receiver proof");
                         return None;
                     }
 
@@ -175,24 +195,23 @@ impl EnforcementService {
                         }
                     };
                     if records.is_empty() {
-                        peer_handle.request_full_sync(peer, latest_lsn).await;
-                        warn!(
-                            peer = %peer,
-                            cursor_lsn = cursor,
-                            boundary_lsn = latest_lsn,
-                            "mesh WAL page is empty despite an outstanding tail; requested CRDT anti-entropy and retained cursor pending completion"
-                        );
+                        let Some((boundary_lsn, snapshot)) = capture_recovery() else {
+                            warn!(peer = %peer, "recovery snapshot capture unavailable; do not advance cursor");
+                            return None;
+                        };
+                        peer_handle.request_full_sync(peer, boundary_lsn, snapshot).await;
+                        warn!(peer = %peer, cursor_lsn = cursor, boundary_lsn,
+                            "empty WAL page with outstanding tail; awaiting receiver proof");
                         return None;
                     }
                     if records[0].0 > cursor.saturating_add(1) {
-                        peer_handle.request_full_sync(peer, latest_lsn).await;
-                        warn!(
-                            peer = %peer,
-                            cursor_lsn = cursor,
-                            first_lsn = records[0].0,
-                            boundary_lsn = latest_lsn,
-                            "mesh WAL page exposed a history gap; requested CRDT anti-entropy and retained cursor pending completion"
-                        );
+                        let Some((boundary_lsn, snapshot)) = capture_recovery() else {
+                            warn!(peer = %peer, "recovery snapshot capture unavailable; do not advance cursor");
+                            return None;
+                        };
+                        peer_handle.request_full_sync(peer, boundary_lsn, snapshot).await;
+                        warn!(peer = %peer, cursor_lsn = cursor, first_lsn = records[0].0, boundary_lsn,
+                            "WAL page gap detected; awaiting receiver proof");
                         return None;
                     }
                     let start_lsn = records[0].0;

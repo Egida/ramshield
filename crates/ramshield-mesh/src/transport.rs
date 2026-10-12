@@ -2,12 +2,12 @@ use crate::aworset::{AworsetBlocklist, AworsetSnapshot, ClusterBlockDelta, Clust
 use crate::condition_sync::{ConditionSyncPlanner, SyncCondition, SyncPolicy};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -23,6 +23,10 @@ type HmacSha256 = Hmac<Sha256>;
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_CLOCK_SKEW_MS: u64 = 30_000;
 const MAX_SYNC_FRAME_ENTRIES: usize = 16;
+const MAX_RECOVERY_ENTRIES: usize = 65_536;
+const MAX_RECOVERY_TOTAL_ENTRIES: usize = 65_536;
+const MAX_RECOVERY_FRAMES: usize = 8_192;
+const MAX_RECOVERY_TOTAL_FRAMES: usize = 8_192;
 const MAX_INCOMING_QUEUE: usize = 2048;
 const MAX_PEER_READERS: usize = 256;
 const MAX_CONFIGURED_PEERS: usize = 256;
@@ -70,6 +74,58 @@ pub enum MeshMessage {
 /// Result of attempting to deliver a mesh message to one configured peer.
 /// `Written` means the receiver returned an authenticated application ACK after
 /// durable acceptance (or intentional stale/policy rejection), not just TCP write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum WireMessage {
+    Standard(MeshMessage),
+    Recovery(RecoveryWireMessage),
+}
+
+impl From<MeshMessage> for WireMessage {
+    fn from(message: MeshMessage) -> Self { Self::Standard(message) }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RecoveryWireMessage {
+    Frame {
+        generation: u64,
+        recovery_id: uuid::Uuid,
+        boundary_lsn: u64,
+        snapshot_digest: String,
+        frame_index: u32,
+        frame_count: u32,
+        blocks: Vec<ClusterBlockDelta>,
+        unblocks: Vec<ClusterUnblockDelta>,
+    },
+    Complete {
+        generation: u64,
+        recovery_id: uuid::Uuid,
+        boundary_lsn: u64,
+        snapshot_digest: String,
+        frame_count: u32,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum ReceivedRecovery {
+    Frame {
+        generation: u64,
+        recovery_id: uuid::Uuid,
+        boundary_lsn: u64,
+        snapshot_digest: String,
+        frame_index: u32,
+        frame_count: u32,
+    },
+    Complete {
+        generation: u64,
+        recovery_id: uuid::Uuid,
+        boundary_lsn: u64,
+        snapshot_digest: String,
+        frame_count: u32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerSendOutcome {
     Written,
@@ -119,54 +175,116 @@ impl BroadcastReport {
 struct Envelope {
     ts_ms: u64,
     node_id: u32,
-    body: MeshMessage,
+    body: WireMessage,
     mac: String,
 }
 struct PeerSyncState {
     planner: ConditionSyncPlanner,
     recovery_snapshot: Option<Arc<AworsetSnapshot>>,
     delivery_failed: bool,
-    /// Invalidates an in-flight repair when retention recovery requests a fixed
-    /// snapshot, preventing an older completion from finishing the new generation.
     generation: u64,
-    /// Sender WAL boundary captured when the recovery attempt starts.
     recovery_boundary_lsn: Option<u64>,
-    /// Local snapshot transfer finished after frame ACKs; awaiting enforcement consumption.
-    /// This is not yet a receiver-confirmed generation/boundary/digest handshake.
-    acked_recovery_transfer: Option<(u64, u64)>,
+    recovery_id: Option<uuid::Uuid>,
+    completed_recovery: Option<(u64, u64)>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RecoveryProof {
+    generation: u64,
+    recovery_id: uuid::Uuid,
+    boundary_lsn: u64,
+    snapshot_digest: String,
+    frame_count: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryContext {
+    generation: u64,
+    recovery_id: uuid::Uuid,
+    boundary_lsn: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoveryFramePayload {
+    blocks: Vec<ClusterBlockDelta>,
+    unblocks: Vec<ClusterUnblockDelta>,
+}
+
+struct RecoveryAssembly {
+    generation: u64,
+    recovery_id: uuid::Uuid,
+    boundary_lsn: u64,
+    snapshot_digest: String,
+    frame_count: u32,
+    frames: Vec<Option<RecoveryFramePayload>>,
+    entry_count: usize,
+    completed_proof: Option<RecoveryProof>,
+}
+
+#[derive(Debug, Clone)]
 struct AckResponse {
     accepted: bool,
     ack_lsn: Option<u64>,
+    recovery_proof: Option<RecoveryProof>,
 }
 
 struct IncomingFrame {
+    sender_node_id: u32,
     message: MeshMessage,
+    recovery: Option<ReceivedRecovery>,
     ack: oneshot::Sender<AckResponse>,
 }
 
 pub struct ReceivedMeshMessage {
     pub message: MeshMessage,
+    sender_node_id: u32,
+    recovery: Option<ReceivedRecovery>,
+    blocklist: Arc<AworsetBlocklist>,
+    receiver_recovery: Arc<StdMutex<HashMap<u32, RecoveryAssembly>>>,
     ack: Option<oneshot::Sender<AckResponse>>,
 }
 
 impl ReceivedMeshMessage {
-    /// Complete the receive-side application handshake. True means the
-    /// mutation was durably accepted (or intentionally ignored as stale/policy
-    /// suppressed); false asks the sender to retry the frame.
     pub fn acknowledge(self, accepted: bool) {
         self.acknowledge_with_lsn(accepted, None);
     }
 
-    /// Acknowledge a WAL batch through the sender's local LSN. The LSN is
-    /// meaningful only to the sender and is never compared with receiver LSNs.
     pub fn acknowledge_with_lsn(mut self, accepted: bool, ack_lsn: Option<u64>) {
+        let mut accepted = accepted;
+        let mut recovery_proof = None;
+        match self.recovery.as_ref() {
+            Some(ReceivedRecovery::Frame {
+                generation, recovery_id, boundary_lsn, snapshot_digest, frame_index, frame_count,
+            }) if accepted => {
+                if let MeshMessage::Sync { blocks, unblocks } = &self.message {
+                    let now = now_ms();
+                    let crdt_applied = blocks.iter().all(|delta| {
+                        delta.expires_at_ms <= now || !self.blocklist.needs_merge_delta(delta)
+                    }) && unblocks.iter().all(|delta| !self.blocklist.needs_merge_unblock(delta));
+                    accepted = crdt_applied && record_recovery_frame(
+                        &self.receiver_recovery, self.sender_node_id, *generation, *recovery_id,
+                        *boundary_lsn, snapshot_digest, *frame_index, *frame_count, blocks, unblocks,
+                    );
+                } else {
+                    accepted = false;
+                }
+            }
+            Some(ReceivedRecovery::Complete {
+                generation, recovery_id, boundary_lsn, snapshot_digest, frame_count,
+            }) if accepted => {
+                recovery_proof = complete_recovery(
+                    &self.receiver_recovery, self.sender_node_id, *generation, *recovery_id,
+                    *boundary_lsn, snapshot_digest, *frame_count,
+                );
+                accepted = recovery_proof.is_some();
+            }
+            _ => {}
+        }
         if let Some(ack) = self.ack.take() {
             let _ = ack.send(AckResponse {
                 accepted,
                 ack_lsn: if accepted { ack_lsn } else { None },
+                recovery_proof: if accepted { recovery_proof } else { None },
             });
         }
     }
@@ -178,7 +296,95 @@ struct AckEnvelope {
     node_id: u32,
     accepted: bool,
     ack_lsn: Option<u64>,
+    #[serde(default)]
+    recovery_proof: Option<RecoveryProof>,
     mac: String,
+}
+
+fn record_recovery_frame(
+    sessions: &Arc<StdMutex<HashMap<u32, RecoveryAssembly>>>,
+    sender_node_id: u32,
+    generation: u64,
+    recovery_id: uuid::Uuid,
+    boundary_lsn: u64,
+    snapshot_digest: &str,
+    frame_index: u32,
+    frame_count: u32,
+    blocks: &[ClusterBlockDelta],
+    unblocks: &[ClusterUnblockDelta],
+) -> bool {
+    let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
+    let index = frame_index as usize;
+    let frame_count_usize = frame_count as usize;
+    let payload = RecoveryFramePayload { blocks: blocks.to_vec(), unblocks: unblocks.to_vec() };
+    let added = blocks.len().saturating_add(unblocks.len());
+    let total_entries: usize = sessions.values().map(|session| session.entry_count).sum();
+    let total_frames: usize = sessions.values().map(|session| session.frames.len()).sum();
+
+    if let Some(current) = sessions.get_mut(&sender_node_id) {
+        if current.generation == generation && current.recovery_id == recovery_id {
+            if current.boundary_lsn != boundary_lsn
+                || current.snapshot_digest != snapshot_digest
+                || current.frame_count != frame_count
+                || index >= current.frames.len()
+            { return false; }
+            if let Some(existing) = current.frames[index].as_ref() { return existing == &payload; }
+            if current.entry_count.saturating_add(added) > MAX_RECOVERY_ENTRIES
+                || total_entries.saturating_add(added) > MAX_RECOVERY_TOTAL_ENTRIES
+            { return false; }
+            current.frames[index] = Some(payload);
+            current.entry_count += added;
+            return true;
+        }
+        if generation <= current.generation || boundary_lsn < current.boundary_lsn || frame_index != 0 {
+            return false;
+        }
+    } else if frame_index != 0 || sessions.len() >= MAX_CONFIGURED_PEERS {
+        return false;
+    }
+
+    let old_entries = sessions.get(&sender_node_id).map(|s| s.entry_count).unwrap_or(0);
+    let old_frames = sessions.get(&sender_node_id).map(|s| s.frames.len()).unwrap_or(0);
+    if total_entries.saturating_sub(old_entries).saturating_add(added) > MAX_RECOVERY_TOTAL_ENTRIES
+        || total_frames.saturating_sub(old_frames).saturating_add(frame_count_usize) > MAX_RECOVERY_TOTAL_FRAMES
+    { return false; }
+    let mut frames = vec![None; frame_count_usize];
+    frames[index] = Some(payload);
+    sessions.insert(sender_node_id, RecoveryAssembly {
+        generation, recovery_id, boundary_lsn, snapshot_digest: snapshot_digest.to_owned(),
+        frame_count, frames, entry_count: added, completed_proof: None,
+    });
+    true
+}
+
+fn complete_recovery(
+    sessions: &Arc<StdMutex<HashMap<u32, RecoveryAssembly>>>,
+    sender_node_id: u32,
+    generation: u64,
+    recovery_id: uuid::Uuid,
+    boundary_lsn: u64,
+    snapshot_digest: &str,
+    frame_count: u32,
+) -> Option<RecoveryProof> {
+    let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
+    let session = sessions.get_mut(&sender_node_id)?;
+    if session.generation != generation || session.recovery_id != recovery_id
+        || session.boundary_lsn != boundary_lsn || session.snapshot_digest != snapshot_digest
+        || session.frame_count != frame_count
+    { return None; }
+    if let Some(proof) = session.completed_proof.as_ref() { return Some(proof.clone()); }
+    if session.frames.iter().any(Option::is_none) { return None; }
+    let mut snapshot = AworsetSnapshot::default();
+    for frame in session.frames.iter().flatten() {
+        snapshot.blocks.extend(frame.blocks.iter().cloned());
+        snapshot.unblocks.extend(frame.unblocks.iter().cloned());
+    }
+    let snapshot = canonical_snapshot(snapshot).ok()?;
+    let digest = canonical_snapshot_digest(&snapshot).ok()?;
+    if digest != snapshot_digest { return None; }
+    let proof = RecoveryProof { generation, recovery_id, boundary_lsn, snapshot_digest: digest, frame_count };
+    session.completed_proof = Some(proof.clone());
+    Some(proof)
 }
 
 #[derive(Clone)]
@@ -192,6 +398,7 @@ pub struct MeshHandle {
     writers: Arc<Semaphore>,
     shutdown_tx: watch::Sender<bool>,
     sync_states: Arc<Mutex<HashMap<SocketAddr, PeerSyncState>>>,
+    receiver_recovery: Arc<StdMutex<HashMap<u32, RecoveryAssembly>>>,
     sync_epoch: Instant,
 }
 
@@ -216,9 +423,10 @@ impl MeshHandle {
                                 planner,
                                 recovery_snapshot: None,
                                 delivery_failed: false,
-                                generation: 0,
+                                generation: now_ms(),
                                 recovery_boundary_lsn: None,
-                                acked_recovery_transfer: None,
+                                recovery_id: None,
+                                completed_recovery: None,
                             },
                         )
                     })
@@ -237,6 +445,7 @@ impl MeshHandle {
             writers: Arc::new(Semaphore::new(MAX_PEER_WRITERS)),
             shutdown_tx,
             sync_states: Arc::new(Mutex::new(sync_states)),
+            receiver_recovery: Arc::new(StdMutex::new(HashMap::new())),
             sync_epoch: Instant::now(),
         };
         let accept_handle = handle.clone();
@@ -300,42 +509,52 @@ impl MeshHandle {
         self.peers.as_ref().clone()
     }
 
-    /// Request a full CRDT anti-entropy rotation for a peer after its WAL
-    /// history fell behind retention. The boundary is fixed for the lifetime
-    /// of the attempt; repeated tick calls must not restart an in-flight repair.
-    pub async fn request_full_sync(&self, peer: SocketAddr, boundary_lsn: u64) {
+    pub async fn request_full_sync(
+        &self,
+        peer: SocketAddr,
+        boundary_lsn: u64,
+        snapshot: AworsetSnapshot,
+    ) {
+        if snapshot.blocks.len().saturating_add(snapshot.unblocks.len()) > MAX_RECOVERY_ENTRIES {
+            warn!(peer = %peer, max_entries = MAX_RECOVERY_ENTRIES, "recovery snapshot exceeds bounded protocol limit; cursor remains pinned");
+            return;
+        }
+        let snapshot = match canonical_snapshot(snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(error) => { warn!(peer = %peer, error, "invalid recovery snapshot"); return; }
+        };
         let now = self.sync_epoch.elapsed();
         if let Some(state) = self.sync_states.lock().await.get_mut(&peer)
             && state.recovery_boundary_lsn.is_none()
-            && state.acked_recovery_transfer.is_none()
+            && state.completed_recovery.is_none()
         {
-            state.generation = state.generation.wrapping_add(1);
-            state.recovery_snapshot = Some(Arc::new(self.blocklist.export_snapshot()));
+            let Some(generation) = state.generation.checked_add(1) else {
+                warn!(peer = %peer, "recovery generation overflow; refusing reuse");
+                return;
+            };
+            state.generation = generation;
+            state.recovery_id = Some(uuid::Uuid::new_v4());
+            state.recovery_snapshot = Some(Arc::new(snapshot));
             state.recovery_boundary_lsn = Some(boundary_lsn);
             state.planner.condition(SyncCondition::LocalMutation, now);
         }
     }
 
-    /// True while WAL replay must remain paused for a retention-gap recovery.
-    /// Per-frame ACKs are not a substitute for the receiver-wide completion proof.
     pub async fn recovery_completion_pending(&self, peer: SocketAddr) -> bool {
-        self.sync_states
-            .lock()
-            .await
-            .get(&peer)
-            .is_some_and(|state| {
-                state.recovery_boundary_lsn.is_some() || state.acked_recovery_transfer.is_some()
-            })
+        self.sync_states.lock().await.get(&peer).is_some_and(|state| {
+            state.recovery_boundary_lsn.is_some() || state.completed_recovery.is_some()
+        })
     }
 
-    /// Inspect the locally ACKed transfer marker without clearing the recovery
-    /// gate. Only a future receiver-wide completion handshake may release it.
-    pub async fn acked_recovery_transfer(&self, peer: SocketAddr) -> Option<(u64, u64)> {
-        self.sync_states
-            .lock()
-            .await
-            .get(&peer)
-            .and_then(|state| state.acked_recovery_transfer)
+    pub async fn completed_recovery(&self, peer: SocketAddr) -> Option<(u64, u64)> {
+        self.sync_states.lock().await.get(&peer).and_then(|state| state.completed_recovery)
+    }
+
+    pub async fn acknowledge_recovery_cursor(&self, peer: SocketAddr, generation: u64, boundary_lsn: u64) {
+        let mut states = self.sync_states.lock().await;
+        if let Some(state) = states.get_mut(&peer)
+            && state.completed_recovery == Some((generation, boundary_lsn))
+        { state.completed_recovery = None; }
     }
 
     /// Send a WAL batch and return the sender-local LSN durably acknowledged
@@ -345,20 +564,12 @@ impl MeshHandle {
         peer: SocketAddr,
         body: MeshMessage,
     ) -> std::io::Result<Option<u64>> {
-        let _permit = self
-            .writers
-            .clone()
-            .acquire_owned()
-            .await
+        let _permit = self.writers.clone().acquire_owned().await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        tokio::time::timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to_ack(peer, body))
+        let response = tokio::time::timeout(MAX_PEER_WRITE_TIMEOUT, self.send_to_ack(peer, body))
             .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "mesh WAL batch acknowledgement timed out",
-                )
-            })?
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "mesh WAL batch ACK timed out"))??;
+        Ok(response.ack_lsn)
     }
 
     /// Send to configured peers and return one explicit outcome per peer.
@@ -459,6 +670,10 @@ impl MeshHandle {
         q.drain(..)
             .map(|frame| ReceivedMeshMessage {
                 message: frame.message,
+                sender_node_id: frame.sender_node_id,
+                recovery: frame.recovery,
+                blocklist: self.blocklist.clone(),
+                receiver_recovery: self.receiver_recovery.clone(),
                 ack: Some(frame.ack),
             })
             .collect()
@@ -502,84 +717,77 @@ impl MeshHandle {
 
     async fn broadcast_sync(&self) {
         let now = self.sync_epoch.elapsed();
-        let due_peers: Vec<(SocketAddr, Option<Arc<AworsetSnapshot>>, u64)> = {
+        let due: Vec<(SocketAddr, Option<Arc<AworsetSnapshot>>, Option<RecoveryContext>)> = {
             let mut states = self.sync_states.lock().await;
-            states
-                .iter_mut()
-                .filter_map(|(peer, state)| {
-                    state.planner.take_due(now).map(|_| {
-                        (*peer, state.recovery_snapshot.clone(), state.generation)
-                    })
+            states.iter_mut().filter_map(|(peer, state)| {
+                state.planner.take_due(now).map(|_| {
+                    let recovery = state.recovery_boundary_lsn.zip(state.recovery_id)
+                        .map(|(boundary_lsn, recovery_id)| RecoveryContext {
+                            generation: state.generation, recovery_id, boundary_lsn,
+                        });
+                    (*peer, state.recovery_snapshot.clone(), recovery)
                 })
-                .collect()
+            }).collect()
         };
-        if due_peers.is_empty() {
-            return;
-        }
-
-        // One full immutable snapshot per peer/repair attempt. The transport
-        // splits it into bounded frames, but does not page a live mutable map.
-        // Each frame requires a receiver application ACK before the repair can
-        // complete; a failed frame causes the fixed recovery snapshot to retry.
+        if due.is_empty() { return; }
         let mut tasks = JoinSet::new();
-        for (peer, snapshot, generation) in due_peers.iter().cloned() {
+        for (peer, snapshot, recovery) in due.iter().cloned() {
             let handle = self.clone();
             tasks.spawn(async move {
-                let success = handle.send_sync_snapshot(peer, snapshot).await;
-                (peer, success, generation)
+                let (success, proof) = handle.send_sync_snapshot(peer, snapshot, recovery.clone()).await;
+                (peer, success, proof, recovery)
             });
         }
-
-        let mut completed = Vec::with_capacity(due_peers.len());
+        let mut finished = Vec::new();
         while let Some(joined) = tasks.join_next().await {
             match joined {
-                Ok((peer, success, generation)) => {
-                    completed.push(peer);
-                    let completed_at = self.sync_epoch.elapsed();
+                Ok((peer, success, proof, recovery)) => {
+                    finished.push(peer);
+                    let at = self.sync_epoch.elapsed();
                     let mut states = self.sync_states.lock().await;
                     if let Some(state) = states.get_mut(&peer) {
-                        if state.generation == generation {
-                            state.planner.complete(completed_at, success);
-                            state.delivery_failed = !success;
-                            if success {
-                                if let Some(boundary_lsn) = state.recovery_boundary_lsn.take() {
-                                    state.acked_recovery_transfer = Some((generation, boundary_lsn));
-                                    state.recovery_snapshot = None;
-                                }
-                            }
-                        } else {
-                            // A newer fixed-boundary recovery superseded this send.
-                            state.planner.complete(completed_at, true);
+                        if recovery.as_ref().is_some_and(|ctx| ctx.generation != state.generation) {
+                            state.planner.complete(at, true);
                             state.delivery_failed = false;
-                            state
-                                .planner
-                                .condition(SyncCondition::LocalMutation, completed_at);
+                            state.planner.condition(SyncCondition::LocalMutation, at);
+                            continue;
+                        }
+                        let proof_matches = match (recovery.as_ref(), proof.as_ref()) {
+                            (None, None) => true,
+                            (Some(ctx), Some(proof)) => proof.generation == ctx.generation
+                                && proof.recovery_id == ctx.recovery_id
+                                && proof.boundary_lsn == ctx.boundary_lsn
+                                && state.recovery_boundary_lsn == Some(ctx.boundary_lsn)
+                                && state.recovery_id == Some(ctx.recovery_id),
+                            _ => false,
+                        };
+                        let success = success && proof_matches;
+                        state.planner.complete(at, success);
+                        state.delivery_failed = !success;
+                        if success {
+                            if let Some(ctx) = recovery {
+                                state.completed_recovery = Some((ctx.generation, ctx.boundary_lsn));
+                                state.recovery_boundary_lsn = None;
+                                state.recovery_snapshot = None;
+                                state.recovery_id = None;
+                            }
                         }
                     }
                 }
-                Err(error) => {
-                    warn!(error = %error, "condition-driven mesh sync task failed");
-                }
+                Err(error) => warn!(error = %error, "condition-driven mesh sync task failed"),
             }
         }
-
-        let completed_at = self.sync_epoch.elapsed();
+        let at = self.sync_epoch.elapsed();
         let mut states = self.sync_states.lock().await;
-        for (peer, _, generation) in due_peers {
-            if completed.contains(&peer) {
-                continue;
-            }
+        for (peer, _, recovery) in due {
+            if finished.contains(&peer) { continue; }
+            let superseded = recovery.as_ref().is_some_and(|ctx| {
+                ctx.generation != states.get(&peer).map(|s| s.generation).unwrap_or(0)
+            });
             if let Some(state) = states.get_mut(&peer) {
-                if state.generation == generation {
-                    state.planner.complete(completed_at, false);
-                    state.delivery_failed = true;
-                } else {
-                    state.planner.complete(completed_at, true);
-                    state.delivery_failed = false;
-                    state
-                        .planner
-                        .condition(SyncCondition::LocalMutation, completed_at);
-                }
+                state.planner.complete(at, superseded);
+                state.delivery_failed = !superseded;
+                if superseded { state.planner.condition(SyncCondition::LocalMutation, at); }
             }
         }
     }
@@ -588,73 +796,108 @@ impl MeshHandle {
         &self,
         peer: SocketAddr,
         fixed_snapshot: Option<Arc<AworsetSnapshot>>,
-    ) -> bool {
+        recovery: Option<RecoveryContext>,
+    ) -> (bool, Option<RecoveryProof>) {
         let started = Instant::now();
-        let is_recovery = fixed_snapshot.is_some();
-        let snapshot = fixed_snapshot
-            .unwrap_or_else(|| Arc::new(self.blocklist.export_snapshot()));
-        let block_count = snapshot.blocks.len();
-        let tombstone_count = snapshot.unblocks.len();
-        let mut messages = chunk_sync(&snapshot.blocks, &snapshot.unblocks);
-        if messages.is_empty() {
-            // Even an empty snapshot must be application-acknowledged so the
-            // sender does not treat a failed connection as successful repair.
-            messages.push(MeshMessage::Sync {
-                blocks: Vec::new(),
-                unblocks: Vec::new(),
-            });
+        if recovery.is_some() && fixed_snapshot.is_none() {
+            warn!(peer = %peer, "recovery metadata without fixed snapshot");
+            return (false, None);
         }
-
-        let frame_count = messages.len();
-        let mut shutdown = self.shutdown_tx.subscribe();
-        if *shutdown.borrow() {
-            return false;
+        let is_recovery = recovery.is_some();
+        let snapshot = fixed_snapshot.unwrap_or_else(|| Arc::new(self.blocklist.export_snapshot()));
+        let blocks_count = snapshot.blocks.len();
+        let tombstones_count = snapshot.unblocks.len();
+        if is_recovery && blocks_count.saturating_add(tombstones_count) > MAX_RECOVERY_ENTRIES {
+            warn!(peer = %peer, blocks_count, tombstones_count, "snapshot exceeds bounded recovery entry limit");
+            return (false, None);
         }
-        let permit = tokio::select! {
-            permit = self.writers.clone().acquire_owned() => match permit {
-                Ok(permit) => permit,
-                Err(_) => return false,
-            },
-            _ = shutdown.changed() => return false,
+        let canonical = match canonical_snapshot(snapshot.as_ref().clone()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => { warn!(peer = %peer, error, "invalid fixed snapshot"); return (false, None); }
         };
-
-        for (frame_index, message) in messages.into_iter().enumerate() {
+        let mut messages = chunk_sync(&canonical.blocks, &canonical.unblocks);
+        if messages.is_empty() {
+            messages.push(MeshMessage::Sync { blocks: Vec::new(), unblocks: Vec::new() });
+        }
+        let (frames, recovery_metadata) = if let Some(ctx) = recovery.as_ref() {
+            let digest = match canonical_snapshot_digest(&canonical) {
+                Ok(digest) => digest,
+                Err(error) => { warn!(peer = %peer, error = %error, "cannot digest recovery snapshot"); return (false, None); }
+            };
+            let Ok(frame_count) = u32::try_from(messages.len()) else { return (false, None); };
+            if messages.len() > MAX_RECOVERY_FRAMES { return (false, None); }
+            let frames = messages.into_iter().enumerate().map(|(index, message)| {
+                let (blocks, unblocks) = match message {
+                    MeshMessage::Sync { blocks, unblocks } => (blocks, unblocks),
+                    _ => unreachable!("chunk_sync only returns Sync"),
+                };
+                WireMessage::Recovery(RecoveryWireMessage::Frame {
+                    generation: ctx.generation, recovery_id: ctx.recovery_id,
+                    boundary_lsn: ctx.boundary_lsn, snapshot_digest: digest.clone(),
+                    frame_index: index as u32, frame_count, blocks, unblocks,
+                })
+            }).collect::<Vec<_>>();
+            (frames, Some((ctx.clone(), digest, frame_count)))
+        } else { (messages.into_iter().map(WireMessage::Standard).collect::<Vec<_>>(), None) };
+        let frame_total = frames.len();
+        let mut shutdown = self.shutdown_tx.subscribe();
+        if *shutdown.borrow() { return (false, None); }
+        let permit = tokio::select! {
+            permit = self.writers.clone().acquire_owned() => match permit { Ok(p) => p, Err(_) => return (false, None) },
+            _ = shutdown.changed() => return (false, None),
+        };
+        for (frame_index, message) in frames.into_iter().enumerate() {
             let result = tokio::select! {
-                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, async {
-                    self.send_to_ack(peer, message).await.map(|_| ())
-                }) => result,
-                changed = shutdown.changed() => {
-                    let _ = changed;
-                    Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown"))
-                }
+                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, async { self.send_to_ack(peer, message).await.map(|_| ()) }) => result,
+                changed = shutdown.changed() => { let _ = changed; Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "mesh shutdown")) }
             };
             if let Err(error) = result {
-                warn!(peer = %peer, frame_index, frame_count, blocks = block_count, tombstones = tombstone_count, is_recovery, elapsed_ms = started.elapsed().as_millis() as u64, error = %error, "condition-driven mesh snapshot failed");
+                warn!(peer = %peer, frame_index, frame_total, blocks_count, tombstones_count, is_recovery, elapsed_ms = started.elapsed().as_millis() as u64, error = %error, "mesh snapshot frame failed");
                 drop(permit);
-                return false;
+                return (false, None);
             }
         }
+        if let Some((ctx, digest, frame_count)) = recovery_metadata {
+            let response = tokio::select! {
+                result = with_timeout(MAX_PEER_WRITE_TIMEOUT, async {
+                    self.send_to_ack(peer, WireMessage::Recovery(RecoveryWireMessage::Complete {
+                        generation: ctx.generation, recovery_id: ctx.recovery_id,
+                        boundary_lsn: ctx.boundary_lsn, snapshot_digest: digest.clone(), frame_count,
+                    })).await
+                }) => match result {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => { warn!(peer = %peer, error = %error, "recovery completion rejected"); drop(permit); return (false, None); }
+                    Err(error) => { warn!(peer = %peer, error = %error, "recovery completion timed out"); drop(permit); return (false, None); }
+                },
+                changed = shutdown.changed() => { let _ = changed; drop(permit); return (false, None); }
+            };
+            let expected = RecoveryProof {
+                generation: ctx.generation, recovery_id: ctx.recovery_id,
+                boundary_lsn: ctx.boundary_lsn, snapshot_digest: digest, frame_count,
+            };
+            if response.recovery_proof.as_ref() != Some(&expected) {
+                warn!(peer = %peer, generation = ctx.generation, boundary_lsn = ctx.boundary_lsn, "missing/mismatched receiver proof; cursor pinned");
+                drop(permit);
+                return (false, None);
+            }
+            drop(permit);
+            debug!(peer = %peer, blocks_count, tombstones_count, frame_count, generation = ctx.generation, boundary_lsn = ctx.boundary_lsn, elapsed_ms = started.elapsed().as_millis() as u64, "receiver-confirmed recovery complete");
+            return (true, Some(expected));
+        }
         drop(permit);
-        debug!(
-            peer = %peer,
-            blocks = block_count,
-            tombstones = tombstone_count,
-            frames = frame_count,
-            is_recovery,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "condition-driven mesh snapshot acknowledged"
-        );
-        true
+        debug!(peer = %peer, blocks_count, tombstones_count, frame_total, is_recovery, elapsed_ms = started.elapsed().as_millis() as u64, "condition-driven snapshot acknowledged");
+        (true, None)
     }
     async fn send_to(&self, peer: SocketAddr, body: MeshMessage) -> std::io::Result<()> {
         self.send_to_ack(peer, body).await.map(|_| ())
     }
 
-    async fn send_to_ack(
+    async fn send_to_ack<B: Into<WireMessage>>(
         &self,
         peer: SocketAddr,
-        body: MeshMessage,
-    ) -> std::io::Result<Option<u64>> {
+        body: B,
+    ) -> std::io::Result<AckResponse> {
+        let body = body.into();
         let ts_ms = now_ms();
         let payload =
             serde_json::to_vec(&(ts_ms, self.node_id, &body)).map_err(std::io::Error::other)?;
@@ -687,7 +930,7 @@ impl MeshHandle {
         let ack_line = ack_frame.strip_suffix(b"\n").unwrap_or(&ack_frame);
         let ack_line = ack_line.strip_suffix(b"\r").unwrap_or(ack_line);
         let ack: AckEnvelope = serde_json::from_slice(ack_line).map_err(std::io::Error::other)?;
-        let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted, ack.ack_lsn))
+        let ack_payload = serde_json::to_vec(&(ack.ts_ms, ack.node_id, ack.accepted, ack.ack_lsn, &ack.recovery_proof))
             .map_err(std::io::Error::other)?;
         if ack.node_id == self.node_id
             || now_ms().abs_diff(ack.ts_ms) > MAX_CLOCK_SKEW_MS
@@ -704,7 +947,7 @@ impl MeshHandle {
                 "peer did not durably accept mesh frame; retry required",
             ));
         }
-        Ok(ack.ack_lsn)
+        Ok(AckResponse { accepted: ack.accepted, ack_lsn: ack.ack_lsn, recovery_proof: ack.recovery_proof })
     }
     async fn read_stream(&self, mut stream: TcpStream) {
         let mut shutdown = self.shutdown_tx.subscribe();
@@ -744,21 +987,34 @@ impl MeshHandle {
         }
         if matches!(
             &env.body,
-            MeshMessage::WalBatch { source_node_id, .. } if *source_node_id != env.node_id
+            WireMessage::Standard(MeshMessage::WalBatch { source_node_id, .. }) if *source_node_id != env.node_id
         ) {
-            warn!(
-                node_id = env.node_id,
-                "mesh WAL batch source identity does not match authenticated envelope"
-            );
+            warn!(node_id = env.node_id, "mesh WAL batch source identity does not match authenticated envelope");
             return;
         }
-        if !valid_message(&env.body, now_ms()) {
-            warn!(
-                node_id = env.node_id,
-                "mesh frame rejected: message fields outside accepted bounds"
-            );
+        if !valid_wire_message(&env.body, now_ms()) {
+            warn!(node_id = env.node_id, "mesh frame rejected: message fields outside accepted bounds");
             return;
         }
+        let (message, recovery) = match env.body {
+            WireMessage::Standard(message) => (message, None),
+            WireMessage::Recovery(RecoveryWireMessage::Frame {
+                generation, recovery_id, boundary_lsn, snapshot_digest, frame_index, frame_count, blocks, unblocks,
+            }) => (
+                MeshMessage::Sync { blocks, unblocks },
+                Some(ReceivedRecovery::Frame {
+                    generation, recovery_id, boundary_lsn, snapshot_digest, frame_index, frame_count,
+                }),
+            ),
+            WireMessage::Recovery(RecoveryWireMessage::Complete {
+                generation, recovery_id, boundary_lsn, snapshot_digest, frame_count,
+            }) => (
+                MeshMessage::Sync { blocks: Vec::new(), unblocks: Vec::new() },
+                Some(ReceivedRecovery::Complete {
+                    generation, recovery_id, boundary_lsn, snapshot_digest, frame_count,
+                }),
+            ),
+        };
         let (ack_tx, ack_rx) = oneshot::channel();
         let mut q = self.incoming.lock().await;
         let overflow = q.len() >= MAX_INCOMING_QUEUE;
@@ -767,10 +1023,7 @@ impl MeshHandle {
             // peer will retry instead of advancing a cursor over a lost event.
             q.pop_front();
         }
-        q.push_back(IncomingFrame {
-            message: env.body,
-            ack: ack_tx,
-        });
+        q.push_back(IncomingFrame { sender_node_id: env.node_id, message, recovery, ack: ack_tx });
         drop(q);
         if overflow {
             self.mark_all_sync(SyncCondition::QueueOverflow).await;
@@ -781,6 +1034,7 @@ impl MeshHandle {
                 result.ok().and_then(Result::ok).unwrap_or(AckResponse {
                     accepted: false,
                     ack_lsn: None,
+                    recovery_proof: None,
                 })
             }
             changed = shutdown.changed() => {
@@ -790,10 +1044,7 @@ impl MeshHandle {
         };
         let ts_ms = now_ms();
         let ack_payload = match serde_json::to_vec(&(
-            ts_ms,
-            self.node_id,
-            ack_response.accepted,
-            ack_response.ack_lsn,
+            ts_ms, self.node_id, ack_response.accepted, ack_response.ack_lsn, &ack_response.recovery_proof,
         )) {
             Ok(payload) => payload,
             Err(_) => return,
@@ -807,6 +1058,7 @@ impl MeshHandle {
             node_id: self.node_id,
             accepted: ack_response.accepted,
             ack_lsn: ack_response.ack_lsn,
+            recovery_proof: ack_response.recovery_proof,
             mac,
         }) {
             Ok(frame) => frame,
@@ -843,56 +1095,78 @@ fn validate_bind_args(node_id: u32, peers: &[SocketAddr], auth_key: &[u8]) -> st
 /// Reject authenticated-but-invalid CRDT fields before they can poison the HLC
 /// or amplify the bounded incoming queue. Zero creation time is accepted for
 /// compatibility with peers that predate the created_at_ms field.
+fn valid_wire_message(message: &WireMessage, now_ms: u64) -> bool {
+    match message {
+        WireMessage::Standard(message) => valid_message(message, now_ms),
+        WireMessage::Recovery(RecoveryWireMessage::Frame {
+            generation, recovery_id, snapshot_digest, frame_index, frame_count, blocks, unblocks, ..
+        }) => {
+            *generation > 0 && !recovery_id.is_nil() && valid_digest(snapshot_digest)
+                && *frame_count > 0 && (*frame_count as usize) <= MAX_RECOVERY_FRAMES
+                && *frame_index < *frame_count
+                && blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
+                && blocks.iter().all(|d| d.dot.node_id != 0 && d.dot.counter != 0
+                    && !d.dot.incarnation.is_nil()
+                    && (d.created_at_ms == 0 || d.created_at_ms <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS))
+                    && (d.expires_at_ms == u64::MAX || d.expires_at_ms >= d.created_at_ms))
+                && unblocks.iter().all(|d| !d.ip.is_unspecified() && d.dot.node_id != 0
+                    && d.dot.counter != 0 && !d.dot.incarnation.is_nil())
+        }
+        WireMessage::Recovery(RecoveryWireMessage::Complete {
+            generation, recovery_id, snapshot_digest, frame_count, ..
+        }) => *generation > 0 && !recovery_id.is_nil() && valid_digest(snapshot_digest)
+            && *frame_count > 0 && (*frame_count as usize) <= MAX_RECOVERY_FRAMES,
+    }
+}
+
 fn valid_message(message: &MeshMessage, now_ms: u64) -> bool {
     let latest_creation = now_ms.saturating_add(MAX_CLOCK_SKEW_MS);
-    let valid_block = |delta: &ClusterBlockDelta| {
-        delta.dot.node_id != 0
-            && !delta.dot.incarnation.is_nil()
-            && (delta.created_at_ms == 0 || delta.created_at_ms <= latest_creation)
-            && (delta.expires_at_ms == u64::MAX || delta.expires_at_ms >= delta.created_at_ms)
-    };
-
+    let valid_block = |d: &ClusterBlockDelta| d.dot.node_id != 0 && d.dot.counter != 0
+        && !d.dot.incarnation.is_nil()
+        && (d.created_at_ms == 0 || d.created_at_ms <= latest_creation)
+        && (d.expires_at_ms == u64::MAX || d.expires_at_ms >= d.created_at_ms);
+    let valid_unblock = |d: &ClusterUnblockDelta| !d.ip.is_unspecified()
+        && d.dot.node_id != 0 && d.dot.counter != 0 && !d.dot.incarnation.is_nil();
     match message {
-        MeshMessage::Block(delta) => valid_block(delta),
-        MeshMessage::Unblock(delta) => delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil(),
-        MeshMessage::Sync { blocks, unblocks } => {
-            blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
-                && blocks.iter().all(valid_block)
-                && unblocks
-                    .iter()
-                    .all(|delta| delta.dot.node_id != 0 && !delta.dot.incarnation.is_nil())
-        }
-        MeshMessage::WalBatch {
-            source_node_id,
-            start_lsn,
-            end_lsn,
-            mutations,
-        } => {
-            *source_node_id != 0
-                && *start_lsn > 0
-                && *end_lsn >= *start_lsn
+        MeshMessage::Block(d) => valid_block(d),
+        MeshMessage::Unblock(d) => valid_unblock(d),
+        MeshMessage::Sync { blocks, unblocks } => blocks.len().saturating_add(unblocks.len()) <= MAX_SYNC_FRAME_ENTRIES
+            && blocks.iter().all(valid_block) && unblocks.iter().all(valid_unblock),
+        MeshMessage::WalBatch { source_node_id, start_lsn, end_lsn, mutations } =>
+            *source_node_id != 0 && *start_lsn > 0 && *end_lsn >= *start_lsn
                 && mutations.len() <= MAX_SYNC_FRAME_ENTRIES
-                && mutations
-                    .windows(2)
-                    .all(|pair| pair[0].source_lsn < pair[1].source_lsn)
-                && mutations.iter().all(|mutation| {
-                    mutation.source_lsn >= *start_lsn
-                        && mutation.source_lsn <= *end_lsn
-                        && mutation.origin_node_id != 0
-                        && mutation.origin_counter > 0
-                        && uuid::Uuid::parse_str(&mutation.origin_incarnation)
-                            .is_ok_and(|id| !id.is_nil())
-                        && !mutation.ip.is_unspecified()
-                        && mutation.created_at_ms <= now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-                        && match mutation.action {
-                            MeshMutationKind::Block => mutation
-                                .expires_at_ms
-                                .is_none_or(|expiry| expiry >= mutation.created_at_ms),
-                            MeshMutationKind::Unblock => mutation.expires_at_ms.is_none(),
-                        }
-                })
-        }
+                && mutations.windows(2).all(|pair| pair[0].source_lsn < pair[1].source_lsn)
+                && mutations.iter().all(|m| m.source_lsn >= *start_lsn && m.source_lsn <= *end_lsn
+                    && m.origin_node_id != 0 && m.origin_counter > 0
+                    && uuid::Uuid::parse_str(&m.origin_incarnation).is_ok_and(|id| !id.is_nil())
+                    && !m.ip.is_unspecified() && m.created_at_ms <= latest_creation
+                    && match m.action {
+                        MeshMutationKind::Block => m.expires_at_ms.is_none_or(|expiry| expiry >= m.created_at_ms),
+                        MeshMutationKind::Unblock => m.expires_at_ms.is_none(),
+                    })
     }
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn canonical_snapshot(mut snapshot: AworsetSnapshot) -> Result<AworsetSnapshot, &'static str> {
+    snapshot.blocks.sort_by_key(|d| (d.ip, d.dot.node_id, d.dot.incarnation, d.dot.counter));
+    snapshot.unblocks.sort_by_key(|d| (d.ip, d.dot.node_id, d.dot.incarnation, d.dot.counter));
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+fn canonical_snapshot_digest(snapshot: &AworsetSnapshot) -> std::io::Result<String> {
+    let canonical = canonical_snapshot(snapshot.clone())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let encoded = serde_json::to_vec(&canonical).map_err(std::io::Error::other)?;
+    let mut digest = Sha256::new();
+    digest.update(b"ramshield/mesh-recovery-snapshot/v1\0");
+    digest.update((encoded.len() as u64).to_be_bytes());
+    digest.update(encoded);
+    Ok(hex::encode(digest.finalize()))
 }
 
 /// Split anti-entropy state into small independently authenticated frames.
@@ -1077,7 +1351,7 @@ mod frame_tests {
                                     blocklist_b.merge_unblock_delta(&delta);
                                 }
                             }
-                            MeshMessage::WalBatch { .. } => {}
+                            _ => {}
                         }
                         received.acknowledge(true);
                     }
@@ -1119,7 +1393,7 @@ mod frame_tests {
                                     blocklist_a.merge_unblock_delta(&delta);
                                 }
                             }
-                            MeshMessage::WalBatch { .. } => {}
+                            _ => {}
                         }
                         received.acknowledge(true);
                     }
@@ -1483,7 +1757,7 @@ mod frame_tests {
         let envelope = Envelope {
             ts_ms: u64::MAX,
             node_id: u32::MAX,
-            body: message,
+            body: WireMessage::Standard(message),
             mac: "0".repeat(64),
         };
         let encoded = serde_json::to_vec(&envelope).expect("serialize worst-case sync frame");
@@ -1535,100 +1809,48 @@ mod frame_tests {
     }
 
     #[test]
-    fn full_sync_recovery_waits_for_receiver_completion_after_frame_acks() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
+    fn full_sync_recovery_requires_receiver_digest_proof_before_cursor_release() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("test runtime");
         runtime.block_on(async {
-            let probe = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("reserve receiver address");
+            let probe = TcpListener::bind("127.0.0.1:0").await.expect("reserve receiver");
             let receiver_addr = probe.local_addr().expect("receiver address");
             drop(probe);
-
             let sender_state = Arc::new(AworsetBlocklist::new(1));
             let receiver_state = Arc::new(AworsetBlocklist::new(2));
             let ip = IpAddr::V6(Ipv6Addr::from(0xfeedbeefu128));
             sender_state.record_ban(ip, 60_000, 2);
-
-            let sender = MeshHandle::bind(
-                1,
-                sender_state,
-                "127.0.0.1:0".parse().expect("sender listen address"),
-                vec![receiver_addr],
-                vec![7; 32],
-            )
-            .await
-            .expect("bind sender");
-            let receiver = MeshHandle::bind(
-                2,
-                receiver_state.clone(),
-                receiver_addr,
-                Vec::new(),
-                vec![7; 32],
-            )
-            .await
-            .expect("bind receiver");
-
-            sender.request_full_sync(receiver_addr, 17).await;
-            // Repeated ticks must not replace the captured boundary with a
-            // newer WAL end while the same repair attempt is in flight.
-            sender.request_full_sync(receiver_addr, 99).await;
-            assert!(
-                sender
-                    .acked_recovery_transfer(receiver_addr)
-                    .await
-                    .is_none()
-            );
-
-            let (generation, boundary_lsn) = tokio::time::timeout(Duration::from_secs(3), async {
+            let sender = MeshHandle::bind(1, sender_state.clone(), "127.0.0.1:0".parse().unwrap(),
+                vec![receiver_addr], vec![7; 32]).await.expect("bind sender");
+            let receiver = MeshHandle::bind(2, receiver_state.clone(), receiver_addr, Vec::new(),
+                vec![7; 32]).await.expect("bind receiver");
+            sender.request_full_sync(receiver_addr, 17, sender_state.export_snapshot()).await;
+            sender.request_full_sync(receiver_addr, 99, sender_state.export_snapshot()).await;
+            assert!(sender.completed_recovery(receiver_addr).await.is_none());
+            let completed = tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     for received in receiver.drain_with_ack().await {
                         match received.message.clone() {
-                            MeshMessage::Block(delta) => {
-                                receiver_state.merge_delta(&delta);
-                            }
-                            MeshMessage::Unblock(delta) => {
-                                receiver_state.merge_unblock_delta(&delta);
-                            }
+                            MeshMessage::Block(d) => { receiver_state.merge_delta(&d); }
+                            MeshMessage::Unblock(d) => { receiver_state.merge_unblock_delta(&d); }
                             MeshMessage::Sync { blocks, unblocks } => {
-                                for delta in blocks {
-                                    receiver_state.merge_delta(&delta);
-                                }
-                                for delta in unblocks {
-                                    receiver_state.merge_unblock_delta(&delta);
-                                }
+                                for d in blocks { receiver_state.merge_delta(&d); }
+                                for d in unblocks { receiver_state.merge_unblock_delta(&d); }
                             }
-                            MeshMessage::WalBatch { .. } => {}
+                            _ => {}
                         }
                         received.acknowledge(true);
                     }
-                    if let Some(completed) = sender.acked_recovery_transfer(receiver_addr).await {
-                        break completed;
-                    }
+                    if let Some(done) = sender.completed_recovery(receiver_addr).await { break done; }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            })
-            .await
-            .expect("full recovery frame transfer should finish after acknowledged frames");
-
-            assert!(
-                generation > 0,
-                "recovery must invalidate any older repair task"
-            );
-            assert_eq!(
-                boundary_lsn, 17,
-                "recovery must retain its captured boundary"
-            );
-            assert!(
-                sender.recovery_completion_pending(receiver_addr).await,
-                "frame ACKs alone must not release the WAL cursor"
-            );
-            assert!(
-                receiver_state.is_blocked(&ip, now_ms()),
-                "receiver must have applied the transferred CRDT state"
-            );
+            }).await.expect("receiver confirms fixed snapshot");
+            assert!(completed.0 > 0);
+            assert_eq!(completed.1, 17);
+            assert!(sender.recovery_completion_pending(receiver_addr).await,
+                "proof must remain gated until cursor owner consumes boundary");
+            assert!(receiver_state.is_blocked(&ip, now_ms()));
+            sender.acknowledge_recovery_cursor(receiver_addr, completed.0, completed.1).await;
+            assert!(!sender.recovery_completion_pending(receiver_addr).await);
             sender.shutdown();
             receiver.shutdown();
         });
