@@ -9,7 +9,7 @@
 use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{RwLock, atomic::{AtomicU64, Ordering}};
 use uuid::Uuid;
 
 pub type Dot = u64;
@@ -168,6 +168,9 @@ pub struct AworsetBlocklist {
     /// resurrect an old ban from a disconnected peer.
     pub(crate) tombstones: DashMap<BlockKey, u64>,
     next_dot_counter: AtomicU64,
+    /// Snapshot export takes the exclusive side; mutations hold the shared side.
+    /// This freezes the CRDT maps for the duration of a fixed recovery capture.
+    snapshot_barrier: RwLock<()>,
 }
 
 impl AworsetBlocklist {
@@ -179,6 +182,7 @@ impl AworsetBlocklist {
             entries: DashMap::new(),
             tombstones: DashMap::new(),
             next_dot_counter: AtomicU64::new(0),
+            snapshot_barrier: RwLock::new(()),
         }
     }
 
@@ -292,6 +296,7 @@ impl AworsetBlocklist {
 
     /// Absorb a peer delta. True if it changed local state.
     pub fn merge_delta(&self, delta: &ClusterBlockDelta) -> bool {
+        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
         if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
             return false;
         }
@@ -355,6 +360,7 @@ impl AworsetBlocklist {
 
     /// Export every origin dot and tombstone for a durable checkpoint.
     pub fn export_snapshot(&self) -> AworsetSnapshot {
+        let _snapshot_guard = self.snapshot_barrier.write().unwrap_or_else(|e| e.into_inner());
         let mut blocks: Vec<_> = self
             .entries
             .iter()
@@ -454,6 +460,7 @@ impl AworsetBlocklist {
     /// favors convergence safety over bounded tombstone memory until a peer-ack
     /// or epoch-based causal-stability protocol is implemented.
     pub fn purge_expired(&self, now_ms: u64) {
+        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
         const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
         let expired: Vec<((IpAddr, u32, Uuid), u64)> = self
             .entries
@@ -487,6 +494,7 @@ impl AworsetBlocklist {
 
     /// Merge an observed-remove tombstone.
     pub fn merge_unblock_delta(&self, delta: &ClusterUnblockDelta) -> bool {
+        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
         if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
             return false;
         }
