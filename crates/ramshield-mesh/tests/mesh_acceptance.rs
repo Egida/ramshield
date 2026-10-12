@@ -245,7 +245,7 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
         loop {
             for received in receiver.drain_with_ack().await {
                 assert!(
-                    matches!(received.message, MeshMessage::Sync { .. }),
+                    matches!(&received.message, MeshMessage::Sync { .. }),
                     "full recovery should be delivered as snapshot frames"
                 );
                 received.acknowledge(true);
@@ -267,6 +267,80 @@ async fn full_recovery_frame_acks_do_not_release_wal_replay_gate() {
     assert!(
         sender.recovery_completion_pending(receiver_addr).await,
         "ACKs for all snapshot frames are not receiver-confirmed whole-recovery completion"
+    );
+
+    sender.shutdown();
+    receiver.shutdown();
+}
+
+
+/// A recovery containing more entries than one bounded frame must ACK each
+/// frame without releasing the whole-recovery WAL replay gate.
+#[tokio::test]
+async fn multi_frame_recovery_acks_keep_wal_replay_gate_pinned() {
+    let receiver_addr = free_addr().await;
+    let sender_state = Arc::new(AworsetBlocklist::new(1));
+    for host in 1..=17 {
+        sender_state.record_ban(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, host)),
+            60_000,
+            1,
+        );
+    }
+
+    let receiver = MeshHandle::bind(
+        2,
+        Arc::new(AworsetBlocklist::new(2)),
+        receiver_addr,
+        Vec::new(),
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind multi-frame recovery receiver");
+    let sender = MeshHandle::bind(
+        1,
+        sender_state,
+        free_addr().await,
+        vec![receiver_addr],
+        TEST_KEY.to_vec(),
+    )
+    .await
+    .expect("bind multi-frame recovery sender");
+
+    let boundary_lsn = 73;
+    sender.request_full_sync(receiver_addr, boundary_lsn).await;
+    let (generation, boundary, frame_count) = timeout(Duration::from_secs(5), async {
+        let mut frame_count = 0usize;
+        loop {
+            for received in receiver.drain_with_ack().await {
+                assert!(
+                    matches!(&received.message, MeshMessage::Sync { .. }),
+                    "full recovery should be delivered as snapshot frames"
+                );
+                frame_count += 1;
+                received.acknowledge(true);
+            }
+
+            if let Some((generation, boundary)) =
+                sender.acked_recovery_transfer(receiver_addr).await
+            {
+                break (generation, boundary, frame_count);
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("receiver should application-ACK every bounded recovery frame");
+
+    assert!(generation > 0, "recovery generation must be non-zero");
+    assert_eq!(boundary, boundary_lsn);
+    assert!(
+        frame_count >= 2,
+        "17 entries must span more than one 16-entry transport frame"
+    );
+    assert!(
+        sender.recovery_completion_pending(receiver_addr).await,
+        "ACKs for every bounded frame still do not prove whole-recovery completion"
     );
 
     sender.shutdown();
