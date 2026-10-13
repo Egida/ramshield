@@ -28,7 +28,7 @@ fn main() {
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
 
     measure("blocklist_key_create", 100_000, || {
-        black_box(ramshield_enforcement::xdp::BlocklistKey::from_ip(black_box(ip)));
+        black_box(ramshield_enforcement::xdp::BlocklistKey::from_ip(\n            black_box(ip),\n        ));
     });
 
     measure("ip_parsing", 100_000, || {
