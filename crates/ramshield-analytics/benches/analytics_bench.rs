@@ -7,12 +7,10 @@ use std::hint::black_box;
 fn bench_store_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("store_insert");
     for _ in 0..10000 {
-        let _ = ramshield_storage::store::Store::insert(
-            &ramshield_types::IpRecord::new(
-                std::net::Ipv4Addr::new(10, 0, 0, 1),
-                ramshield_types::TrafficCounters::default(),
-            ),
-        );
+        let _ = ramshield_storage::store::Store::insert(&ramshield_types::IpRecord::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 1),
+            ramshield_types::TrafficCounters::default(),
+        ));
     }
     group.finish();
 }
@@ -21,14 +19,12 @@ fn bench_store_insert(c: &mut Criterion) {
 fn bench_wal_append(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_append");
     for _ in 0..10000 {
-        let _ = ramshield_storage::wal::Wal::append(
-            &ramshield_storage::WalEntry::BlockIp {
-                ip: "10.0.0.1".into(),
-                reason: "test".into(),
-                ttl_secs: Some(3600),
-                ts_ns: 42,
-            },
-        );
+        let _ = ramshield_storage::wal::Wal::append(&ramshield_storage::WalEntry::BlockIp {
+            ip: "10.0.0.1".into(),
+            reason: "test".into(),
+            ttl_secs: Some(3600),
+            ts_ns: 42,
+        });
     }
     group.finish();
 }
@@ -38,14 +34,17 @@ fn bench_blocked_set(c: &mut Criterion) {
     let mut group = c.benchmark_group("blocked_set");
     for _ in 0..10000 {
         let _ = ramshield_storage::active_cidrs::insert(
-            &ramshield_types::IpNetwork::new(
-                std::net::Ipv4Addr::new(10, 0, 0, 1).into(),
-                24,
-            ).unwrap(),
+            &ramshield_types::IpNetwork::new(std::net::Ipv4Addr::new(10, 0, 0, 1).into(), 24)
+                .unwrap(),
         );
     }
     group.finish();
 }
 
-criterion_group!(analytics_benches, bench_store_insert, bench_wal_append, bench_blocked_set);
+criterion_group!(
+    analytics_benches,
+    bench_store_insert,
+    bench_wal_append,
+    bench_blocked_set
+);
 criterion_main!(analytics_benches);

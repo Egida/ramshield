@@ -8,9 +8,9 @@ use std::hint::black_box;
 fn bench_blocklist_key_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("blocklist_key_create");
     for _ in 0..10000 {
-        let _key = ramshield_enforcement::xdp::BlocklistKey::from_ip(
-            std::net::IpAddr::V4("10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap())
-        );
+        let _key = ramshield_enforcement::xdp::BlocklistKey::from_ip(std::net::IpAddr::V4(
+            "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap(),
+        ));
     }
     group.finish();
 }
@@ -38,5 +38,10 @@ fn bench_wal_entry_struct(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(enforcement_benches, bench_blocklist_key_creation, bench_ip_parsing, bench_wal_entry_struct);
+criterion_group!(
+    enforcement_benches,
+    bench_blocklist_key_creation,
+    bench_ip_parsing,
+    bench_wal_entry_struct
+);
 criterion_main!(enforcement_benches);

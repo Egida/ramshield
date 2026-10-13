@@ -353,7 +353,8 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
         wal.append(&WalEntry::BlockIp {
             ip: "10.0.0.1".into(),
             reason: "ddos".into(),
@@ -368,7 +369,8 @@ mod tests {
         assert!(matches!(entries[0], WalEntry::BlockIp { .. }));
 
         // Verify append returns monotonically increasing LSNs.
-        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
+        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
         let lsn1 = wal2
             .append(&WalEntry::UnblockIp {
                 ip: "10.0.0.1".into(),
@@ -488,7 +490,8 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
         for i in 1..=2u64 {
             wal.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
@@ -537,7 +540,8 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::Flush, 64 * 1024 * 1024, 0).expect("operation failed");
+        let wal = Wal::open(&dir, false, Durability::Flush, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
         // Write pre-checkpoint records.
         for i in 1..=3u64 {
             wal.append(&WalEntry::BlockIp {
@@ -565,10 +569,15 @@ mod tests {
             f.sync_all().expect("operation failed");
         }
         std::fs::rename(&tmp, &snap_path).expect("operation failed");
-        std::fs::File::open(&dir).expect("operation failed").sync_all().expect("operation failed");
+        std::fs::File::open(&dir)
+            .expect("operation failed")
+            .sync_all()
+            .expect("operation failed");
 
         // Complete checkpoint at RAMWAL.
-        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn).expect("operation failed");
+        let ckpt_lsn = wal
+            .finish_checkpoint(boundary.lsn)
+            .expect("operation failed");
         assert!(ckpt_lsn > 0);
 
         // Verify manifest exists.
@@ -578,7 +587,8 @@ mod tests {
         assert!(content.contains("lsn="));
 
         // Reopen: RAMWAL recovers up to checkpoint.
-        let wal2 = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).expect("operation failed");
+        let wal2 = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
         assert!(
             wal2.snapshot_lsn() > 0 || wal2.ckpt_lsn() > 0,
             "checkpoint should persist across reopen"
@@ -610,7 +620,8 @@ mod tests {
 
     #[test]
     fn wal_entry_roundtrip_all_variants() {
-        let net = IpNetwork::new("10.0.0.0".parse().expect("operation failed"), 8).expect("operation failed");
+        let net = IpNetwork::new("10.0.0.0".parse().expect("operation failed"), 8)
+            .expect("operation failed");
         let variants: Vec<WalEntry> = vec![
             WalEntry::BlockIp {
                 ip: "1.2.3.4".into(),

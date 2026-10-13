@@ -7,15 +7,13 @@ use std::hint::black_box;
 fn bench_ipc_serialize(c: &mut Criterion) {
     let mut group = c.benchmark_group("ipc_serialize");
     for _ in 0..10000 {
-        let _ = ramshield_protocol::ipc::serialize_message(
-            &ramshield_types::IpcMessage::new(
-                ramshield_types::IpcCommand::BlockIp {
-                    ip: "10.0.0.1".into(),
-                    reason: "test".into(),
-                    ttl_secs: Some(3600),
-                },
-            ),
-        );
+        let _ = ramshield_protocol::ipc::serialize_message(&ramshield_types::IpcMessage::new(
+            ramshield_types::IpcCommand::BlockIp {
+                ip: "10.0.0.1".into(),
+                reason: "test".into(),
+                ttl_secs: Some(3600),
+            },
+        ));
     }
     group.finish();
 }
@@ -37,13 +35,16 @@ fn bench_hmac_verify(c: &mut Criterion) {
 fn bench_replay_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("replay_check");
     for _ in 0..10000 {
-        let _ = ramshield_protocol::replay::check_replay(
-            &ramshield_types::ReplayWindow::new(1000),
-            42,
-        );
+        let _ =
+            ramshield_protocol::replay::check_replay(&ramshield_types::ReplayWindow::new(1000), 42);
     }
     group.finish();
 }
 
-criterion_group!(protocol_benches, bench_ipc_serialize, bench_hmac_verify, bench_replay_check);
+criterion_group!(
+    protocol_benches,
+    bench_ipc_serialize,
+    bench_hmac_verify,
+    bench_replay_check
+);
 criterion_main!(protocol_benches);
