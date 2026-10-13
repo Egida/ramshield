@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the CI #[cfg(test)] unwrap/expect filter."""
+"""Regression tests for the CI cfg(test) unwrap/expect filter."""
 
 import importlib.util
 import tempfile
@@ -24,6 +24,27 @@ mod tests {
         if true {
             fixture.expect("test");
         }
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
+        fixture_line = next(i for i, line in enumerate(lines, 1) if "fixture.expect" in line)
+        self.assertNotIn(production_line, test_lines)
+        self.assertIn(fixture_line, test_lines)
+
+    def test_compound_cfg_test_module_is_excluded(self):
+        source = """fn production() {
+    value.unwrap();
+}
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    fn test_only() {
+        fixture.expect("test");
     }
 }
 """
