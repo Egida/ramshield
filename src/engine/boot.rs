@@ -44,7 +44,6 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
     // ArcSwap that never saw updates from api_set_config.
     let cfg_handle = engine.config.clone();
 
-    // Boot-time snapshot: read-once values (XDP, WAL, forecaster config).
     // These are immutable once the pipeline starts; changing them requires restart.
     let cfg_arc = engine.config.load(); // Arc<Config>
     let cfg_snapshot = cfg_arc.as_ref().clone(); // owned Config clone
@@ -501,33 +500,6 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
         crate::engine::upstream::run(upstream_cfg, upstream_metrics, upstream_shutdown).await;
     });
 
-    let mut forecaster = if cfg_snapshot.forecasting.enabled {
-        let forecaster = Arc::new(Forecaster::new(
-            store.clone(),
-            cfg_snapshot.forecasting.clone(),
-            engine.enforcement_tx.clone(),
-            metrics.clone(),
-        ));
-        let fc = forecaster.clone();
-        let mut fc_rx = engine.shutdown_rx();
-        let handle = tokio::spawn(async move {
-            tokio::select! {
-                _ = fc.run() => {}
-                _ = fc_rx.changed() => {
-                    tracing::info!("forecaster: shutdown signal received");
-                }
-            }
-        });
-        Some((forecaster, handle))
-    } else {
-        // P1-9: honoring `forecasting.enabled` — previously the flag was
-        // read nowhere and the span always ran (queue feed kept growing).
-        tracing::info!(
-            "forecasting.enabled=false — forecaster span not started (threat_sample queue not fed)"
-        );
-        None
-    };
-
     // Capture for checkpoint loop before store is moved into server.
     let store_arc = store.clone();
     let cfg_dir = cfg_snapshot.wal.dir;
@@ -655,14 +627,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
                                 tracing::warn!("enforcement shutdown timed out");
                             }
                         }
-            if let Some((_, handle)) = forecaster.as_mut() {
-                tokio::select! {
-                    _ = handle => {}
-                    _ = tokio::time::sleep_until(deadline) => {
-                        tracing::warn!("forecaster shutdown timed out");
-                    }
-                }
-            }
+
         }
     }
     if cfg_snapshot.synproxy.enabled

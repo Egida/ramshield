@@ -15,6 +15,9 @@ pub mod engine;
 pub mod enforcement {
     pub use ramshield_enforcement::*;
 }
+pub mod forecasting {
+    pub use ramshield_forecasting::*;
+}
 pub mod ipc;
 pub mod metrics {
     pub use ramshield_metrics::*;
@@ -27,6 +30,7 @@ pub use engine::Engine;
 
 pub use ramshield_config::{Config, ConfigHandle};
 pub use ramshield_detection::DetectionEngine;
+pub use ramshield_forecasting::Forecaster;
 pub use ramshield_metrics::{
     BatchRecord, BlockRecord, DashboardSnapshot, Metrics, ModuleStats, SubnetRow,
 };

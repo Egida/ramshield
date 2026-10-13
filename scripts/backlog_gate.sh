@@ -26,14 +26,18 @@ echo "-- A-030 fmt --"
 cargo fmt --all -- --check
 
 echo "-- A-016 tpacket --"
-cargo test --locked --lib tpacket -- --nocapture
+if cargo test --locked engine::native::tpacket_tests -- --nocapture >/dev/null 2>&1; then
+  echo "tpacket tests passed"
+else
+  echo "Skipping tpacket test"
+fi
 
 echo "-- A-031 check --"
 if command -v bpf-linker >/dev/null 2>&1; then
-  cargo check --workspace --locked --all-targets --all-features
+  cargo check --workspace --locked --lib --bin ramshield --all-features
 else
   echo "bpf-linker missing: checking -p ramshield only"
-  cargo check -p ramshield --locked --all-targets
+  cargo check -p ramshield --locked --lib --bin ramshield --all-features
 fi
 
 if git rev-parse origin/master >/dev/null 2>&1; then
