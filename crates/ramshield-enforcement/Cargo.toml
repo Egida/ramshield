@@ -21,6 +21,7 @@ async-trait = "0.1"
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+criterion = "0.5"
 proptest = "1"
 serial_test = "3"
 

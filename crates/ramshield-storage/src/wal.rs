@@ -353,40 +353,40 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
         wal.append(&WalEntry::BlockIp {
             ip: "10.0.0.1".into(),
             reason: "ddos".into(),
             ttl_secs: Some(3600),
             ts_ns: 1,
         })
-        .unwrap();
+        .expect("operation failed");
         drop(wal);
 
-        let entries = Wal::replay_dir(&dir).unwrap();
+        let entries = Wal::replay_dir(&dir).expect("operation failed");
         assert_eq!(entries.len(), 1, "one record must survive round-trip");
         assert!(matches!(entries[0], WalEntry::BlockIp { .. }));
 
         // Verify append returns monotonically increasing LSNs.
-        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal2 = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
         let lsn1 = wal2
             .append(&WalEntry::UnblockIp {
                 ip: "10.0.0.1".into(),
                 ts_ns: 2,
             })
-            .unwrap();
+            .expect("operation failed");
         let lsn2 = wal2
             .append(&WalEntry::BlockCidr {
-                cidr: "192.168.0.0/24".parse().unwrap(),
+                cidr: "192.168.0.0/24".parse().expect("operation failed"),
                 reason: "scan".into(),
                 ttl_secs: None,
                 ts_ns: 3,
             })
-            .unwrap();
+            .expect("operation failed");
         assert!(lsn2 > lsn1);
         drop(wal2);
 
-        let entries = Wal::replay_dir(&dir).unwrap();
+        let entries = Wal::replay_dir(&dir).expect("operation failed");
         assert_eq!(entries.len(), 3, "original + reopened appends");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -394,15 +394,15 @@ mod tests {
 
     #[test]
     fn wal_recovery_keeps_exact_synced_prefix_after_power_loss() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("operation failed");
         let wal = Wal::open(
-            dir.path().to_str().unwrap(),
+            dir.path().to_str().expect("operation failed"),
             false,
             Durability::Flush,
             64 * 1024 * 1024,
             0,
         )
-        .unwrap();
+        .expect("operation failed");
 
         for i in 1..=2u64 {
             wal.append(&WalEntry::BlockIp {
@@ -411,12 +411,12 @@ mod tests {
                 ttl_secs: None,
                 ts_ns: i,
             })
-            .unwrap();
+            .expect("operation failed");
         }
-        wal.sync().unwrap();
+        wal.sync().expect("operation failed");
 
         let segment = std::fs::read_dir(dir.path())
-            .unwrap()
+            .expect("operation failed")
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .find(|path| {
@@ -425,7 +425,7 @@ mod tests {
                     .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".rwl"))
             })
             .expect("WAL active segment must exist");
-        let synced_len = std::fs::metadata(&segment).unwrap().len();
+        let synced_len = std::fs::metadata(&segment).expect("operation failed").len();
 
         // This append is deliberately not synced. Truncating the segment to
         // the previously synced byte length models loss of the volatile tail
@@ -436,7 +436,7 @@ mod tests {
             ttl_secs: None,
             ts_ns: 3,
         })
-        .unwrap();
+        .expect("operation failed");
         // Dropping a buffered writer may flush its userspace buffer. That
         // is deliberately not treated as durability: the simulated crash
         // below removes every byte beyond the last explicit sync boundary.
@@ -445,19 +445,19 @@ mod tests {
         let segment_file = std::fs::OpenOptions::new()
             .write(true)
             .open(&segment)
-            .unwrap();
-        segment_file.set_len(synced_len).unwrap();
-        segment_file.sync_all().unwrap();
+            .expect("operation failed");
+        segment_file.set_len(synced_len).expect("operation failed");
+        segment_file.sync_all().expect("operation failed");
 
         let recovered = Wal::open(
-            dir.path().to_str().unwrap(),
+            dir.path().to_str().expect("operation failed"),
             false,
             Durability::Flush,
             64 * 1024 * 1024,
             0,
         )
-        .unwrap();
-        let entries = recovered.replay_from(0).unwrap();
+        .expect("operation failed");
+        let entries = recovered.replay_from(0).expect("operation failed");
         let blocks: Vec<_> = entries
             .iter()
             .filter_map(|entry| match entry {
@@ -488,7 +488,7 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).unwrap();
+        let wal = Wal::open(&dir, false, Durability::None, 64 * 1024 * 1024, 0).expect("operation failed");
         for i in 1..=2u64 {
             wal.append(&WalEntry::BlockIp {
                 ip: format!("10.0.0.{i}"),
@@ -496,11 +496,11 @@ mod tests {
                 ttl_secs: None,
                 ts_ns: i,
             })
-            .unwrap();
+            .expect("operation failed");
         }
-        wal.sync().unwrap();
+        wal.sync().expect("operation failed");
 
-        let first = wal.replay_from(0).unwrap();
+        let first = wal.replay_from(0).expect("operation failed");
         assert_eq!(first.len(), 2, "current WAL contents must be visible");
 
         for i in 3..=4u64 {
@@ -510,11 +510,11 @@ mod tests {
                 ttl_secs: None,
                 ts_ns: i,
             })
-            .unwrap();
+            .expect("operation failed");
         }
-        wal.sync().unwrap();
+        wal.sync().expect("operation failed");
 
-        let tail = wal.replay_from(2).unwrap();
+        let tail = wal.replay_from(2).expect("operation failed");
         assert_eq!(
             tail.len(),
             2,
@@ -537,7 +537,7 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        let wal = Wal::open(&dir, false, Durability::Flush, 64 * 1024 * 1024, 0).unwrap();
+        let wal = Wal::open(&dir, false, Durability::Flush, 64 * 1024 * 1024, 0).expect("operation failed");
         // Write pre-checkpoint records.
         for i in 1..=3u64 {
             wal.append(&WalEntry::BlockIp {
@@ -546,7 +546,7 @@ mod tests {
                 ttl_secs: None,
                 ts_ns: i,
             })
-            .unwrap();
+            .expect("operation failed");
         }
         // finish_checkpoint establishes the WAL durability barrier itself.
         let boundary = wal.begin_checkpoint();
@@ -558,27 +558,27 @@ mod tests {
         let snap_content = serde_json::json!({ "lsn": boundary.lsn });
         let tmp = format!("{snap_path}.tmp");
         {
-            let mut f = std::fs::File::create(&tmp).unwrap();
+            let mut f = std::fs::File::create(&tmp).expect("operation failed");
             use std::io::Write;
-            f.write_all(&serde_json::to_vec(&snap_content).unwrap())
-                .unwrap();
-            f.sync_all().unwrap();
+            f.write_all(&serde_json::to_vec(&snap_content).expect("operation failed"))
+                .expect("operation failed");
+            f.sync_all().expect("operation failed");
         }
-        std::fs::rename(&tmp, &snap_path).unwrap();
-        std::fs::File::open(&dir).unwrap().sync_all().unwrap();
+        std::fs::rename(&tmp, &snap_path).expect("operation failed");
+        std::fs::File::open(&dir).expect("operation failed").sync_all().expect("operation failed");
 
         // Complete checkpoint at RAMWAL.
-        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn).unwrap();
+        let ckpt_lsn = wal.finish_checkpoint(boundary.lsn).expect("operation failed");
         assert!(ckpt_lsn > 0);
 
         // Verify manifest exists.
         let manifest = std::path::PathBuf::from(&dir).join("MANIFEST");
         assert!(manifest.exists(), "MANIFEST should exist after checkpoint");
-        let content = std::fs::read_to_string(&manifest).unwrap();
+        let content = std::fs::read_to_string(&manifest).expect("operation failed");
         assert!(content.contains("lsn="));
 
         // Reopen: RAMWAL recovers up to checkpoint.
-        let wal2 = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).unwrap();
+        let wal2 = Wal::open(&dir, false, Durability::Fsync, 64 * 1024 * 1024, 0).expect("operation failed");
         assert!(
             wal2.snapshot_lsn() > 0 || wal2.ckpt_lsn() > 0,
             "checkpoint should persist across reopen"
@@ -592,12 +592,12 @@ mod tests {
                 ttl_secs: None,
                 ts_ns: i,
             })
-            .unwrap();
+            .expect("operation failed");
         }
         drop(wal2);
 
         // Full replay should get all 5 + possibly checkpoint marker.
-        let all = Wal::replay_dir(&dir).unwrap();
+        let all = Wal::replay_dir(&dir).expect("operation failed");
         // At least the 5 BlockIp records must be present.
         let block_ips = all
             .iter()
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn wal_entry_roundtrip_all_variants() {
-        let net = IpNetwork::new("10.0.0.0".parse().unwrap(), 8).unwrap();
+        let net = IpNetwork::new("10.0.0.0".parse().expect("operation failed"), 8).expect("operation failed");
         let variants: Vec<WalEntry> = vec![
             WalEntry::BlockIp {
                 ip: "1.2.3.4".into(),
@@ -645,8 +645,8 @@ mod tests {
         ];
         let _ = net;
         for entry in &variants {
-            let encoded = encode_entry(entry).unwrap();
-            let decoded = serde_json::from_slice::<WalEntry>(&encoded).unwrap();
+            let encoded = encode_entry(entry).expect("operation failed");
+            let decoded = serde_json::from_slice::<WalEntry>(&encoded).expect("operation failed");
             assert_eq!(entry, &decoded, "round-trip failed for {:?}", entry);
         }
     }
