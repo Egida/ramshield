@@ -1,47 +1,46 @@
-/// Minimal enforcement benchmarks for A-037 Core benchmarks and regression budgets.
-/// These benchmarks verify that key enforcement structures and operations
-/// maintain expected performance characteristics and do not regress.
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+//! Minimal enforcement microbenchmarks for A-037 regression budgets.
+//! This intentionally uses only the standard library so the bench adds no
+//! dependency to the core-only build. Run with: cargo bench -p ramshield-enforcement --features xdp.
+
 use std::hint::black_box;
+use std::time::{Duration, Instant};
 
-// Benchmark BlocklistKey creation - should be O(1) and constant-time
-fn bench_blocklist_key_creation(c: &mut Criterion) {
-    let mut group = c.benchmark_group("blocklist_key_create");
-    for _ in 0..10000 {
-        let _key = ramshield_enforcement::xdp::BlocklistKey::from_ip(std::net::IpAddr::V4(
-            "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap(),
-        ));
+fn measure(name: &str, iterations: u64, mut operation: impl FnMut()) {
+    // Warm up the operation before recording the measured interval.
+    for _ in 0..1_000 {
+        operation();
     }
-    group.finish();
+
+    let started = Instant::now();
+    for _ in 0..iterations {
+        operation();
+    }
+    let elapsed = started.elapsed();
+    report(name, iterations, elapsed);
 }
 
-// Benchmark IP parsing - should be O(1) and not allocate unnecessarily
-fn bench_ip_parsing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ip_parsing");
-    for _ in 0..10000 {
-        let _ip: std::net::Ipv4Addr = "10.0.0.1".parse().unwrap();
-    }
-    group.finish();
+fn report(name: &str, iterations: u64, elapsed: Duration) {
+    let nanos_per_op = elapsed.as_nanos() as f64 / iterations as f64;
+    println!("{name}: {iterations} iterations in {elapsed:?} ({nanos_per_op:.1} ns/op)");
 }
 
-// Benchmark WAL entry struct access - verify struct fields are accessible
-fn bench_wal_entry_struct(c: &mut Criterion) {
-    let mut group = c.benchmark_group("wal_entry_struct");
-    for _ in 0..10000 {
-        let _entry = ramshield_storage::wal::WalEntry::BlockIp {
+fn main() {
+    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+
+    measure("blocklist_key_create", 100_000, || {
+        black_box(ramshield_enforcement::xdp::BlocklistKey::from_ip(\n            black_box(ip),\n        ));
+    });
+
+    measure("ip_parsing", 100_000, || {
+        black_box(black_box("10.0.0.1").parse::<std::net::Ipv4Addr>().unwrap());
+    });
+
+    measure("wal_entry_construct", 100_000, || {
+        black_box(ramshield_storage::wal::WalEntry::BlockIp {
             ip: "10.0.0.1".into(),
-            reason: "test".into(),
+            reason: "benchmark".into(),
             ttl_secs: Some(100),
             ts_ns: 42,
-        };
-    }
-    group.finish();
+        });
+    });
 }
-
-criterion_group!(
-    enforcement_benches,
-    bench_blocklist_key_creation,
-    bench_ip_parsing,
-    bench_wal_entry_struct
-);
-criterion_main!(enforcement_benches);
