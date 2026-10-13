@@ -2,10 +2,12 @@ name: Review Pipeline
 
 on:
   pull_request:
+    branches: [audit-branch, master, main]
   push:
     branches: [master, main, develop]
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -17,10 +19,59 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  required-gates:
+    name: Wait for exact-SHA CI and Backlog Gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Wait for required candidate runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$CANDIDATE_SHA" \
+              --json name,status,conclusion,databaseId --limit 100)
+            ci=$(jq -c '[.[] | select(.name == "CI")] | sort_by(.databaseId) | last // {}' <<< "$runs")
+            backlog=$(jq -c '[.[] | select(.name == "Backlog Gate")] | sort_by(.databaseId) | last // {}' <<< "$runs")
+            ci_status=$(jq -r '.status // "missing"' <<< "$ci")
+            ci_result=$(jq -r '.conclusion // "pending"' <<< "$ci")
+            backlog_status=$(jq -r '.status // "missing"' <<< "$backlog")
+            backlog_result=$(jq -r '.conclusion // "pending"' <<< "$backlog")
+            echo "CI: $ci_status / $ci_result; Backlog Gate: $backlog_status / $backlog_result"
+
+            if [[ "$ci_status" == completed && "$ci_result" != success ]]; then
+              echo "CI did not pass for candidate $CANDIDATE_SHA" >&2
+              exit 1
+            fi
+            if [[ "$backlog_status" == completed && "$backlog_result" != success ]]; then
+              echo "Backlog Gate did not pass for candidate $CANDIDATE_SHA" >&2
+              exit 1
+            fi
+            if [[ "$ci_status" == completed && "$ci_result" == success \
+               && "$backlog_status" == completed && "$backlog_result" == success ]]; then
+              {
+                echo "## Required exact-SHA gates passed"
+                echo "- Candidate: `$CANDIDATE_SHA`"
+                echo "- CI: passed"
+                echo "- Backlog Gate: passed"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Timed out waiting for exact-SHA CI and Backlog Gate runs." >&2
+          exit 1
+
   review:
     name: Contract, build, lint, test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [required-gates]
+    if: ${{ always() && (github.event_name != 'pull_request' || needs.required-gates.result == 'success') }}
     steps:
       - uses: actions/checkout@v4
         with:

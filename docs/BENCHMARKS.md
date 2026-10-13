@@ -201,9 +201,28 @@ The comparison is apples-to-apples only on the bottom four rows: those are all s
 - Against nginx `limit_req` / GoRateLimit: simpler tools, simpler to reason about, and at small scale the performance difference doesn't matter.
 - Against Cloudflare / AWS / Imperva: anycast scrubbing at the edge. RamShield cannot absorb a multi-Tbps volumetric attack — it operates at the last mile, in front of one service. That is the design point, not a bug.
 
-**Where RamShield wins:** zero-FPR (measured, not claimed), 266 KB idle RAM footprint, WAL-durable blocks with 52 ms recovery, XDP kernel-level drop, and no external feed, subscription, or cloud dependency.
+|**Where RamShield wins:** zero-FPR (measured, not claimed), 266 KB idle RAM footprint, WAL-durable blocks with 52 ms recovery, XDP kernel-level drop, and no external feed, subscription, or cloud dependency.
 
----
+|**Regression budgets (evidence-based)**|
+
+*Baseline numbers are single-run measurements (see methodology caveat); budgets are measured value + 30% tolerance to absorb warm-up jitter. Regress on any path that breaches a budget.*
+
+| Area | Baseline | Budget | Measured by |
+|------|----------|--------|-------------|
+| Detection flush (all-promoted) | 185,648 ns/op | ≤ 250,000 ns/op | `field_day` |
+| Detection flush (cold-skip) | 1,310,948 ns/op | ≤ 2,000,000 ns/op | `field_day` |
+| Detection flush (sustained-blocked) | 152,061 ns/op | ≤ 250,000 ns/op | `field_day` |
+| Detection flush (first attack) | 308,264 ns/op | ≤ 500,000 ns/op | `field_day` |
+| Detection per-event (warm) | 45 ns/event | ≤ 100 ns/event | derived |
+| Subnet-window RMW (worst) | 17,988,268 ns/op | ≤ 30,000,000 ns/op | `field_day` |
+| Enforcement block (WAL GroupCommit) | 2,800 ns/op | ≤ 5,000 ns/op | `field_day` |
+| Enforcement duplicate decision (idempotent) | 106 ns/op | ≤ 200 ns/op | `field_day` |
+| Enforcement unblock | 1,470 ns/op | ≤ 3,000 ns/op | `field_day` |
+| Native ingress (inspected throughput) | 154,731 eps | ≥ 100,000 eps | RFC-9411 live |
+| IPC throughput (HMAC-signed) | 126,087 eps | ≥ 100,000 eps | RFC-9411 live |
+| Memory under load (21.3M events) | 44 MB RSS | ≤ 100 MB RSS | RFC-9411 live |
+
+|---
 
 ## Reproducing
 
