@@ -24,6 +24,11 @@ libc = { version = "0.2", optional = true }
 proptest = "1"
 serial_test = "3"
 
+[[bench]]
+name = "enforcement_bench"
+harness = false
+required-features = ["xdp"]
+
 [features]
 mesh = ["dep:ramshield-mesh"]
 xdp = ["dep:aya", "dep:ramshield-xdp", "dep:libc"]
