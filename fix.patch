@@ -1,44 +1,61 @@
-diff --git a/Cargo.toml b/Cargo.toml
-index a1b2c3..d4e5f6 100644
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -4,14 +4,12 @@ members = [
-     "crates/ramshield-config",
-     "crates/ramshield-detection",
-     "crates/ramshield-enforcement",
-     "crates/ramshield-metrics",
-     "crates/ramshield-protocol",
-     "crates/ramshield-storage",
-     "crates/ramshield-types",
-     "crates/ramshield-xdp",
-     "crates/ramshield-cgnat",
--    "crates/ramshield-forecasting",
-     "crates/ramshield-mesh",
-     "crates/ramwal",
- ]
-@@ -27,21 +25,13 @@
+diff --git a/BACKLOG.md b/BACKLOG.md
+index a804a7b..0d4d732 100644
+--- a/BACKLOG.md
++++ b/BACKLOG.md
+@@ -185,6 +185,6 @@ Next action: qualify A-036 on its exact candidate SHA, then continue with A-037
+ - **A-037**: IN PROGRESS (regression budget table added to BENCHMARKS.md; baselines recorded in `docs/development/BENCHMARK_BASELINES.md`. Kernel capture/TPACKET ring and isolated memory behavior not measured; field-day variance too high for threshold).
+ - **A-038**: OPEN (final independent audit — requires two independent reviewer assessments. My review in progress; second reviewer still needed).
+ - **A-039**: OPEN (final acceptance report — pending A‑038 closure. Will attach exact SHA, compare‑to‑master, workflow URLs/job conclusions, fmt result, test counts, known limitations, module scores with evidence, prioritized residual‑risk statement.)
+-- **A-022**: OPEN (WAL stress / heavy traffic testing task added).
++- **A-022**: PASS (WAL stress / heavy traffic testing task completed). Test `wal_stress` passes all 3 tests (wal_heavy_traffic_concurrent_appends, wal_heavy_traffic_mixed_operations, wal_heavy_traffic_recovery_after_stress).
  
- [[bin]]
- name = "ramshield"
- path = "src/main.rs"
- required-features = ["full"]
- 
--[[bin]]
--name = "ramshield-cli"
--path = "src/cli.rs"
--required-features = ["full"]
--
- [lib]
- name = "ramshield"
- path = "src/lib.rs"
- 
- [[bench]]
- name = "hot_paths"
- path = "benches/hot_paths.rs"
- harness = false
- 
- [[bench]]
- name = "field_day"
- path into the repository while making the requested changes.
- EOF
-cat fix.patch
+ **Next steps**: qualify A-036 exact‑SHA gates, finalize A-038 review, secure second reviewer, draft A-039 acceptance report.
+diff --git a/fix.patch b/fix.patch
+index 2c49f6d..e69de29 100644
+--- a/fix.patch
++++ b/fix.patch
+@@ -1,44 +0,0 @@
+-diff --git a/Cargo.toml b/Cargo.toml
+-index a1b2c3..d4e5f6 100644
+---- a/Cargo.toml
+-+++ b/Cargo.toml
+-@@ -4,14 +4,12 @@ members = [
+-     "crates/ramshield-config",
+-     "crates/ramshield-detection",
+-     "crates/ramshield-enforcement",
+-     "crates/ramshield-metrics",
+-     "crates/ramshield-protocol",
+-     "crates/ramshield-storage",
+-     "crates/ramshield-types",
+-     "crates/ramshield-xdp",
+-     "crates/ramshield-cgnat",
+--    "crates/ramshield-forecasting",
+-     "crates/ramshield-mesh",
+-     "crates/ramwal",
+- ]
+-@@ -27,21 +25,13 @@
+- 
+- [[bin]]
+- name = "ramshield"
+- path = "src/main.rs"
+- required-features = ["full"]
+- 
+--[[bin]]
+--name = "ramshield-cli"
+--path = "src/cli.rs"
+--required-features = ["full"]
+--
+- [lib]
+- name = "ramshield"
+- path = "src/lib.rs"
+- 
+- [[bench]]
+- name = "hot_paths"
+- path = "benches/hot_paths.rs"
+- harness = false
+- 
+- [[bench]]
+- name = "field_day"
+- path into the repository while making the requested changes.
+- EOF
+-cat fix.patch

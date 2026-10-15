@@ -1,6 +1,8 @@
 /// A-037 Core benchmarks and regression budgets for ramshield-analytics.
 /// Establishes reproducible baselines for memory operations under load.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ramshield_storage::{Store, WalEntry};
+use ramshield_types::{IpNetwork, IpRecord, TrafficCounters};
 use std::hint::black_box;
 
 /// Benchmark in-memory store insert - measures insertion throughput

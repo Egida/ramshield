@@ -1,6 +1,8 @@
-/// A-037 Core benchmarks and regression budgets for ramshield-protocol.
 /// Establishes reproducible baselines for protocol operations under load.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+/// A-037 Core benchmarks and regression budgets for ramshield-protocol.
+use ramshield_storage::{Store, WalEntry};
+use ramshield_types::IpNetwork;
 use std::hint::black_box;
 
 /// Benchmark IPC message serialization - measures message encoding throughput

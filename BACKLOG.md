@@ -185,6 +185,6 @@ Next action: qualify A-036 on its exact candidate SHA, then continue with A-037 
 - **A-037**: IN PROGRESS (regression budget table added to BENCHMARKS.md; baselines recorded in `docs/development/BENCHMARK_BASELINES.md`. Kernel capture/TPACKET ring and isolated memory behavior not measured; field-day variance too high for threshold).
 - **A-038**: OPEN (final independent audit — requires two independent reviewer assessments. My review in progress; second reviewer still needed).
 - **A-039**: OPEN (final acceptance report — pending A‑038 closure. Will attach exact SHA, compare‑to‑master, workflow URLs/job conclusions, fmt result, test counts, known limitations, module scores with evidence, prioritized residual‑risk statement.)
-- **A-022**: OPEN (WAL stress / heavy traffic testing task added).
+- **A-022**: PASS (WAL stress / heavy traffic testing task completed). Test `wal_stress` passes all 3 tests (wal_heavy_traffic_concurrent_appends, wal_heavy_traffic_mixed_operations, wal_heavy_traffic_recovery_after_stress).
 
 **Next steps**: qualify A-036 exact‑SHA gates, finalize A-038 review, secure second reviewer, draft A-039 acceptance report.
