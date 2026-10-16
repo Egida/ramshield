@@ -9,7 +9,10 @@
 use super::hlc::Hlc;
 use dashmap::DashMap;
 use std::net::IpAddr;
-use std::sync::{RwLock, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    RwLock,
+    atomic::{AtomicU64, Ordering},
+};
 use uuid::Uuid;
 
 pub type Dot = u64;
@@ -296,7 +299,10 @@ impl AworsetBlocklist {
 
     /// Absorb a peer delta. True if it changed local state.
     pub fn merge_delta(&self, delta: &ClusterBlockDelta) -> bool {
-        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
+        let _snapshot_guard = self
+            .snapshot_barrier
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
             return false;
         }
@@ -360,7 +366,10 @@ impl AworsetBlocklist {
 
     /// Export every origin dot and tombstone for a durable checkpoint.
     pub fn export_snapshot(&self) -> AworsetSnapshot {
-        let _snapshot_guard = self.snapshot_barrier.write().unwrap_or_else(|e| e.into_inner());
+        let _snapshot_guard = self
+            .snapshot_barrier
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let mut blocks: Vec<_> = self
             .entries
             .iter()
@@ -460,7 +469,10 @@ impl AworsetBlocklist {
     /// favors convergence safety over bounded tombstone memory until a peer-ack
     /// or epoch-based causal-stability protocol is implemented.
     pub fn purge_expired(&self, now_ms: u64) {
-        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
+        let _snapshot_guard = self
+            .snapshot_barrier
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         const TOMBSTONE_HORIZON_MS: u64 = 86_400_000;
         let expired: Vec<((IpAddr, u32, Uuid), u64)> = self
             .entries
@@ -494,7 +506,10 @@ impl AworsetBlocklist {
 
     /// Merge an observed-remove tombstone.
     pub fn merge_unblock_delta(&self, delta: &ClusterUnblockDelta) -> bool {
-        let _snapshot_guard = self.snapshot_barrier.read().unwrap_or_else(|e| e.into_inner());
+        let _snapshot_guard = self
+            .snapshot_barrier
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if delta.dot.node_id == 0 || delta.dot.incarnation.is_nil() {
             return false;
         }
@@ -526,7 +541,6 @@ impl AworsetBlocklist {
     // Full anti-entropy state is exported as one immutable, deterministically
     // ordered value. Transport framing may split this value for delivery, but
     // recovery does not walk a live mutable map with a continuation cursor.
-
 }
 
 #[cfg(test)]
@@ -873,22 +887,49 @@ mod tests {
 
         for n in 0..EACH {
             let block_ip = IpAddr::V6(std::net::Ipv6Addr::from(n as u128));
-            mesh.entries.insert((block_ip, 7, block_incarnation), (n as u64 + 1, 0, u64::MAX, 2));
+            mesh.entries.insert(
+                (block_ip, 7, block_incarnation),
+                (n as u64 + 1, 0, u64::MAX, 2),
+            );
             expected_blocks.insert(block_ip);
 
             let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
-            mesh.tombstones.insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
+            mesh.tombstones
+                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
             expected_tombstones.insert(tombstone_ip);
         }
 
         let snapshot = mesh.export_snapshot();
         assert_eq!(snapshot.blocks.len(), EACH);
         assert_eq!(snapshot.unblocks.len(), EACH);
-        assert_eq!(snapshot.blocks.iter().map(|delta| delta.ip).collect::<std::collections::HashSet<_>>(), expected_blocks);
-        assert_eq!(snapshot.unblocks.iter().map(|delta| delta.ip).collect::<std::collections::HashSet<_>>(), expected_tombstones);
+        assert_eq!(
+            snapshot
+                .blocks
+                .iter()
+                .map(|delta| delta.ip)
+                .collect::<std::collections::HashSet<_>>(),
+            expected_blocks
+        );
+        assert_eq!(
+            snapshot
+                .unblocks
+                .iter()
+                .map(|delta| delta.ip)
+                .collect::<std::collections::HashSet<_>>(),
+            expected_tombstones
+        );
         assert!(snapshot.blocks.windows(2).all(|pair| {
-            (pair[0].ip, pair[0].dot.node_id, pair[0].dot.incarnation, pair[0].dot.counter)
-                <= (pair[1].ip, pair[1].dot.node_id, pair[1].dot.incarnation, pair[1].dot.counter)
+            (
+                pair[0].ip,
+                pair[0].dot.node_id,
+                pair[0].dot.incarnation,
+                pair[0].dot.counter,
+            ) <= (
+                pair[1].ip,
+                pair[1].dot.node_id,
+                pair[1].dot.incarnation,
+                pair[1].dot.counter,
+            )
         }));
     }
 
