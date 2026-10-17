@@ -245,3 +245,12 @@ Next action: qualify A-036 on its exact candidate SHA, then continue with A-037 
 - Branch check: no ref named exactly `fix` was found; there are multiple `fix/*` refs. The GitHub branch-create request for literal `fix` was rejected with HTTP 422. No code change was made on an alternate branch.
 - CI configuration inspected: `.github/workflows/ci.yml` is configured on pushes to `main`, `develop`, `master`, and `audit-branch`; it does not currently name a literal `fix` branch. `.github/workflows/backlog.yml` runs on `audit-branch` pushes and PRs targeting `audit-branch`, `master`, or `main`, and includes SHM ABI/concurrency checks. Neither was dispatched for the new task as no implementation branch/PR exists yet.
 - Current status: backlog imported; first bounded task ready as Issue #30; automated dispatch remains BLOCKED pending workflow task #31 and an explicit branch target.
+
+
+### 2026-10-17 workflow evidence — backlog commit `99310ec84bb5364790e86f6d685a9487f8cf1c2b`
+
+- CI run: [39063742287](https://github.com/grep999/ramshield/actions/runs/39063742287) on this exact SHA. Latest observed state: workflow-lint succeeded; Formatting, Check, Test, Dependency audit, Build, and Clippy were still running at last inspection. Do not infer final CI status from this snapshot.
+- no-unwrap run: [39063742273](https://github.com/grep999/ramshield/actions/runs/39063742273) failed on the same SHA. The logged finding is `crates/ramshield-mesh/src/aworset.rs:204`: `.expect("mesh dot counter exhausted; refusing to emit a duplicate CRDT dot")`. This is a mesh-source policy/gate finding, not caused by the backlog-only diff. Triage it on an authorized dedicated mesh/fix branch; do not expand Issue #30 scope to fix it.
+- subnet stress: [39063742259](https://github.com/grep999/ramshield/actions/runs/39063742259) was still running at last inspection.
+- No runtime patch, workflow dispatch, or PR has been made by this orchestration pass. The first implementation task is Issue #30, pending an explicit valid branch target and worker execution.
+
