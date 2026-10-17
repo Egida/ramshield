@@ -188,3 +188,50 @@ Next action: qualify A-036 on its exact candidate SHA, then continue with A-037 
 - **A-022**: PASS (WAL stress / heavy traffic testing task completed). Test `wal_stress` passes all 3 tests (wal_heavy_traffic_concurrent_appends, wal_heavy_traffic_mixed_operations, wal_heavy_traffic_recovery_after_stress).
 
 **Next steps**: qualify A-036 exact‑SHA gates, finalize A-038 review, secure second reviewer, draft A-039 acceptance report.
+
+
+## Audit import — 2026-10-17 (source: attached Comprehensive Codebase Audit & Architectural Scan)
+
+**Handling rule:** the attached audit is a source of candidate findings, not proof that each finding still exists. Revalidate every item against the selected branch before code changes. Its module scores are provisional and must not be reported as current ratings without reproducing the review.
+
+### P0 — safety/security and fail-open correctness
+
+| ID | Area | Required work / acceptance evidence | Status |
+|---|---|---|---|
+| I-001 | CGNAT SHM read under writer contention | Re-audit `ramshield_shm_read` in `crates/ramshield-cgnat/include/ramshield_shm.h`. Ensure an incoherent seqlock read cannot be treated as an empty/nonmatching slot or cause a false negative. Avoid retry logic that can underflow an unsigned probe index or spin without a bound. Add deterministic/concurrent C regression coverage, run ABI/stress gates, record exact SHA. | OPEN — live-source revalidation required |
+| I-002 | CGNAT IPv4 prefix validation | Verify `ramshield_shm_read_ipv4` rejects `prefix_len > 32` before deriving/using a key. Invalid input must return a policy/input failure and must not query hash slot 0. Add tests for 0, 32, 33 and maximum integer values where the API type allows. | OPEN — live-source revalidation required |
+| I-003 | Mesh production safety and provenance | Keep mesh optional and disabled in production. Do not ship/enable until authenticated per-origin signatures/identity, receiver-confirmed recovery completion (generation + WAL boundary + deterministic state digest), restart/retention behavior, and multi-process fault-injection convergence gates pass on the same exact SHA with independent review. | BLOCKED — explicit mesh acceptance gate |
+| I-004 | Dashboard authentication | Re-check the attached audit's claim that `/login` is plaintext/unsafe against current routes and deployment defaults. If confirmed, fix the smallest security boundary defect and add negative/auth regression tests. Do not infer exposure from a route name alone. | OPEN — verify current implementation |
+
+### P1 — enforcement and bounded recovery
+
+| ID | Area | Required work / acceptance evidence | Status |
+|---|---|---|---|
+| I-010 | XDP map reconcile iterator churn | Revalidate `AyaXdpApplier::reconcile` in `crates/ramshield-enforcement/src/xdp.rs`. If deletion during `get_next_key` can invalidate iteration, collect stale keys in a bounded buffer before deletion; handle `ENOENT` and map churn without loops/skipped live rules. Add a churn regression test and run enforcement tests. | OPEN — verify current implementation |
+| I-011 | Storage eviction vs threat accumulators | Verify cardinality-driven LRU eviction cannot repeatedly erase the attacker's own CUSUM/pulse-wave history and create a threshold bypass. Define bounded behavior under capacity pressure; add adversarial rotating-IP tests before changing policy. | OPEN — verify threat model and current implementation |
+| I-012 | Host-network Kubernetes capability review | Review `deploy/k8s/daemonset.yaml` capabilities against the exact XDP/capture operations required. Minimize capabilities and document why each retained capability is required; validate manifests and deployment smoke tests. Do not remove capabilities blindly if it breaks enforcement. | OPEN — security review |
+| I-013 | SYNPROXY fixture parity | Compare `tests/fixtures/synproxy.nft` with `config.baseline.toml` and actual generator behavior; align ports and prove port 80 coverage if discrepancy remains. | OPEN — verify current implementation |
+
+### P2 — maintenance, reproducibility, and operator correctness
+
+| ID | Area | Required work / acceptance evidence | Status |
+|---|---|---|---|
+| I-020 | Dashboard quarantine search | Confirm whether `#tableSearch` has an input listener in `src/dashboard/static/index.html`. If absent, connect it to the existing filter function and test filtering by IP, CIDR and module. | OPEN — verify current implementation |
+| I-021 | Container build-cache behavior | Inspect `Containerfile` and prove the layer-cache invalidation problem before patching. Keep dependency/build layers cached while ensuring real source changes rebuild the binary; validate with two controlled builds or CI evidence. | OPEN — verify current implementation |
+| I-022 | Systemd portability | Search systemd unit templates (including backlog dispatcher) for developer-specific absolute paths. Replace with package-relative or configurable paths and verify service working-directory/user behavior. | OPEN — verify current implementation |
+| I-023 | Remove stale repository artifacts | Check whether `src/engine/boot.rs.orig` and root `fix.patch` still exist and whether any references require them. Delete only if present and unneeded; ensure clean build/tests and no packaging references. | OPEN — verify current tree |
+| I-024 | Protocol HMAC documentation | Recompute the exact signing string from the implementation and tests, then correct `crates/ramshield-protocol/README.md` to match. Add/retain a test or golden vector that locks down key ID, timestamp, payload encoding and signature. Do not copy the attached report's proposed format without source verification. | OPEN — source/docs parity |
+| I-025 | Dependency/documentation drift | Verify `ramshield-types` error dependency split and `BlockReason` documentation, config schema examples, analytics/Welford docs, XDP hardware verification limits, forecast priors/polling claims, and module-level status claims. Update only stale factual claims and clearly identify tests that require live kernel/hardware. | OPEN — audit evidence needed |
+| I-026 | Benchmark harness duplication | Inspect `ramwal` benchmark targets for duplicated Criterion harness code. Consolidate only if it reduces maintenance without obscuring benchmark comparability; attach before/after commands/results. | OPEN — low priority |
+
+### Audit execution protocol
+
+1. Start with one bounded task from the highest-priority OPEN row. Re-fetch the selected branch's source at task start; older audit text and old patch hunks are not authoritative.
+2. Write a failing regression test or a reproducible demonstration before a behavior fix wherever practical.
+3. Patch only the task's files plus directly required tests/docs. Avoid cross-task cleanup in the same commit.
+4. Run the narrow tests first, then applicable workspace tests, formatting, strict Clippy, C/ABI tests, and deployment validation for changed surfaces. Record commands and real exit codes; do not claim unrun gates.
+5. Push/commit to the intended fix branch, wait for GitHub Actions, inspect failed job logs, fix the root cause, and rerun the narrow gate before dependent/full gates.
+6. A reviewer different from the fixer examines the actual diff, regression evidence, exact head SHA and CI results. No auto-merge, deploy, force-push, or production mesh enablement.
+7. Update status only with evidence. Each pass records base/result SHA, changed paths, test commands/results, workflow links, remaining risks and the next task.
+
+**First candidate:** I-001/I-002 shared-memory lookup correctness, but only after inspecting the exact intended branch and adding regression tests. The branch name `fix` was not present when checked on 2026-10-17; the repository contains several `fix/*` branches. Do not silently substitute one of them for the requested literal branch.
