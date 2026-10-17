@@ -235,3 +235,13 @@ Next action: qualify A-036 on its exact candidate SHA, then continue with A-037 
 7. Update status only with evidence. Each pass records base/result SHA, changed paths, test commands/results, workflow links, remaining risks and the next task.
 
 **First candidate:** I-001/I-002 shared-memory lookup correctness, but only after inspecting the exact intended branch and adding regression tests. The branch name `fix` was not present when checked on 2026-10-17; the repository contains several `fix/*` branches. Do not silently substitute one of them for the requested literal branch.
+
+
+## 2026-10-17 orchestration checkpoint
+
+- Audit import commit: `8edc3b5e0eca6d111ddfacb6d25f5d292e464c53` (on `master`; changes only backlog text).
+- Task `I-001/I-002`: [Issue #30](https://github.com/grep999/ramshield/issues/30) — SHM reader contention and IPv4 prefix validation, bounded scope and acceptance gates recorded.
+- Workflow task: [Issue #31](https://github.com/grep999/ramshield/issues/31) — close the dispatch/evidence gap before introducing any privileged automation.
+- Branch check: no ref named exactly `fix` was found; there are multiple `fix/*` refs. The GitHub branch-create request for literal `fix` was rejected with HTTP 422. No code change was made on an alternate branch.
+- CI configuration inspected: `.github/workflows/ci.yml` is configured on pushes to `main`, `develop`, `master`, and `audit-branch`; it does not currently name a literal `fix` branch. `.github/workflows/backlog.yml` runs on `audit-branch` pushes and PRs targeting `audit-branch`, `master`, or `main`, and includes SHM ABI/concurrency checks. Neither was dispatched for the new task as no implementation branch/PR exists yet.
+- Current status: backlog imported; first bounded task ready as Issue #30; automated dispatch remains BLOCKED pending workflow task #31 and an explicit branch target.
