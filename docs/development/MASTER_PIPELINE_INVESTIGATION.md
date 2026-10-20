@@ -156,6 +156,38 @@ That is precisely the change `aa3aeb8` intended, done without truncating. The re
 rustfmt-clean at edition 2024 and retains `PeerEpoch`, `merge_unblock_delta`, `record_ban` and
 `export_snapshot`.
 
+**That single-file repair turned out to be insufficient**, and the reason is worth recording:
+`origin/audit-branch` carries the *same* half-landed-refactor pathology as `master`, and its
+`transport.rs` expects a *newer* `aworset.rs` than `37e5abb` provides. `cargo check` on the
+one-file repair still failed with 18 errors — `E0432 crate::condition_sync`,
+`E0432 transport::MeshPeer`, `E0425 PeerEpoch`, `E0063 tombstone_acks`, `E0271` x4. The branch
+had also lost master's mesh WAL-replay and mesh-snapshot work in `src/engine/` (220 lines in
+`boot.rs`, 49 in `checkpoint.rs`), and carried a leftover unused
+`use crate::forecasting::Forecaster;` in `src/engine/mod.rs`.
+
+**The repair that actually works** is on branch `fix/audit-branch-aworset-restore`, commit
+`3301b9d`: take the complete validated implementation from the frozen candidate `3308049`
+(peer-aware transport, `PeerEpoch` and epoch-based tombstone GC, recovery-proof binding,
+durable mesh projection, bench fixes, plus the candidate `Cargo.lock`), and take `origin/master`
+for `src/engine/{boot.rs,checkpoint.rs,mod.rs}` and `src/cli.rs`, which retain the mesh
+WAL-replay and mesh-snapshot work this branch had lost. Verified on that tree:
+
+```
+cargo fmt --all -- --check                                    exit 0
+cargo check --workspace --locked --all-targets --all-features   exit 0
+cargo clippy --workspace --locked --all-targets -- -D warnings  exit 0
+cargo clippy --workspace --locked --features full --all-targets -- -D warnings exit 0
+cargo test --workspace --locked                                exit 0  (549 passed / 0 failed / 14 ignored)
+cargo test --workspace --locked --all-features                 exit 0  (585 passed / 0 failed / 14 ignored)
+cargo build --release --locked --features full                 exit 0
+```
+
+**Generalisable lesson:** the three broken refs (`master`, `audit-branch`, and the
+`audit-branch` "restore" chain) are all the *same* defect class — a merge that landed the
+callers and left the implementation behind. Any future repair of this shape should transplant
+the whole validated implementation rather than repairing the single file that first fails to
+compile.
+
 ## RC-8 (P0) — `ramshield-enforcement` `mesh` feature: botched half-rename in `service/mesh.rs`
 
 `crates/ramshield-enforcement/src/service/mesh.rs` binds `checkpoint_shared` and `blocklist`
