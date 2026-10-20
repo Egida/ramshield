@@ -124,9 +124,37 @@ The second line states the intent, but the pushed file is the truncated one. Tha
 `cargo fmt --all -- --check` (the QUALITY job), and the CORE job fails with `E0432`, `E0425`,
 `E0063`, `E0271` x4, `E0308` x2, `E0027` and `E0599`.
 
-`origin/audit-branch` has since advanced four commits
-(`d8e7d40` -> `37e5abb` -> `aa3aeb8` -> `239c2e2` "restore full aworset.rs with rustfmt-compliant
-import order"), so this may self-heal on the next scheduled run. **Not yet verified.**
+`origin/audit-branch` has since advanced five more commits, and the net effect is that the file
+is now *worse*, not better. The "restore aworset.rs" chain, all on 2026-10-20:
+
+| Commit | Time | `aworset.rs` size | What the commit actually did |
+|---|---|---|---|
+| `7ca6192` | 12:01 | **0 bytes** | "restore complete rustfmt-clean aworset.rs from acc6feba baseline" — wrote an empty file |
+| `d8e7d40` | 13:01 | **11 bytes** | "restore valid rustfmt-clean aworset.rs" — wrote the literal text `PLACEHOLDER` |
+| `37e5abb` | 13:03 | 31295 bytes | "restore valid rustfmt-clean aworset.rs" — **the genuine file** |
+| `aa3aeb8` | 14:01 | **522 bytes** | "reorder std::sync imports for rustfmt" — truncated 31295 to 522 bytes and deleted the epoch-tracking section |
+| `239c2e2` | 14:01 | **28 bytes** | "restore full aworset.rs with rustfmt-compliant import order" — replaced 31 KB with the literal text below |
+
+`239c2e2`'s committed file is exactly:
+
+```
+$(cat /tmp/aworset_fixed.rs)
+```
+
+A shell command substitution that was written into the file verbatim instead of being executed.
+Its commit message claims *"Previous truncated write corrected. Full source restored with RwLock
+before atomic::{...} so cargo fmt --all -- --check passes. Formatting/import order only."* — every
+part of that is false: the file is 28 bytes of literal shell text, it is not a restore, and it
+removed the epoch-tracking section.
+
+**So `origin/audit-branch` is currently uncompilable**, and the next scheduled
+"Mesh Acceptance Watch" run will fail again, differently.
+
+**Correct repair (verified):** take the genuine file from `37e5abb` (31295 bytes) and swap the
+two lines of the `use std::sync::{...}` block so `RwLock` precedes `atomic::{AtomicU64, Ordering}`.
+That is precisely the change `aa3aeb8` intended, done without truncating. The result is
+rustfmt-clean at edition 2024 and retains `PeerEpoch`, `merge_unblock_delta`, `record_ban` and
+`export_snapshot`.
 
 ## RC-8 (P0) — `ramshield-enforcement` `mesh` feature: botched half-rename in `service/mesh.rs`
 
