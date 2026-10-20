@@ -100,10 +100,17 @@ ramshield_uptime_seconds 342
 # TYPE ramshield_events_total counter
 ramshield_events_total 5490000
 
-# HELP ramshield_blocks_total Total block decisions applied.
+# HELP ramshield_blocks_total Total blocks issued.
 # TYPE ramshield_blocks_total counter
 ramshield_blocks_total 47
 ```
+
+`ramshield_blocks_total` counts block **decisions issued** — it matches the
+`HELP` text the exporter emits. A block whose kernel (XDP) projection failed
+is still counted here, because the decision was issued; those failures are
+counted separately by `ramshield_xdp_apply_failures_total`. Blocks actually
+projected into the kernel map are therefore
+`ramshield_blocks_total - ramshield_xdp_apply_failures_total`.
 
 `render_prometheus_cached()` caches the output for 1 second — preventing re-rendering on every scrape request. Prometheus typically scrapes every 15–30 seconds, so the cache hit rate is >95%.
 

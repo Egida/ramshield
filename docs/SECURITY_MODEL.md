@@ -11,7 +11,8 @@ external traffic
    ↓
 proxy / telemetry producer        untrusted input
    ↓
-IPC protocol                      authenticated boundary
+IPC protocol                      authenticated boundary WHEN ipc.auth_keys is set;
+                                  loopback-only and UNAUTHENTICATED by default
    ↓
 detection                        bounded state
    ↓
@@ -21,6 +22,14 @@ XDP / SHM                         kernel/local projections
 ```
 
 The telemetry path must be treated as hostile data. IPC framing, authentication, replay protection, timeouts and size bounds are part of the boundary.
+
+The IPC boundary is **authenticated only when `ipc.auth_keys` is configured**.
+Out of the box the IPC binds `127.0.0.1:7890`, requires no authentication, and
+applies no role check, so the boundary is a loopback boundary rather than an
+authenticated one. A non-loopback bind fails `validate()` unless HMAC keys are
+set and a TLS-terminating proxy is asserted, so the unauthenticated mode cannot
+be widened past loopback by configuration alone. See `docs/IPC.md` →
+*Default posture* for the details.
 
 ## Failure policy
 

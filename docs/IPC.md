@@ -6,6 +6,30 @@ Transport: TCP, address from `ipc.tcp_addr`, max concurrent connections from `ip
 
 ## Authentication (P1/P2/P3)
 
+### Default posture
+
+**The out-of-the-box IPC is unauthenticated.** `ipc.auth_keys` defaults to
+empty and `ipc.require_auth` defaults to `false`
+(`crates/ramshield-config/src/sections/ipc.rs`), so with the default
+configuration the server accepts frames that carry no `auth` envelope at all:
+
+- there is no principal, so the "Min role" column in the request table below
+  is **not** applied — role authorization only runs when a principal is
+  present (`src/ipc/server/handlers.rs`, `process_request`);
+- there is no verified key, so the enforcement command's `actor` falls back
+  to the historical hard-coded `"admin"`.
+
+The bind defaults to `127.0.0.1:7890`, so this is a **loopback-only** surface:
+any local process on the host can drive it. Widening the exposure is
+prevented at startup — a non-loopback `ipc.tcp_addr` fails `validate()` unless
+`ipc.auth_keys` is non-empty *and* `ipc.behind_tls_proxy = true` is asserted
+(`crates/ramshield-config/src/validate.rs`).
+
+Everything below this paragraph describes the **authenticated** mode, which is
+what you get once `ipc.auth_keys` is configured.
+
+### Authenticated mode
+
 When `ipc.auth_keys` is non-empty, every frame MUST carry an `auth` envelope:
 
 ```json
@@ -15,8 +39,8 @@ When `ipc.auth_keys` is non-empty, every frame MUST carry an `auth` envelope:
 - **HMAC-SHA256** over `<ts_ms>.<key_id><payload>` (payload = compact JSON of the frame without `auth`).
 - **Clock skew**: ±10 s (`MAX_CLOCK_SKEW_MS`).
 - **Replay protection**: mandatory in production — `verify_authenticated` requires a `&ReplayStore`. The server constructs one bounded LRU store at startup; production IPC never passes `None`.
-- **Identity (P1)**: the verified `key_id` becomes the `actor` field on every enforcement command — no hard-coded `"admin"`.
-- **Authorization (P2)**: `key_roles` config assigns a `KeyRole` per `key_id`. Roles: `Telemetry` < `ReadOnly` < `Operator` < `Admin`. Unauthorized requests return `403 "insufficient role"`. Unauthenticated frames return `401`.
+- **Identity (P1)**: the verified `key_id` becomes the `actor` field on every enforcement command — no hard-coded `"admin"`. (This holds only in authenticated mode; see *Default posture* above.)
+- **Authorization (P2)**: in authenticated mode, `key_roles` config assigns a `KeyRole` per `key_id`. Roles: `Telemetry` < `ReadOnly` < `Operator` < `Admin`. Unauthorized requests return `403 "insufficient role"`. Unauthenticated frames return `401`.
 - **Transport safety (P4)**: a non-loopback `ipc.tcp_addr` without `ipc.behind_tls_proxy = true` fails `validate()` at startup. HMAC authenticates; it does not encrypt.
 
 ## Requests (`tag = "type"`, snake_case)
@@ -34,6 +58,10 @@ When `ipc.auth_keys` is non-empty, every frame MUST carry an `auth` envelope:
 | `report_connection`  | `ip: string`, `bytes: number`, `status_code: number`, `proto_fp: number` | Telemetry |
 | `report_connections` | `events: [{ ip, bytes, status_code, proto_fp }, ...]` | Telemetry |
 | `flush`              | — | Admin |
+
+The **Min role** column applies only when a principal is present — that is,
+when `ipc.auth_keys` is non-empty. In the default unauthenticated mode no
+role is checked. See *Default posture* above.
 
 ## Responses
 
