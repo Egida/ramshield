@@ -508,7 +508,7 @@ impl XdpApplier for AyaXdpApplier {
         let mut evicted_count: u64 = 0;
         for (name, expected) in [("BLOCKLIST", v4_keys), ("BLOCKLIST6", v6_keys)] {
             let expected: std::collections::HashSet<BlocklistKey> = expected.into_iter().collect();
-            self.with_map(name, |m| {
+            let stale_count = self.with_map(name, |m| {
                 let fd_raw = m.map().fd().as_fd().as_raw_fd();
                 let mut prev_key: Option<BlocklistKey> = None;
                 // STAGED DELETION BUFFER: decouple enumeration from deletion
@@ -534,7 +534,7 @@ impl XdpApplier for AyaXdpApplier {
                     }
                 }
                 // Execute deletions after collection to avoid race conditions.
-                let mut stale_count = staged_deletions.len();
+                let stale_count = staged_deletions.len();
                 for k in staged_deletions.iter() {
                     // SAFETY: same live map fd and 16-byte key layout as before.
                     unsafe { raw_delete_elem(fd_raw, k) }.map_err(MapError::from)?;
@@ -542,7 +542,7 @@ impl XdpApplier for AyaXdpApplier {
                 for k in &expected {
                     m.insert(*k, PERMANENT, 0)?;
                 }
-                Ok(())
+                Ok(stale_count)
             })?;
             if stale_count > 0 {
                 evicted_count += stale_count as u64;

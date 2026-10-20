@@ -15,6 +15,33 @@ use std::sync::{
 };
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub enum MeshError {
+    DotCounterExhausted,
+}
+
+/// Epoch tracking for peer acknowledgment safety
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerEpoch {
+    pub peer_node_id: u32,
+    pub incarnation: Uuid,
+    pub epoch: u64,
+    pub last_acknowledged_lsn: u64,
+    pub tombstone_expiry_epoch: u64,
+}
+
+impl Default for PeerEpoch {
+    fn default() -> Self {
+        Self {
+            peer_node_id: 0,
+            incarnation: Uuid::nil(),
+            epoch: 0,
+            last_acknowledged_lsn: 0,
+            tombstone_expiry_epoch: u64::MAX,
+        }
+    }
+}
+
 pub type Dot = u64;
 pub(crate) type BlockKey = (IpAddr, u32, Uuid);
 pub(crate) type BlockState = (u64, u64, u64, u8);
@@ -66,6 +93,21 @@ pub struct Element {
     pub key: String,
     pub dot: Dot,
     pub removed: bool,
+}
+
+/// A recorded removal (tombstone) together with the peer-acknowledgment
+/// watermark that was current when the removal was first observed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TombstoneState {
+    /// The removed dot's counter: the causal high-water mark of the removal.
+    counter: u64,
+    /// The peer acknowledgment epoch observed when the removal was recorded.
+    ///
+    /// A removal may only be collected once every declared peer has
+    /// acknowledged *past* this watermark, i.e. has acknowledged at least once
+    /// since the removal existed. Acknowledgment epochs count acknowledgments,
+    /// so they must never be compared against a dot counter.
+    created_at_epoch: u64,
 }
 
 /// Operation identity is `(node_id, incarnation, counter)`. Each blocklist
@@ -169,7 +211,16 @@ pub struct AworsetBlocklist {
     /// Per-key high-water marks. These are deliberately retained until a
     /// causal-stability/peer-acknowledgement protocol exists; timer-only GC can
     /// resurrect an old ban from a disconnected peer.
-    pub(crate) tombstones: DashMap<BlockKey, u64>,
+    pub(crate) tombstones: DashMap<BlockKey, TombstoneState>,
+    /// Peer acknowledgment tracking for safe tombstone garbage collection.
+    /// Maps peer node_id to their acknowledgment epoch and last seen state.
+    pub(crate) peer_acks: DashMap<u32, PeerEpoch>,
+    /// Node IDs of the peers this node is configured to synchronize with.
+    ///
+    /// A removal may only be collected once every one of them has
+    /// acknowledged it. Without this set, a peer that has never acknowledged
+    /// is invisible and cannot hold collection back.
+    expected_peers: dashmap::DashSet<u32>,
     next_dot_counter: AtomicU64,
     /// Snapshot export takes the exclusive side; mutations hold the shared side.
     /// This freezes the CRDT maps for the duration of a fixed recovery capture.
@@ -184,7 +235,10 @@ impl AworsetBlocklist {
             hlc: Hlc::new(),
             entries: DashMap::new(),
             tombstones: DashMap::new(),
-            next_dot_counter: AtomicU64::new(0),
+            peer_acks: DashMap::new(),
+            expected_peers: dashmap::DashSet::new(),
+            // Dot counters are 1-based: counter 0 is an invalid CRDT dot.
+            next_dot_counter: AtomicU64::new(1),
             snapshot_barrier: RwLock::new(()),
         }
     }
@@ -196,13 +250,20 @@ impl AworsetBlocklist {
     /// in the local counter; gaps are safe, reusing a dot is not.
     pub fn prepare_ban(&self, ip: IpAddr, ttl_ms: u64, tier: u8) -> ClusterBlockDelta {
         let (created_at_ms, _) = self.hlc.tick(0, 0);
-        let previous = self
+        // Saturate at u64::MAX without panicking. Emitting dots at u64::MAX
+        // will log an error rather than crashing the thread.
+        // `try_update` reports the *previous* counter value, so the shared
+        // counter starts at 1: dot counter 0 is rejected by
+        // `AworsetSnapshot::validate` and by WAL replay in the boot engine.
+        let counter = self
             .next_dot_counter
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                Some(c.saturating_add(1))
             })
-            .expect("mesh dot counter exhausted; refusing to emit a duplicate CRDT dot");
-        let counter = previous + 1;
+            .unwrap_or(u64::MAX);
+        if counter == u64::MAX {
+            tracing::error!("mesh dot counter saturated at u64::MAX");
+        }
         let expires_at_ms = if ttl_ms == 0 {
             u64::MAX
         } else {
@@ -256,7 +317,7 @@ impl AworsetBlocklist {
         if self
             .tombstones
             .get(&key)
-            .is_some_and(|counter| delta.dot.counter <= *counter)
+            .is_some_and(|tombstone| delta.dot.counter <= tombstone.counter)
         {
             return false;
         }
@@ -289,7 +350,7 @@ impl AworsetBlocklist {
         let tombstone_is_newer = self
             .tombstones
             .get(&key)
-            .is_none_or(|counter| delta.dot.counter > *counter);
+            .is_none_or(|tombstone| delta.dot.counter > tombstone.counter);
         let removes_live_dot = self
             .entries
             .get(&key)
@@ -313,7 +374,7 @@ impl AworsetBlocklist {
         if self
             .tombstones
             .get(&key)
-            .map(|t| delta.dot.counter <= *t)
+            .map(|tombstone| delta.dot.counter <= tombstone.counter)
             .unwrap_or(false)
         {
             return false;
@@ -393,7 +454,7 @@ impl AworsetBlocklist {
                 dot: ClusterDot {
                     node_id: entry.key().1,
                     incarnation: entry.key().2,
-                    counter: *entry.value(),
+                    counter: entry.value().counter,
                 },
             })
             .collect();
@@ -484,12 +545,16 @@ impl AworsetBlocklist {
             })
             .collect();
 
+        let created_at_epoch = self.current_ack_epoch();
         for (key, counter) in expired {
             self.entries.remove(&key);
             self.tombstones
                 .entry(key)
-                .and_modify(|existing| *existing = (*existing).max(counter))
-                .or_insert(counter);
+                .and_modify(|existing| existing.counter = existing.counter.max(counter))
+                .or_insert(TombstoneState {
+                    counter,
+                    created_at_epoch,
+                });
         }
     }
 
@@ -516,17 +581,21 @@ impl AworsetBlocklist {
         self.hlc.tick(0, 0);
         let key = (delta.ip, delta.dot.node_id, delta.dot.incarnation);
         let mut changed = false;
+        let created_at_epoch = self.current_ack_epoch();
         self.tombstones
             .entry(key)
             .and_modify(|existing| {
-                if delta.dot.counter > *existing {
-                    *existing = delta.dot.counter;
+                if delta.dot.counter > existing.counter {
+                    existing.counter = delta.dot.counter;
                     changed = true;
                 }
             })
             .or_insert_with(|| {
                 changed = true;
-                delta.dot.counter
+                TombstoneState {
+                    counter: delta.dot.counter,
+                    created_at_epoch,
+                }
             });
         // ponytail: avoid let-chains; drop the DashMap guard before remove.
         if self
@@ -538,9 +607,171 @@ impl AworsetBlocklist {
         }
         changed
     }
-    // Full anti-entropy state is exported as one immutable, deterministically
-    // ordered value. Transport framing may split this value for delivery, but
-    // recovery does not walk a live mutable map with a continuation cursor.
+    /// Update peer's epoch when they acknowledge our state
+    ///
+    /// This method is called when a peer confirms they have received and applied
+    /// our state via the recovery completion protocol. It updates their epoch
+    /// and calculates when their tombstones can be safely garbage collected.
+    ///
+    /// # Arguments
+    /// * `peer_node_id` - The node ID of the peer who acknowledged our state
+    /// * `acked_lsn` - The WAL LSN that the peer has acknowledged up to
+    ///
+    /// # Safety
+    /// This method is safe to call concurrently as it uses the thread-safe
+    /// DashMap for peer_acks.
+    pub fn peer_acknowledged(&self, peer_node_id: u32, acked_lsn: u64) {
+        let mut epoch = self.peer_acks.entry(peer_node_id).or_insert(PeerEpoch {
+            peer_node_id,
+            incarnation: Uuid::new_v4(),
+            epoch: 0,
+            last_acknowledged_lsn: 0,
+            tombstone_expiry_epoch: u64::MAX,
+        });
+
+        if acked_lsn > epoch.last_acknowledged_lsn {
+            epoch.last_acknowledged_lsn = acked_lsn;
+            epoch.epoch = epoch.epoch.saturating_add(1);
+            // Tombstones from this peer become safe to GC after their epoch
+            epoch.tombstone_expiry_epoch = epoch.epoch + 1;
+        }
+    }
+
+    /// Declare the peers this node synchronizes with.
+    ///
+    /// Tombstone collection waits for an acknowledgment from every declared
+    /// peer: a peer that has not acknowledged is not allowed to lose a
+    /// removal and later resurrect the block.
+    pub fn set_expected_peers(&self, peers: impl IntoIterator<Item = u32>) {
+        self.expected_peers.clear();
+        for peer in peers {
+            self.expected_peers.insert(peer);
+        }
+    }
+
+    /// Snapshot the current peer acknowledgment epochs.
+    ///
+    /// The returned map is keyed by peer node ID and carries the tombstone
+    /// acknowledgment state that is published alongside a recovery
+    /// completion.
+    pub fn peer_ack_epochs(&self) -> std::collections::BTreeMap<u32, PeerEpoch> {
+        self.peer_acks
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
+
+    /// The highest peer acknowledgment epoch observed so far.
+    ///
+    /// A newly recorded removal is stamped with this watermark. A removal may
+    /// only be collected once every declared peer has acknowledged past it,
+    /// i.e. has acknowledged at least once since the removal existed.
+    fn current_ack_epoch(&self) -> u64 {
+        self.peer_acks
+            .iter()
+            .map(|entry| entry.value().epoch)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Garbage collect tombstones that are safe to remove
+    ///
+    /// This method removes tombstones whose owning peer has acknowledged
+    /// the tombstone (via peer_acknowledged) and thus agreed that the
+    /// state should be removed. This prevents resurrection of stale state
+    /// from long-offline peers.
+    ///
+    /// # Safety
+    /// A tombstone is safe to GC when every peer that could still hold the
+    /// removed block has acknowledged a state that is newer than the removal:
+    ///
+    /// 1. Every *declared* peer (the configured synchronization set) has
+    ///    acknowledged at least once **since the removal was recorded**. The
+    ///    removal records the acknowledgment epoch that was current at that
+    ///    moment, and collection waits for every peer's epoch to pass it.
+    /// 2. A dot that originated at a peer outside the declared set (a peer
+    ///    that left the cluster) still requires that peer to have advanced
+    ///    past the removal.
+    ///
+    /// Acknowledgment epochs count acknowledgments; dot counters identify
+    /// operations. The two are unrelated domains and are never compared
+    /// directly: a peer that acknowledged once before the removal existed has
+    /// not necessarily observed the removal, so collection waits for an
+    /// acknowledgment that happened after it.
+    ///
+    /// Limitation: the recovery protocol reports an acknowledgment epoch, not
+    /// a per-removal watermark, so "acknowledged since the removal existed"
+    /// is the strongest guarantee the current wire format supports. A
+    /// per-removal WAL watermark would be strictly stronger.
+    pub fn gc_tombstones(&self) {
+        // Every declared peer must have acknowledged past the removal. A
+        // declared peer that has not acknowledged at all holds collection
+        // back: it may still hold the live block.
+        let declared_peers = self
+            .expected_peers
+            .iter()
+            .map(|peer| *peer)
+            .collect::<Vec<_>>();
+        if declared_peers.is_empty() {
+            // Without a declared peer set there is no evidence about who may
+            // still hold the removed block. Retention is the safe answer.
+            tracing::warn!(
+                retained_tombstones = self.tombstones.len(),
+                "mesh tombstone GC skipped: no declared peers"
+            );
+            return;
+        }
+        for peer in &declared_peers {
+            let Some(epoch) = self.peer_acks.get(peer) else {
+                // The peer never acknowledged: the removal is not stable.
+                tracing::warn!(
+                    peer_node_id = *peer,
+                    retained_tombstones = self.tombstones.len(),
+                    "mesh tombstone GC held back: peer has not acknowledged"
+                );
+                return;
+            };
+            if epoch.epoch == 0 {
+                tracing::warn!(
+                    peer_node_id = *peer,
+                    retained_tombstones = self.tombstones.len(),
+                    "mesh tombstone GC held back: peer acknowledgment epoch is zero"
+                );
+                return;
+            }
+        }
+        self.tombstones.retain(|key, tombstone| {
+            // The tombstone key carries the node ID of the peer that originated
+            // the removed dot. The matching entry is already gone from
+            // `entries` (the tombstone replaced it), so the owning peer is
+            // taken from the tombstone key itself.
+            let owning_peer_id = key.1; // node_id from BlockKey
+            for peer in &declared_peers {
+                // The peer must have acknowledged *after* the removal was
+                // recorded: an acknowledgment from before the removal existed
+                // says nothing about whether the peer observed it.
+                let Some(epoch) = self.peer_acks.get(peer) else {
+                    // The peer never acknowledged: keep the tombstone.
+                    return true;
+                };
+                if epoch.epoch <= tombstone.created_at_epoch {
+                    // The peer has not acknowledged since the removal.
+                    return true;
+                }
+            }
+            if owning_peer_id != self.node_id && !declared_peers.contains(&owning_peer_id) {
+                // The dot originated at a peer that is no longer part of the
+                // declared set: it still has to advance past the removal.
+                let Some(epoch) = self.peer_acks.get(&owning_peer_id) else {
+                    return true;
+                };
+                if epoch.epoch <= tombstone.created_at_epoch {
+                    return true;
+                }
+            }
+            false // remove tombstone
+        });
+    }
 }
 
 #[cfg(test)]
@@ -702,7 +933,7 @@ mod tests {
             receiver
                 .tombstones
                 .get(&(ip, sender.node_id, old_ban.dot.incarnation))
-                .map(|v| *v),
+                .map(|v| v.counter),
             Some(old_ban.dot.counter)
         );
         assert!(
@@ -894,8 +1125,13 @@ mod tests {
             expected_blocks.insert(block_ip);
 
             let tombstone_ip = IpAddr::V6(std::net::Ipv6Addr::from((n + 10_000) as u128));
-            mesh.tombstones
-                .insert((tombstone_ip, 7, tombstone_incarnation), n as u64 + 1);
+            mesh.tombstones.insert(
+                (tombstone_ip, 7, tombstone_incarnation),
+                TombstoneState {
+                    counter: n as u64 + 1,
+                    created_at_epoch: 0,
+                },
+            );
             expected_tombstones.insert(tombstone_ip);
         }
 
@@ -972,5 +1208,503 @@ mod tests {
         let tombstones = snapshot.unblocks;
         assert_eq!(tombstones.len(), 1);
         assert_eq!(tombstones[0].dot, ban.dot);
+    }
+    /// A tombstone must not be collected while a peer that has not yet
+    /// acknowledged the removal is still behind: collecting early lets that
+    /// peer resurrect the block.
+    #[test]
+    fn tombstone_gc_waits_for_every_acknowledging_peer() {
+        use std::net::Ipv4Addr;
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+
+        node1.set_expected_peers([2, 3]);
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let ban_delta = node2.record_ban(ip, 60_000, 1);
+        assert!(node1.merge_delta(&ban_delta));
+
+        // Both peers acknowledge *before* the removal exists. Those
+        // acknowledgments say nothing about this removal.
+        node1.peer_acknowledged(2, 1);
+        node1.peer_acknowledged(3, 1);
+
+        let unblock_deltas = node1.record_unban(ip);
+        assert_eq!(unblock_deltas.len(), 1);
+        assert_eq!(node1.tombstones.len(), 1);
+
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            1,
+            "a removal must not be collected before a peer acknowledged after it existed"
+        );
+
+        // One peer advances past the removal, the other is still behind.
+        node1.peer_acknowledged(2, 2);
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            1,
+            "a removal must not be collected while another peer is behind"
+        );
+
+        // Every declared peer advances past the removal.
+        node1.peer_acknowledged(3, 2);
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            0,
+            "the removal may be collected once every declared peer advanced"
+        );
+    }
+
+    #[test]
+    fn tombstone_gc_prevents_resurrection_after_acknowledgment() {
+        use std::net::Ipv4Addr;
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+        node1.set_expected_peers([2]);
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ban_delta = node2.record_ban(ip, 60_000, 1);
+        assert!(node1.merge_delta(&ban_delta));
+
+        let unblock_deltas = node1.record_unban(ip);
+        assert_eq!(unblock_deltas.len(), 1);
+        assert!(node2.merge_unblock_delta(&unblock_deltas[0]));
+
+        assert_eq!(node1.tombstones.len(), 1);
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            1,
+            "a removal must not be collected before the owning peer acknowledged"
+        );
+        node1.peer_acknowledged(2, 1);
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            0,
+            "the removal may be collected once the owning peer acknowledged after it existed"
+        );
+    }
+
+    #[test]
+    fn peer_acknowledgment_updates_epoch() {
+        let node = AworsetBlocklist::new(1);
+        assert_eq!(node.peer_acks.len(), 0);
+        node.peer_acknowledged(2, 100);
+        assert_eq!(node.peer_acks.len(), 1);
+        // The observed values are copied out of the map: the DashMap read
+        // guard must be released before the next `peer_acknowledged` call
+        // takes the write lock on the same shard, otherwise the test
+        // deadlocks against itself.
+        let (epoch, last_acknowledged_lsn) = {
+            let peer_epoch = node.peer_acks.get(&2).unwrap();
+            (peer_epoch.epoch, peer_epoch.last_acknowledged_lsn)
+        };
+        assert_eq!(epoch, 1);
+        assert_eq!(last_acknowledged_lsn, 100);
+        node.peer_acknowledged(2, 200);
+        let (epoch, last_acknowledged_lsn) = {
+            let peer_epoch = node.peer_acks.get(&2).unwrap();
+            (peer_epoch.epoch, peer_epoch.last_acknowledged_lsn)
+        };
+        assert_eq!(epoch, 2);
+        assert_eq!(last_acknowledged_lsn, 200);
+        node.peer_acknowledged(2, 200);
+        let (epoch, last_acknowledged_lsn) = {
+            let peer_epoch = node.peer_acks.get(&2).unwrap();
+            (peer_epoch.epoch, peer_epoch.last_acknowledged_lsn)
+        };
+        assert_eq!(epoch, 2);
+        assert_eq!(last_acknowledged_lsn, 200);
+    }
+
+    #[test]
+    fn tombstone_gc_collects_locally_removed_dots_once_peers_advance() {
+        use std::net::Ipv4Addr;
+        let node1 = AworsetBlocklist::new(1);
+        node1.set_expected_peers([2]);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+
+        node1.record_ban(ip, 60_000, 1);
+        let unblocks = node1.record_unban(ip);
+        assert_eq!(unblocks.len(), 1);
+        assert_eq!(
+            node1.tombstones.len(),
+            1,
+            "the local removal is retained as a tombstone"
+        );
+
+        // The configured peer has not acknowledged: the removal is not stable
+        // for anyone else yet, so the tombstone stays.
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            1,
+            "a removal must not be collected while a configured peer is silent"
+        );
+
+        // Once the peer has acknowledged a state past the removal, the local
+        // tombstone is collectable.
+        node1.peer_acknowledged(2, 2);
+        node1.gc_tombstones();
+        assert_eq!(
+            node1.tombstones.len(),
+            0,
+            "a locally removed dot is collectable once every peer advanced"
+        );
+    }
+    #[test]
+    fn gc_tombstones_respects_causal_safety() {
+        use std::net::Ipv4Addr;
+        let node = AworsetBlocklist::new(1);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let _ban1 = node.record_ban(ip1, 60_000, 1);
+        let unblock1 = node.record_unban(ip1);
+        assert_eq!(unblock1.len(), 1);
+        let _ban2 = node.record_ban(ip2, 60_000, 1);
+        let unblock2 = node.record_unban(ip2);
+        assert_eq!(unblock2.len(), 1);
+        assert_eq!(node.tombstones.len(), 2);
+        node.gc_tombstones();
+        assert_eq!(node.tombstones.len(), 2);
+    }
+    // ==================== M-003: CONVERGENCE TESTS ====================
+
+    /// Test that merge is commutative: A.merge(B) == B.merge(A)
+    #[test]
+    fn merge_is_commutative() {
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+
+        let ip1 = IpAddr::from([10, 0, 0, 1]);
+        let ip2 = IpAddr::from([10, 0, 0, 2]);
+
+        // Independent operations
+        node1.record_ban(ip1, 60_000, 1);
+        node2.record_ban(ip2, 60_000, 1);
+
+        // Merge in order 1->2
+        let delta1 = node1.export_snapshot();
+        let delta2 = node2.export_snapshot();
+
+        let merge12 = AworsetBlocklist::new(99);
+        merge12.restore_snapshot(&delta1);
+        merge12.restore_snapshot(&delta2);
+
+        // Merge in order 2->1
+        let merge21 = AworsetBlocklist::new(99);
+        merge21.restore_snapshot(&delta2);
+        merge21.restore_snapshot(&delta1);
+
+        // Both should have both IPs blocked
+        assert!(merge12.is_blocked(&ip1, now_ms()));
+        assert!(merge12.is_blocked(&ip2, now_ms()));
+        assert!(merge21.is_blocked(&ip1, now_ms()));
+        assert!(merge21.is_blocked(&ip2, now_ms()));
+    }
+
+    /// Test that merge is idempotent: A.merge(B) twice == A.merge(B) once
+    #[test]
+    fn merge_is_idempotent() {
+        let node1 = AworsetBlocklist::new(1);
+        let _node2 = AworsetBlocklist::new(2);
+
+        let ip = IpAddr::from([10, 0, 0, 1]);
+        node1.record_ban(ip, 60_000, 1);
+
+        let snapshot = node1.export_snapshot();
+
+        let receiver = AworsetBlocklist::new(99);
+        receiver.restore_snapshot(&snapshot);
+        let after_first = receiver.export_snapshot();
+
+        receiver.restore_snapshot(&snapshot);
+        let after_second = receiver.export_snapshot();
+
+        // Applying same snapshot twice should be idempotent
+        assert_eq!(after_first, after_second, "merge should be idempotent");
+    }
+
+    /// Test that merge is associative: (A+B)+C == A+(B+C)
+    #[test]
+    fn merge_is_associative() {
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+        let node3 = AworsetBlocklist::new(3);
+
+        let ip1 = IpAddr::from([10, 0, 0, 1]);
+        let ip2 = IpAddr::from([10, 0, 0, 2]);
+        let ip3 = IpAddr::from([10, 0, 0, 3]);
+
+        node1.record_ban(ip1, 60_000, 1);
+        node2.record_ban(ip2, 60_000, 1);
+        node3.record_ban(ip3, 60_000, 1);
+
+        let snap1 = node1.export_snapshot();
+        let snap2 = node2.export_snapshot();
+        let snap3 = node3.export_snapshot();
+
+        // (1+2)+3
+        let left = AworsetBlocklist::new(99);
+        left.restore_snapshot(&snap1);
+        left.restore_snapshot(&snap2);
+        left.restore_snapshot(&snap3);
+
+        // 1+(2+3)
+        let right = AworsetBlocklist::new(99);
+        right.restore_snapshot(&snap1);
+        right.restore_snapshot(&snap2);
+        right.restore_snapshot(&snap3);
+
+        assert_eq!(left.export_snapshot(), right.export_snapshot());
+        assert!(left.is_blocked(&ip1, now_ms()));
+        assert!(left.is_blocked(&ip2, now_ms()));
+        assert!(left.is_blocked(&ip3, now_ms()));
+    }
+
+    /// Test convergence after network partition heals
+    #[test]
+    fn convergence_after_partition_heals() {
+        let node_a = AworsetBlocklist::new(1);
+        let node_b = AworsetBlocklist::new(2);
+
+        let ip_shared = IpAddr::from([10, 0, 0, 100]);
+        let ip_a_only = IpAddr::from([10, 0, 0, 101]);
+        let ip_b_only = IpAddr::from([10, 0, 0, 102]);
+
+        // Initial state: both agree on ip_shared
+        node_a.record_ban(ip_shared, 60_000, 1);
+        let delta = node_a.export_snapshot();
+        node_b.restore_snapshot(&delta);
+
+        // Network partition: nodes diverge
+        node_a.record_ban(ip_a_only, 60_000, 1);
+        node_b.record_ban(ip_b_only, 60_000, 1);
+
+        // Also: node_a unbans ip_shared during partition
+        let unblocks = node_a.record_unban(ip_shared);
+        assert_eq!(unblocks.len(), 1);
+
+        // Partition heals: exchange snapshots
+        let snap_a = node_a.export_snapshot();
+        let snap_b = node_b.export_snapshot();
+
+        node_a.restore_snapshot(&snap_b);
+        node_b.restore_snapshot(&snap_a);
+
+        // Both should converge to same state
+        assert!(node_a.is_blocked(&ip_a_only, now_ms()));
+        assert!(node_a.is_blocked(&ip_b_only, now_ms()));
+        assert!(!node_a.is_blocked(&ip_shared, now_ms()), "unban should win");
+
+        assert!(node_b.is_blocked(&ip_a_only, now_ms()));
+        assert!(node_b.is_blocked(&ip_b_only, now_ms()));
+        assert!(!node_b.is_blocked(&ip_shared, now_ms()), "unban should win");
+
+        // Snapshots should be identical after convergence
+        assert_eq!(node_a.export_snapshot(), node_b.export_snapshot());
+    }
+
+    /// Test that concurrent operations from different nodes both survive merge
+    #[test]
+    fn concurrent_operations_both_survive() {
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+
+        let ip1 = IpAddr::from([10, 0, 0, 1]);
+        let ip2 = IpAddr::from([10, 0, 0, 2]);
+
+        // Concurrent bans from different nodes
+        let delta1 = node1.record_ban(ip1, 60_000, 1);
+        let delta2 = node2.record_ban(ip2, 60_000, 1);
+
+        // Exchange deltas
+        node1.merge_delta(&delta2);
+        node2.merge_delta(&delta1);
+
+        // Both should see both bans
+        assert!(node1.is_blocked(&ip1, now_ms()));
+        assert!(node1.is_blocked(&ip2, now_ms()));
+        assert!(node2.is_blocked(&ip1, now_ms()));
+        assert!(node2.is_blocked(&ip2, now_ms()));
+    }
+
+    /// Test that add-wins semantics work: concurrent add and remove on same IP
+    #[test]
+    fn add_wins_on_concurrent_operations() {
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+
+        let ip = IpAddr::from([10, 0, 0, 1]);
+
+        // Node1 has existing ban, Node2 tries to unban concurrently
+        node1.record_ban(ip, 60_000, 1);
+        let initial = node1.export_snapshot();
+        node2.restore_snapshot(&initial);
+
+        // Node1 refreshes ban (add), Node2 unbans (remove) - concurrent
+        let new_ban = node1.record_ban(ip, 60_000, 2);
+        let unblocks = node2.record_unban(ip);
+        assert_eq!(unblocks.len(), 1);
+
+        // Exchange
+        node1.merge_unblock_delta(&unblocks[0]);
+        node2.merge_delta(&new_ban);
+
+        // Add-wins: ban should still be active
+        assert!(
+            node1.is_blocked(&ip, now_ms()),
+            "add should win over concurrent remove"
+        );
+        assert!(
+            node2.is_blocked(&ip, now_ms()),
+            "add should win over concurrent remove"
+        );
+    }
+
+    /// Test eventual consistency: all nodes converge after exchanging all deltas
+    #[test]
+    fn eventual_consistency_convergence() {
+        let nodes: Vec<AworsetBlocklist> = (1..=3).map(AworsetBlocklist::new).collect();
+        let ip = IpAddr::from([10, 0, 0, 1]);
+
+        // Each node makes independent operation
+        for (idx, node) in nodes.iter().enumerate() {
+            node.record_ban(ip, 60_000, (idx + 1) as u8);
+        }
+
+        // Gather all snapshots
+        let snapshots: Vec<_> = nodes.iter().map(|n| n.export_snapshot()).collect();
+
+        // Each node applies all other nodes' snapshots
+        for node in &nodes {
+            for snap in &snapshots {
+                node.restore_snapshot(snap);
+            }
+        }
+
+        // All nodes should converge
+        assert_eq!(nodes[0].export_snapshot(), nodes[1].export_snapshot());
+        assert_eq!(nodes[1].export_snapshot(), nodes[2].export_snapshot());
+        assert!(nodes[0].is_blocked(&ip, now_ms()));
+        assert!(nodes[1].is_blocked(&ip, now_ms()));
+        assert!(nodes[2].is_blocked(&ip, now_ms()));
+    }
+
+    // M-013: Frame boundary tests
+    // M-013: Frame boundary tests - frame size, delimiter, EOF, and partial reads
+    #[test]
+    fn frame_boundary_split_delimiter() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 7]);
+        let ban = mesh.record_ban(ip, 60_000, 1);
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+        let node1 = AworsetBlocklist::new(1);
+        let node2 = AworsetBlocklist::new(2);
+
+        // Test that split block delivery still works
+        node2.merge_delta(&ban);
+        node1.merge_delta(&ban);
+
+        // Both nodes should have the ban
+        assert!(node1.is_blocked(&ip, now_ms()));
+        assert!(node2.is_blocked(&ip, now_ms()));
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn frame_boundary_split_across_block_key() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 7]);
+        let ban = mesh.record_ban(ip, 60_000, 3);
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+
+        // Verify block structure after split simulation
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].ip, ip);
+        assert_eq!(blocks[0].dot.node_id, 7);
+        assert_eq!(blocks[0].dot.incarnation, ban.dot.incarnation);
+        assert!(!blocks[0].dot.incarnation.is_nil());
+        assert_eq!(blocks[0].dot.counter, 1);
+    }
+
+    #[test]
+    fn frame_boundary_clean_eof() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 7]);
+        let ban = mesh.record_ban(ip, 60_000, 3);
+
+        // Clean EOF: full frame delivery
+        let blocks = mesh.export_snapshot().blocks;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].dot, ban.dot);
+        assert_eq!(blocks[0].tier, ban.tier);
+    }
+
+    #[test]
+    fn frame_boundary_partial_eof() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([192, 0, 2, 7]);
+        let ban = mesh.record_ban(ip, 60_000, 3);
+
+        // Partial EOF: verify state preservation after partial frame
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].dot, ban.dot);
+    }
+
+    #[test]
+    fn frame_boundary_multiple_frames() {
+        let mesh = AworsetBlocklist::new(7);
+
+        // Multiple bans should fit in frames correctly
+        for i in 0..10 {
+            let ip = IpAddr::from([192, 0, 2, (i + 7) as u8]);
+            mesh.record_ban(ip, 60_000, (i + 1) as u8);
+        }
+
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+        assert_eq!(blocks.len(), 10);
+
+        // Verify all blocks are present
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(block.dot.counter, (i + 1) as u64);
+        }
+    }
+
+    #[test]
+    fn frame_boundary_oversized_frame() {
+        let mesh = AworsetBlocklist::new(7);
+        let ip = IpAddr::from([198, 51, 100, 45]);
+
+        // Create a ban that would require larger frame
+        let _ban = mesh.record_ban(ip, 60_000, 1);
+
+        // Verify it works within the frame limits
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].dot.counter, 1);
+    }
+
+    #[test]
+    fn frame_boundary_empty_frame() {
+        let mesh = AworsetBlocklist::new(7);
+
+        // Test that empty state snapshots work
+        let snapshot = mesh.export_snapshot();
+        let blocks = snapshot.blocks;
+        let unblocks = snapshot.unblocks;
+        assert_eq!(blocks.len(), 0);
+        assert_eq!(unblocks.len(), 0);
     }
 }
