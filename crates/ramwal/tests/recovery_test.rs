@@ -1749,3 +1749,125 @@ fn truncated_tail_after_synced_prefix_is_repaired() {
     let _ = path;
     clean(&d);
 }
+
+/// Retention must not delete a segment that still holds records at or above
+/// the safe LSN — even when that segment was ALREADY ACTIVE when the WAL was
+/// opened.
+///
+/// The bookkeeping bug this pins: `closed_segments` is seeded from the
+/// recovery scan, which includes the segment the writer goes on to use. When
+/// that segment later rotates, it is pushed onto `closed_segments` AGAIN with
+/// its true (larger) last LSN. The retention lookup took the FIRST matching
+/// entry, so it saw the STALE seeded value — the segment's last LSN as of
+/// recovery, before this run appended anything.
+///
+/// With that stale value the `last_lsn >= safe_lsn` guard passes for a
+/// segment that actually held required history, and the segment was deleted:
+/// required WAL history silently lost, which the project rule forbids
+/// outright.
+///
+/// The layout (record = 23-byte header + 64-byte payload = 87 bytes,
+/// `seg_max_bytes = 400`, so four records per segment):
+///
+///   * first run: 8 appends -> segment 1 holds LSN 1-4, segment 2 holds
+///     LSN 5-8 and is ACTIVE;
+///   * reopen: the recovery scan seeds `closed_segments` with segment 2 and
+///     its last LSN (8);
+///   * 3 more appends: segment 2 grows past its seeded last LSN of 8 and
+///     rotates, so its TRUE last LSN is 9 — while the seeded value is still
+///     8. The writer then continues in segment 3, ending at LSN 11;
+///   * checkpoint at LSN 9: the safe LSN is now 9;
+///   * more appends rotate segment 3, which triggers retention with safe
+///     LSN 9.
+///
+/// Expected: segment 1 (last LSN 4 < 9) is deleted — retention really runs —
+/// and segment 2 (true last LSN 9 >= 9) is KEPT. The bug deleted segment 2
+/// because it saw the stale 8.
+#[test]
+fn retention_keeps_a_rotated_segment_whose_true_last_lsn_exceeds_the_safe_lsn() {
+    let d = test_dir();
+    let mut cfg = wal_cfg(&d);
+    cfg.seg_max_bytes = 400;
+    // A retention budget just above the record header size. Zero DISABLES
+    // retention entirely, and the 512 MiB default short-circuits the run
+    // because the total segment size is under it — either way the run would
+    // delete nothing and the test would pass vacuously. The validator
+    // rejects a budget below HEADER_SIZE.
+    cfg.retention_max_bytes = 64;
+
+    // Segment indices present on disk.
+    let segment_indices = || -> Vec<u64> {
+        let mut v: Vec<u64> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|e| {
+                let n = e.file_name();
+                let n = n.to_str()?;
+                let rest = n.strip_prefix("segment-")?.strip_suffix(".rwl")?;
+                rest.parse::<u64>().ok()
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+
+    // First run: two segments, the second one active.
+    {
+        let w = ramwal::Wal::open(cfg.clone()).unwrap();
+        for i in 0..8u8 {
+            w.append(&[i; 64]).unwrap();
+        }
+        w.sync().unwrap();
+    }
+    let segs = segment_indices();
+    assert_eq!(segs.len(), 2, "expected two segments, got {segs:?}");
+    let seeded_seg = *segs.last().expect("segments");
+    let seeded_file = std::path::Path::new(&d).join(format!("segment-{seeded_seg:020}.rwl"));
+
+    // Reopen: the recovery scan now seeds `closed_segments` with the ACTIVE
+    // segment and its last LSN at this point.
+    let w = ramwal::Wal::open(cfg.clone()).unwrap();
+    let seeded_last = w.recovery_report().last_lsn.expect("last lsn").get();
+    assert_eq!(seeded_last, 8, "the seeded segment ends at LSN 8");
+
+    // Grow the seeded segment so its TRUE last LSN passes the seeded one, and
+    // rotate it.
+    let mut true_last = seeded_last;
+    for i in 0..3u8 {
+        true_last = w.append(&[i; 64]).unwrap().get();
+    }
+    w.sync().unwrap();
+    // The writer has moved on to segment 3 and ends at LSN 11; segment 2's
+    // own last LSN is 9, which is what the retention guard must see.
+    assert_eq!(true_last, 11, "the current writer ends at LSN 11");
+
+    // The safe LSN is between the stale seeded value (8) and the seeded
+    // segment's true last LSN (9).
+    let safe_lsn = seeded_last + 1;
+    assert_eq!(safe_lsn, 9);
+    w.checkpoint(Lsn::new(safe_lsn)).unwrap();
+
+    // Append enough to rotate the current segment: that rotation triggers
+    // retention with the checkpoint LSN as the safe LSN.
+    for i in 0..8u8 {
+        w.append(&[i; 64]).unwrap();
+    }
+    w.sync().unwrap();
+
+    assert!(
+        seeded_file.exists(),
+        "retention deleted the segment that still holds records at or above the \
+         safe LSN (segment {seeded_seg})"
+    );
+    // Guard against a vacuous pass: the genuinely-old segment (last LSN 4)
+    // must have been deleted, so retention really ran.
+    assert!(
+        !std::path::Path::new(&d)
+            .join("segment-00000000000000000001.rwl")
+            .exists(),
+        "the genuinely-old segment was not deleted, so retention did not run"
+    );
+
+    drop(w);
+    clean(&d);
+}

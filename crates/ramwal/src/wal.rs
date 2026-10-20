@@ -311,7 +311,18 @@ impl Wal {
                 g.durable_lsn = g.written_lsn;
                 let closed = g.seg;
                 let closed_last = g.written_lsn;
-                g.closed_segments.push((closed, closed_last));
+                // Update the entry if the recovery scan already seeded this
+                // segment (it seeded the segment that was active at open, and
+                // that is usually the one being closed now). One entry per
+                // segment, holding its true last LSN.
+                match g.closed_segments.iter_mut().find(|(s, _)| *s == closed) {
+                    // `max`, not a plain assignment: LSNs are monotonic so the
+                    // two are equivalent today, but taking the larger value
+                    // keeps the entry a true upper bound even if the
+                    // invariant is ever broken.
+                    Some(entry) => entry.1 = entry.1.max(closed_last),
+                    None => g.closed_segments.push((closed, closed_last)),
+                }
                 let new_seg = g.seg + 1;
                 let path = seg_path(&self.base_dir, new_seg);
                 let new_file = match crate::segment::create_segment_truncate(&path) {
@@ -621,7 +632,28 @@ impl Wal {
             if idx == active {
                 continue;
             }
-            let Some(&(_, last_lsn)) = closed.iter().find(|&&(s, _)| s == idx) else {
+            // The segment's last LSN must be the MAXIMUM recorded for it,
+            // not the first.
+            //
+            // `closed_segments` is seeded from the recovery scan, which
+            // includes the segment the writer goes on to use. When that
+            // segment later rotates it is pushed onto the list AGAIN, with
+            // its true (larger) last LSN. Taking the first match therefore
+            // saw the STALE seeded value — the segment's last LSN as of
+            // recovery, before this run appended anything — and the
+            // `last_lsn >= safe_lsn` guard then passed for a segment that
+            // actually held required history. The segment was deleted:
+            // required WAL history silently lost.
+            //
+            // The maximum is the segment's true last LSN, so the guard
+            // correctly keeps any segment that still holds records at or
+            // above the safe LSN.
+            let Some(last_lsn) = closed
+                .iter()
+                .filter(|&&(s, _)| s == idx)
+                .map(|&(_, l)| l)
+                .max()
+            else {
                 continue;
             };
             if last_lsn >= safe_lsn {

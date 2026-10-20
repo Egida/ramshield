@@ -161,6 +161,71 @@ RED (`durable_lsn=1`, 3/3 deterministic), GREEN after.
 
 ---
 
+## D-1 (P0, durability) — retention deleted segments that still held required history
+
+**File:** `crates/ramwal/src/wal.rs`
+
+`closed_segments` — the map from segment index to that segment's last LSN — is
+seeded at open from the recovery scan:
+
+```rust
+let closed_segments: Vec<(u64, u64)> = recovery.report.segment_reports.iter()
+    .filter_map(|s| s.last_lsn.map(|l| (s.segment, l.get())))
+    .collect();
+```
+
+`segment_reports` covers **every** scanned segment, including the newest one —
+the segment the writer goes on to use. So the active segment is in the list
+from the start, holding its last LSN **as of recovery**.
+
+When that segment later rotates it is pushed onto the list **again**, with its
+true (larger) last LSN:
+
+```rust
+g.closed_segments.push((closed, closed_last));
+```
+
+And the retention decision took the **first** matching entry:
+
+```rust
+let Some(&(_, last_lsn)) = closed.iter().find(|&&(s, _)| s == idx) else { … };
+if last_lsn >= safe_lsn { continue; }   // keep it
+std::fs::remove_file(path)?;             // otherwise delete it
+```
+
+`find` returns the seeded entry — the **stale** value. The
+`last_lsn >= safe_lsn` guard therefore passed for a segment that actually
+held records at or above the safe LSN, and the segment was deleted.
+
+**Consequence: required WAL history silently destroyed.** Recovery rebuilds
+the enforcement state from the log, so the records in the deleted segment are
+gone: bans that the checkpoint had not yet covered disappear, and the daemon
+restarts with them unenforced. This is the project rule's hard case — *"Never
+silently skip required WAL history."*
+
+**Reproduced:** with a two-segment WAL (segment 1 holding LSN 1-4, segment 2
+holding LSN 5-8 and active), a reopen, three more appends so segment 2 grows
+to LSN 9 and rotates, a checkpoint at LSN 9, and one more rotation to
+trigger retention — the old code **deleted segment 2**, which still held LSN 9.
+The genuinely-old segment 1 was deleted correctly.
+
+**Fix, in two parts:**
+
+1. The decision point now takes the **maximum** last LSN recorded for the
+   segment, which is its true last LSN, so the guard keeps any segment that
+   still holds records at or above the safe LSN.
+2. The bookkeeping now keeps **one entry per segment**: the rotation updates
+   the seeded entry instead of appending a duplicate, so the list's invariant
+   ("one entry per segment, holding its true last LSN") holds directly.
+
+**Regression:** `retention_keeps_a_rotated_segment_whose_true_last_lsn_exceeds_the_safe_lsn`
+— RED with the old code (*"retention deleted the segment that still holds
+records at or above the safe LSN (segment 2)"*, 3/3 deterministic), GREEN
+after. The test also asserts that the genuinely-old segment *was* deleted, so
+it cannot pass vacuously by retention not running.
+
+---
+
 ## P-4 (P2) — an unterminated line could buffer past the line limit
 
 **File:** `src/ipc/server/connection.rs`
