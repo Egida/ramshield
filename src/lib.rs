@@ -44,10 +44,16 @@ pub use ramshield_types::{
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let timestamp = chrono::Utc::now().to_rfc3339();
+        // `panic!` with a literal payload is a `&str`; a formatted payload is a
+        // `String`. Downcasting only to `&str` lost the message for every
+        // format-style panic — which is most of them, and all of the ones this
+        // codebase can actually hit.
         let payload = info
             .payload()
             .downcast_ref::<&str>()
-            .unwrap_or(&"<non-string payload>");
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string payload>".to_string());
         let location = info
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))

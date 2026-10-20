@@ -246,12 +246,23 @@ impl Wal {
     }
 
     /// Full replay of every segment in the directory this WAL was opened on.
+    ///
+    /// Read-only. The repairing recovery already ran when this WAL was opened
+    /// (`RamWal::open` -> `recover`), so rescanning here must not mutate the
+    /// directory underneath the live writer.
     pub fn replay(&self) -> Result<Vec<WalEntry>> {
-        Self::replay_dir(&self.guard.cfg.dir)
+        let dir = self.guard.cfg.dir.clone();
+        let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
+        decode_all(&report)
     }
 
     /// Full replay of every segment in an arbitrary directory (independent
     /// of any open handle).
+    ///
+    /// This entry point REPAIRS: it truncates a torn tail and quarantines an
+    /// unusable segment. Use it only for a directory that is not being written
+    /// to — a boot-time recovery, not a live read. Live reads must use the
+    /// `&self` methods, which are read-only.
     pub fn replay_dir(dir: &str) -> Result<Vec<WalEntry>> {
         let report = ramwal::recovery::recover_dir(dir).map_err(map_error)?;
         decode_all(&report)
@@ -264,7 +275,9 @@ impl Wal {
             return self.replay();
         }
         let dir = self.guard.cfg.dir.clone();
-        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        // Read-only: this WAL is open and may be being appended to right now.
+        // See `replay` for why the repair must not run here.
+        let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
         decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
     }
 
@@ -283,7 +296,8 @@ impl Wal {
             )));
         }
         let dir = self.guard.cfg.dir.clone();
-        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        // Read-only: this WAL is open and may be being appended to right now.
+        let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
         let mut selected: Vec<_> = report
             .records
             .iter()
@@ -314,7 +328,8 @@ impl Wal {
     /// requested history has been removed by retention.
     pub fn replay_with_lsn_from(&self, min_lsn_exclusive: u64) -> Result<Vec<(u64, WalEntry)>> {
         let dir = self.guard.cfg.dir.clone();
-        let report = ramwal::recovery::recover_dir(&dir).map_err(map_error)?;
+        // Read-only: this WAL is open and may be being appended to right now.
+        let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
         report
             .records
             .iter()
@@ -811,5 +826,75 @@ mod tests {
             let decoded = serde_json::from_slice::<WalEntry>(&encoded).expect("operation failed");
             assert_eq!(entry, &decoded, "round-trip failed for {:?}", entry);
         }
+    }
+
+    /// P1: a live WAL read must NOT repair (truncate) the segment it reads.
+    ///
+    /// `replay_from` / `replay_with_lsn_from` / `replay_with_lsn_page` are
+    /// called on a WAL that is OPEN and being appended to (the mesh sync path
+    /// pages WAL history while the enforcement actor is still writing). They
+    /// must therefore be read-only.
+    ///
+    /// The repair path truncates the active segment to the last valid record
+    /// boundary and fsyncs that truncation — while a writer holds an open file
+    /// descriptor with its own file offset. The writer's next append then lands
+    /// past the truncation point, leaving a hole in the log and a gap in the
+    /// LSN sequence, which the next recovery rejects.
+    ///
+    /// This test pins the read-only contract: the segment must be byte-for-byte
+    /// unchanged after a live read.
+    #[test]
+    fn live_replay_does_not_mutate_the_segment() {
+        let dir = tempfile::tempdir().expect("operation failed");
+        let dir_path = dir.path().to_str().expect("operation failed");
+
+        let wal = Wal::open(dir_path, false, Durability::Fsync, 64 * 1024 * 1024, 0)
+            .expect("operation failed");
+        wal.append(&WalEntry::BlockIp {
+            ip: "10.0.0.1".into(),
+            reason: "live".into(),
+            ttl_secs: None,
+            ts_ns: 1,
+        })
+        .expect("operation failed");
+
+        let segment = std::fs::read_dir(dir.path())
+            .expect("operation failed")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("segment-") && name.ends_with(".rwl"))
+            })
+            .expect("WAL active segment must exist");
+
+        // Simulate a torn write at the tail: a partial record header with no
+        // payload behind it. A recovery scan must REPORT this, not repair it
+        // underneath the live writer.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&segment)
+                .expect("operation failed");
+            f.write_all(&[0xABu8; 10]).expect("operation failed");
+            f.sync_all().expect("operation failed");
+        }
+        let len_before = std::fs::metadata(&segment).expect("operation failed").len();
+
+        // A live read of a live WAL.
+        let entries = wal.replay_from(0).expect("operation failed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the committed record must still be visible"
+        );
+
+        let len_after = std::fs::metadata(&segment).expect("operation failed").len();
+        assert_eq!(
+            len_after, len_before,
+            "a live replay must not truncate or otherwise mutate the active segment"
+        );
     }
 }

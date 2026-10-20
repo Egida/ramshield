@@ -118,9 +118,17 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len())
+    // Slice the BYTES, not the `&str`. A `&str` slice index must land on a
+    // char boundary, so an even byte length is not enough: a multi-byte
+    // character made `s[i..i+2]` panic. `as_bytes()` has no such
+    // precondition, and the byte pair is validated as UTF-8 below.
+    let bytes = s.as_bytes();
+    (0..bytes.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .map(|i| {
+            let pair = std::str::from_utf8(bytes.get(i..i + 2)?).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
         .collect()
 }
 
@@ -139,6 +147,54 @@ mod tests {
             .as_millis() as u64;
         let sig = sign(b"secret-key", "k1", now, payload).expect("test key non-empty");
         assert!(verify(&keys, "k1", now, &sig, payload, &ReplayStore::default()).is_ok());
+    }
+
+    /// P1: a malformed signature must be REJECTED, never panic.
+    ///
+    /// `auth.sig` is client-supplied and is decoded before any credential is
+    /// checked, so this is reachable pre-authentication. The decoder used to
+    /// slice a `&str` at byte offsets: an even byte length passed the length
+    /// guard, but a multi-byte character made the slice land inside a char
+    /// boundary — a panic. With `panic = "abort"` in the release profile that
+    /// aborts the whole daemon.
+    #[test]
+    fn decode_hex_rejects_multibyte_input_without_panicking() {
+        for s in [
+            "a\u{e9}b",
+            "a\u{e9}a",
+            "\u{e9}\u{e9}",
+            "\u{4e2d}a",
+            "a\u{1f600}",
+        ] {
+            let r = std::panic::catch_unwind(|| decode_hex(s));
+            assert!(r.is_ok(), "decode_hex panicked on {s:?}");
+        }
+    }
+
+    /// The same input, through the public verification entry point the IPC
+    /// server actually calls.
+    #[test]
+    fn verify_rejects_multibyte_signature_without_panicking() {
+        let keys = vec![("k1".to_string(), b"secret-key".to_vec())];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let r = std::panic::catch_unwind(|| {
+            verify(
+                &keys,
+                "k1",
+                now,
+                "a\u{e9}a",
+                b"payload",
+                &ReplayStore::default(),
+            )
+        });
+        assert!(r.is_ok(), "verify panicked on a multibyte signature");
+        assert!(
+            r.unwrap().is_err(),
+            "a malformed signature must be rejected"
+        );
     }
 
     #[test]

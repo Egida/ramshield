@@ -213,6 +213,49 @@ unsafe fn raw_get_next_key<K: Copy>(
     Ok(Some(unsafe { next.assume_init() }))
 }
 
+/// Enumerate the keys resident in a BPF map and stage the ones that are not in
+/// `expected` for deferred deletion.
+///
+/// The cursor MUST advance past every key we visit, including the staged ones.
+/// A staged key is still resident in the map — that is the entire point of the
+/// staged-deletion buffer — so leaving the cursor pointing at the previous key
+/// makes `bpf_map_get_next_key` return the same key on every call, and the
+/// enumeration never terminates.
+///
+/// `next_key` models `bpf_map_get_next_key`: given the previously visited key
+/// it returns the next resident key, or `None` at the end of the map. `None`
+/// asks for the first key.
+fn enumerate_stale_keys<F>(
+    mut next_key: F,
+    expected: &std::collections::HashSet<BlocklistKey>,
+) -> std::io::Result<Vec<BlocklistKey>>
+where
+    F: FnMut(Option<&BlocklistKey>) -> std::io::Result<Option<BlocklistKey>>,
+{
+    let mut prev_key: Option<BlocklistKey> = None;
+    let mut staged_deletions: Vec<BlocklistKey> = Vec::new();
+    loop {
+        let next = next_key(prev_key.as_ref())?;
+        match next {
+            Some(k) => {
+                if !expected.contains(&k) {
+                    // Stage for deferred deletion instead of in-loop delete.
+                    staged_deletions.push(k);
+                }
+                // Advance the cursor past EVERY key we visit, including the
+                // staged ones. A staged key is still resident in the map, so
+                // leaving the cursor on the previous key makes
+                // `bpf_map_get_next_key` return this same key again on every
+                // call: the enumeration never terminates and the staging buffer
+                // grows without bound.
+                prev_key = Some(k);
+            }
+            None => break,
+        }
+    }
+    Ok(staged_deletions)
+}
+
 /// bpf_map_delete_elem — remove `key` from the map.
 ///
 /// # Safety
@@ -510,29 +553,19 @@ impl XdpApplier for AyaXdpApplier {
             let expected: std::collections::HashSet<BlocklistKey> = expected.into_iter().collect();
             let stale_count = self.with_map(name, |m| {
                 let fd_raw = m.map().fd().as_fd().as_raw_fd();
-                let mut prev_key: Option<BlocklistKey> = None;
                 // STAGED DELETION BUFFER: decouple enumeration from deletion
                 // to avoid race conditions where in-loop deletion interrupts
                 // raw_get_next_key iteration and returns ENOENT.
-                let mut staged_deletions: Vec<BlocklistKey> = Vec::new();
-                loop {
-                    // SAFETY: `fd_raw` comes from the BLOCKLIST/BLOCKLIST6 map
-                    // borrowed as `m` for this whole closure, so it stays open;
-                    // both maps use 16-byte keys matching `BlocklistKey`.
-                    let next = unsafe { raw_get_next_key(fd_raw, prev_key.as_ref()) };
-                    match next {
-                        Ok(Some(k)) => {
-                            if !expected.contains(&k) {
-                                // Stage for deferred deletion instead of in-loop delete.
-                                staged_deletions.push(k);
-                            } else {
-                                prev_key = Some(k);
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => return Err(MapError::from(e)),
-                    }
-                }
+                let staged_deletions = enumerate_stale_keys(
+                    |prev| {
+                        // SAFETY: `fd_raw` comes from the BLOCKLIST/BLOCKLIST6 map
+                        // borrowed as `m` for this whole closure, so it stays open;
+                        // both maps use 16-byte keys matching `BlocklistKey`.
+                        unsafe { raw_get_next_key(fd_raw, prev) }
+                    },
+                    &expected,
+                )
+                .map_err(MapError::from)?;
                 // Execute deletions after collection to avoid race conditions.
                 let stale_count = staged_deletions.len();
                 for k in staged_deletions.iter() {
@@ -740,5 +773,62 @@ mod tests {
     fn parse_short_record_is_none() {
         assert!(parse_drop_event(&[0u8; 25]).is_none());
         assert!(parse_drop_event(&[]).is_none());
+    }
+
+    /// A 16-byte blocklist key built from a u32 tag, in the same byte order
+    /// the kernel map uses.
+    fn bkey(tag: u32) -> BlocklistKey {
+        let mut raw = [0u8; 16];
+        raw[0..4].copy_from_slice(&tag.to_ne_bytes());
+        BlocklistKey(raw)
+    }
+
+    /// P0: the reconcile enumeration must terminate when the map holds a key
+    /// that is not in the expected set.
+    ///
+    /// A stale key is staged for deferred deletion, so it is STILL RESIDENT
+    /// in the map while the enumeration runs. If the cursor is not advanced
+    /// past it, `bpf_map_get_next_key` returns that same key again on every
+    /// call and the loop never ends — the enforcement control plane wedges
+    /// and the staging buffer grows without bound.
+    ///
+    /// `next_key` below models `bpf_map_get_next_key` (next resident key
+    /// after the cursor, `None` at the end of the map). It is a model of the
+    /// KERNEL SYSCALL, not of the code under test: the enumeration logic
+    /// being exercised here is the production function.
+    #[test]
+    fn reconcile_enumeration_terminates_with_a_stale_key() {
+        let resident = [bkey(0x1000), bkey(0x1001)];
+        let expected: std::collections::HashSet<BlocklistKey> =
+            [bkey(0x1001)].into_iter().collect();
+
+        let mut calls = 0usize;
+        let mut next_key = |prev: Option<&BlocklistKey>| -> std::io::Result<Option<BlocklistKey>> {
+            calls += 1;
+            if calls > 64 {
+                // Fail loudly instead of hanging the test run.
+                return Err(std::io::Error::other(
+                    "enumeration did not terminate: the cursor did not advance past a staged key",
+                ));
+            }
+            match prev {
+                None => Ok(resident.first().copied()),
+                Some(p) => {
+                    let idx = resident
+                        .iter()
+                        .position(|k| k == p)
+                        .ok_or_else(|| std::io::Error::other("cursor key is not resident"))?;
+                    Ok(resident.get(idx + 1).copied())
+                }
+            }
+        };
+
+        let staged = enumerate_stale_keys(&mut next_key, &expected)
+            .expect("enumeration must terminate with a stale key present");
+        assert_eq!(
+            staged,
+            vec![bkey(0x1000)],
+            "exactly the stale key is staged, and only once"
+        );
     }
 }

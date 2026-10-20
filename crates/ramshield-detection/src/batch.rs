@@ -33,8 +33,13 @@ pub struct IpAgg {
 
 impl IpAgg {
     pub fn absorb(&mut self, ev: &ConnectionEvent) {
-        self.count += 1;
-        self.bytes += ev.bytes;
+        // Saturating accumulation. `ev.bytes` is client-supplied (the IPC
+        // `report_connection` request carries it verbatim) and the release
+        // profile has `overflow-checks = true`, so an unguarded `+=` on a u64
+        // is a panic — and with `panic = "abort"` that takes the daemon down.
+        // Every other accumulator in this struct already saturates.
+        self.count = self.count.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(ev.bytes);
         // 600B L1-resident const table beats the /100 division per event.
         if ev.status_code < 600 {
             let b = super::STATUS_BUCKET[ev.status_code as usize];

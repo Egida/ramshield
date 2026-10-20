@@ -10,6 +10,37 @@ pub fn is_low_signal(status_code: u16, proto_fp: u32, bytes: u64) -> bool {
 /// IPC channel high-water mark: 75% of CHANNEL_CAPACITY (64k).
 const SHED_WATERMARK: usize = (CHANNEL_CAPACITY as usize * 3) / 4;
 
+/// Maximum accepted length of a client-supplied block reason, in bytes.
+///
+/// The reason is stored in the block-history ring (bounded by
+/// `dashboard.block_log_size`, default 1000 entries), written verbatim into
+/// a WAL record that is replicated to every mesh peer, and interpolated into
+/// a structured log field. An unbounded reason multiplies: 1000 ring slots
+/// times an arbitrarily long string.
+const MAX_REASON_LEN: usize = 256;
+
+/// Validate a client-supplied block reason.
+///
+/// Rejects over-long strings and control characters. Control characters matter
+/// because the reason is interpolated into a `tracing` field using the default
+/// formatter, which does not escape values: a newline in the reason would
+/// forge a log line, and an escape sequence would drive a terminal reading
+/// the log.
+fn validate_reason(reason: &str) -> Result<(), String> {
+    if reason.len() > MAX_REASON_LEN {
+        return Err(format!(
+            "reason exceeds the maximum length of {MAX_REASON_LEN} bytes"
+        ));
+    }
+    if reason
+        .chars()
+        .any(|c| c.is_control() && c != ' ' && c != '\t')
+    {
+        return Err("reason contains control characters".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn process_request(
     req: Request,
     principal: Option<&Principal>,
@@ -147,6 +178,9 @@ fn handle_block_ip(req: Request, ctx: &RequestContext<'_>) -> Response {
             reason,
             ttl_secs,
         } => {
+            if let Err(message) = validate_reason(&reason) {
+                return Response::Error { code: 400, message };
+            }
             let ip_addr = match ip.parse() {
                 Ok(addr) => addr,
                 Err(_) => {
@@ -220,6 +254,9 @@ fn handle_block_cidr(req: Request, ctx: &RequestContext<'_>) -> Response {
             reason,
             ttl_secs,
         } => {
+            if let Err(message) = validate_reason(&reason) {
+                return Response::Error { code: 400, message };
+            }
             let network = match cidr.parse::<IpNetwork>() {
                 Ok(network) => network,
                 Err(_) => {
@@ -666,5 +703,43 @@ fn handle_flush(req: Request, ctx: &RequestContext<'_>) -> Response {
             state: None,
         },
         _ => unreachable!("request variant dispatched to the wrong handler"),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P1: a client-supplied block reason must be bounded and free of control
+    /// characters.
+    ///
+    /// The reason is stored in the block-history ring, written into a WAL record
+    /// that is replicated to every mesh peer, and interpolated into a `tracing`
+    /// field with a formatter that does not escape values. An unbounded or
+    /// newline-bearing reason is therefore a memory amplification and a log
+    /// forging primitive.
+    #[test]
+    fn reason_validation_rejects_oversize_and_control_characters() {
+        assert!(validate_reason("").is_ok());
+        assert!(validate_reason("normal reason").is_ok());
+        assert!(validate_reason("a reason with spaces and 1234").is_ok());
+
+        // Over-length: rejected.
+        let long = "x".repeat(MAX_REASON_LEN + 1);
+        assert!(
+            validate_reason(&long).is_err(),
+            "oversize reason must be rejected"
+        );
+        // Exactly at the limit: accepted.
+        let at_limit = "x".repeat(MAX_REASON_LEN);
+        assert!(
+            validate_reason(&at_limit).is_ok(),
+            "limit must be inclusive"
+        );
+
+        // Control characters: rejected (log forging / terminal escape).
+        assert!(validate_reason("line1\nline2").is_err());
+        assert!(validate_reason("carriage\rreturn").is_err());
+        assert!(validate_reason("bell\u{7}").is_err());
+        assert!(validate_reason("esc\u{1b}[31m").is_err());
     }
 }

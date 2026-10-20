@@ -131,8 +131,48 @@ impl ShmTableManager {
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
+            // Refuse to follow a symlink planted at the path. `/dev/shm` is
+            // world-writable and sticky, so any local user can pre-plant a
+            // symlink named `ramshield_rules`. Without O_NOFOLLOW the daemon
+            // would open the symlink target, chmod it to 0600 and resize it to
+            // the table size, destroying an arbitrary file.
+            opts.custom_flags(libc::O_NOFOLLOW);
         }
         let file = opts.open(path)?;
+
+        // The file we just opened must be a regular file that belongs to us.
+        // This closes the remaining hole: another local user can still
+        // pre-plant a regular file (or a hard link) at the path, and a
+        // privileged daemon would otherwise chmod and resize it. Failing closed
+        // here is strictly earlier than the pre-existing `set_permissions`
+        // call, which already failed with EPERM for a non-root daemon on a
+        // file it did not own.
+        {
+            let meta = file.metadata()?;
+            if !meta.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} is not a regular file", path.display()),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let euid = unsafe { libc::geteuid() };
+                if meta.uid() != euid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!(
+                            "{} is owned by uid {}, not by this process (uid {})",
+                            path.display(),
+                            meta.uid(),
+                            euid
+                        ),
+                    ));
+                }
+            }
+        }
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -492,5 +532,90 @@ mod tests {
         let tier = slot.tier.load(Ordering::Acquire);
         assert!(tier <= 3, "tier out of range: {tier}");
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod path_safety {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Unique scratch directory under the system temp dir.
+    ///
+    /// `ramshield-cgnat` has no `tempfile` dev-dependency, so the test builds
+    /// and removes its own directory instead of adding a dependency.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ramshield-cgnat-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// P1: a symlink planted at the shared-memory path must not be followed.
+    ///
+    /// `/dev/shm` is world-writable and sticky, so any local user can
+    /// pre-plant a symlink named `ramshield_rules` pointing at a file the
+    /// daemon can reach. The daemon then opens the target, chmods it to 0600
+    /// and resizes it to the rules-table size — destroying an arbitrary file.
+    #[test]
+    fn open_or_create_refuses_a_symlink_at_the_path() {
+        let dir = scratch("symlink");
+        let target = dir.join("victim");
+        let link = dir.join("ramshield_rules");
+        std::fs::write(&target, b"do not touch").expect("write victim");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let before = std::fs::metadata(&target).expect("stat victim");
+
+        let result = ShmTableManager::open_or_create(&link);
+        assert!(
+            result.is_err(),
+            "open_or_create must refuse a symlink at the shared-memory path"
+        );
+
+        let after = std::fs::metadata(&target).expect("stat victim");
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the symlink target must not be resized"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read victim"),
+            b"do not touch",
+            "the symlink target content must be intact"
+        );
+        assert_eq!(
+            before.permissions().mode() & 0o777,
+            after.permissions().mode() & 0o777,
+            "the symlink target mode must not be changed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P1: a FIFO (or any non-regular file) at the path must not be used as
+    /// the rules table. Opening a FIFO for read+write would block forever.
+    #[test]
+    fn open_or_create_refuses_a_non_regular_file() {
+        let dir = scratch("fifo");
+        let path = dir.join("ramshield_rules");
+        // A plain file that is not the table is fine, but a directory is not.
+        std::fs::create_dir(&path).expect("mkdir");
+
+        let result = ShmTableManager::open_or_create(&path);
+        assert!(
+            result.is_err(),
+            "open_or_create must refuse a non-regular file at the path"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

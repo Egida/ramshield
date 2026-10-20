@@ -1388,6 +1388,7 @@ dependencies = [
 name = "ramshield-cgnat"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "memmap2",
  "ramshield-mesh",
 ]

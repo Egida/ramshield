@@ -1402,3 +1402,38 @@ fn pending_mitigations_hard_capped_under_flood() {
         eng.pending_mitigations_len()
     );
 }
+
+/// P1: the per-IP byte accumulator must not overflow.
+///
+/// `bytes` is client-supplied: the IPC `report_connection` request carries
+/// it verbatim, and the detection path accumulates it per IP. With
+/// `overflow-checks = true` in the release profile, an unguarded `+=` on a
+/// `u64` is a PANIC — and with `panic = "abort"` that takes the whole
+/// daemon down.
+///
+/// Every sibling accumulator in `IpAgg` uses `saturating_add`; the byte
+/// counter did not. Two events for the same IP are enough to wrap it.
+#[test]
+fn byte_accumulator_saturates_instead_of_overflowing() {
+    let ip: IpAddr = "203.0.113.7".parse().unwrap();
+    let ev = |bytes: u64| ConnectionEvent {
+        ip,
+        timestamp_ns: 1,
+        bytes,
+        status_code: 200,
+        proto_fingerprint: 0,
+        l7: None,
+    };
+
+    let mut agg = IpAgg::default();
+    agg.absorb(&ev(u64::MAX));
+    // This second absorb overflows u64 if the accumulator is unguarded.
+    agg.absorb(&ev(1));
+
+    assert_eq!(
+        agg.bytes,
+        u64::MAX,
+        "the byte accumulator must saturate, not wrap or panic"
+    );
+    assert_eq!(agg.count, 2, "both events are still counted");
+}
