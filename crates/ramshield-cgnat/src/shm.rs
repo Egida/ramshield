@@ -147,6 +147,17 @@ impl ShmTableManager {
         // here is strictly earlier than the pre-existing `set_permissions`
         // call, which already failed with EPERM for a non-root daemon on a
         // file it did not own.
+        //
+        // The uid compared against is the EFFECTIVE uid. The daemon performs
+        // no privilege drop anywhere in the tree (there is no `setuid`,
+        // `setgid` or `seteuid` call site), so the euid is stable for the
+        // process lifetime and a file the daemon itself created always
+        // matches.
+        //
+        // What this does NOT close: a hard link to a file owned by the
+        // daemon's own user still passes the ownership test, because it *is*
+        // owned by that user. Such a file cannot have been planted by a
+        // different local user, so it is not the attack this check targets.
         {
             let meta = file.metadata()?;
             if !meta.is_file() {

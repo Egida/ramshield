@@ -14,7 +14,18 @@ use std::sync::Arc;
 
 #[test]
 fn test_end_to_end_cgnat_shielding() {
-    let shm = Arc::new(ShmTableManager::open_or_create(&ShmTableManager::default_path()).unwrap());
+    // A per-test path under the temp dir, NOT `default_path()`.
+    //
+    // `default_path()` is the production `/dev/shm/ramshield_rules`: writing
+    // the test's rules into it means the test and a running daemon share one
+    // table, and a file left behind by an earlier root-owned run would make
+    // the ownership check in `open_or_create` reject it. A unique path per
+    // test process keeps the test hermetic.
+    let shm_path = std::env::temp_dir().join(format!(
+        "ramshield-cgnat-it-{}-end_to_end",
+        std::process::id()
+    ));
+    let shm = Arc::new(ShmTableManager::open_or_create(&shm_path).unwrap());
     let mesh = Arc::new(AworsetBlocklist::new(1));
 
     let target_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 195));

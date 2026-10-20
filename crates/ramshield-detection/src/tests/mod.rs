@@ -1437,3 +1437,106 @@ fn byte_accumulator_saturates_instead_of_overflowing() {
     );
     assert_eq!(agg.count, 2, "both events are still counted");
 }
+
+/// The shared pre-aggregation merge must hold the merge lock for the WHOLE
+/// drain, not once per IP.
+///
+/// The old code took the lock per distinct IP, and released it before every
+/// capacity-triggered flush. Under contention that is the CPU catastrophe the
+/// design has to avoid:
+///
+/// * every worker serialised on one mutex once per distinct IP it had seen;
+/// * the lock was held across a whole map walk whenever a worker flushed, so
+///   a flush by one worker stalled every other worker's merge for the
+///   duration of a million-entry walk;
+/// * a peer could refill the map between a worker's flush and its retry, so
+///   the same IP could trigger flush after flush — O(keys x map size) for a
+///   single drain.
+///
+/// The test counts how many times a competing thread can acquire the merge
+/// lock while a drain is in progress. With the lock held for the whole drain
+/// that count is zero, by construction.
+#[test]
+fn merge_local_holds_the_merge_lock_for_the_whole_drain() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut config = Config::default();
+    // A small capacity so the drain has to flush repeatedly.
+    config.detection.pre_aggs_max_size = 64;
+    let cfg = config.into_handle();
+    let store = Arc::new(Store::new(16));
+    let metrics = Arc::new(Metrics::new());
+    let (etx, _erx) = mpsc::channel(64);
+    let eng = Arc::new(
+        DetectionEngine::try_new(store, cfg, etx, metrics, Arc::new(AtomicBool::new(false)))
+            .expect("detection try_new"),
+    );
+
+    let drain_started = Arc::new(AtomicBool::new(false));
+    let drain_done = Arc::new(AtomicBool::new(false));
+    let acquisitions_during_drain = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // The competing thread: hammer the merge lock and count how often it
+    // gets in while the drain is running.
+    let competitor = {
+        let eng = Arc::clone(&eng);
+        let drain_started = Arc::clone(&drain_started);
+        let drain_done = Arc::clone(&drain_done);
+        let acquisitions = Arc::clone(&acquisitions_during_drain);
+        std::thread::spawn(move || {
+            while !drain_done.load(Ordering::Relaxed) {
+                if drain_started.load(Ordering::Relaxed) {
+                    let guard = eng
+                        .pre_aggs_merge_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if drain_started.load(Ordering::Relaxed) && !drain_done.load(Ordering::Relaxed)
+                    {
+                        acquisitions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    drop(guard);
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
+        })
+    };
+
+    // A drain big enough that the competitor certainly gets a chance.
+    let mut local: HashMap<IpAddr, IpAgg> = HashMap::new();
+    for i in 1..=200_000u32 {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, (i >> 16) as u8, (i >> 8) as u8, i as u8));
+        local.entry(ip).or_default().absorb(&ConnectionEvent {
+            ip,
+            timestamp_ns: u64::from(i),
+            bytes: 1,
+            status_code: 200,
+            proto_fingerprint: 0,
+            l7: None,
+        });
+    }
+
+    drain_started.store(true, Ordering::Relaxed);
+    eng.merge_local(&mut local);
+    drain_done.store(true, Ordering::Relaxed);
+
+    competitor.join().expect("competitor thread");
+
+    // The count is not expected to be exactly zero: the competitor can win
+    // the lock in the instant BEFORE the drain starts or in the instant AFTER
+    // it ends, and the flag check happens after the acquisition. Those
+    // boundary races are a handful of acquisitions.
+    //
+    // The old per-IP lock produced 12.5 MILLION acquisitions for this same
+    // drain (~65 per IP). The bound below leaves three orders of magnitude
+    // of headroom over the boundary races while staying far below the old
+    // behaviour, so the assertion cannot flake.
+    const BOUNDARY_RACE_ALLOWANCE: u64 = 1_000;
+    let acquisitions = acquisitions_during_drain.load(Ordering::Relaxed);
+    assert!(
+        acquisitions < BOUNDARY_RACE_ALLOWANCE,
+        "the merge lock was acquired {acquisitions} times during a single drain; \
+         it must be held for the whole drain (old per-IP lock: ~12.5M)"
+    );
+}

@@ -236,12 +236,45 @@ impl Wal {
         }
     }
 
+    /// Whether an `append` is already durable when it returns.
+    ///
+    /// `SyncEach` fsyncs inside `append`, so a caller that needs the record
+    /// to be durable must NOT issue an extra `sync()` afterwards — that would
+    /// be a second, redundant fsync on the hot enforcement path. The other
+    /// modes batch or defer the fsync, so an explicit `sync()` is what makes
+    /// the record durable.
+    pub fn append_is_durable(&self) -> bool {
+        matches!(
+            self.guard.cfg.durability,
+            ramwal::config::Durability::SyncEach
+        )
+    }
+
     /// Highest LSN confirmed durable (0 = none yet).
     pub fn durable_lsn(&self) -> u64 {
         let guard = self.guard.inner.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(inner) => inner.durable_lsn().get(),
             None => 0,
+        }
+    }
+
+    /// Report an un-repaired torn tail to the operator.
+    ///
+    /// The read paths are read-only by design: a live reader must not truncate
+    /// a segment the writer is still appending to. The consequence is that a
+    /// torn tail on the newest segment is *reported* rather than repaired, and
+    /// the reader silently sees the valid prefix until the next boot repairs
+    /// it. Without a log line that gap is invisible, so surface it.
+    fn log_unrepaired_tail(dir: &str, report: &ramwal::recovery::RecoveryReport) {
+        if report.truncated_bytes > 0 {
+            tracing::warn!(
+                dir,
+                truncated_bytes = report.truncated_bytes,
+                tail = ?report.tail,
+                "live WAL read saw an un-repaired torn tail; it is not truncated \
+                 until the next boot-time recovery"
+            );
         }
     }
 
@@ -253,6 +286,7 @@ impl Wal {
     pub fn replay(&self) -> Result<Vec<WalEntry>> {
         let dir = self.guard.cfg.dir.clone();
         let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
+        Self::log_unrepaired_tail(&dir, &report);
         decode_all(&report)
     }
 
@@ -278,6 +312,7 @@ impl Wal {
         // Read-only: this WAL is open and may be being appended to right now.
         // See `replay` for why the repair must not run here.
         let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
+        Self::log_unrepaired_tail(&dir, &report);
         decode_records(report.records.iter().filter(|r| r.lsn.get() > min_lsn))
     }
 
@@ -298,6 +333,7 @@ impl Wal {
         let dir = self.guard.cfg.dir.clone();
         // Read-only: this WAL is open and may be being appended to right now.
         let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
+        Self::log_unrepaired_tail(&dir, &report);
         let mut selected: Vec<_> = report
             .records
             .iter()
@@ -330,6 +366,7 @@ impl Wal {
         let dir = self.guard.cfg.dir.clone();
         // Read-only: this WAL is open and may be being appended to right now.
         let report = ramwal::recovery::verify_dir(&dir).map_err(map_error)?;
+        Self::log_unrepaired_tail(&dir, &report);
         report
             .records
             .iter()

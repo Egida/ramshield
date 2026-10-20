@@ -52,5 +52,16 @@ Not required before the push.
 7. `crates/ramshield-protocol/src/auth.rs` — the even-length guard is on *bytes*, so a multibyte
    string can still pass it and be rejected later by `from_utf8`. Correct, but the rejection path is
    "not valid hex" rather than "not ASCII"; no functional impact.
+8. `crates/ramshield-cgnat/src/shm.rs` — the ownership check uses the *effective* uid, and no
+   privilege-drop code exists anywhere in the tree (no `setuid`/`setgid`/`seteuid` call sites), so
+   the euid is stable for the daemon's lifetime and a file the daemon itself created always
+   matches. The only production caller is `crates/ramshield-detection/src/lib.rs:223` (daemon
+   startup). A hard link to a file owned by *another* user is still rejected; a hard link to a file
+   owned by the daemon user still passes the ownership test, so the comment's "closes the hard link
+   hole" wording is slightly stronger than what the check actually guarantees.
+9. `crates/ramshield-cgnat/tests/cgnat_integration.rs:17` uses `ShmTableManager::default_path()`
+   (`/dev/shm/ramshield_rules`) and would now fail if a root-owned `ramshield_rules` is left in
+   `/dev/shm` from an earlier root run, since the test process's euid is not root. Test-environment
+   hygiene only; worth a `chown`/`rm` note in CI setup.
 
-REVIEWED IN 8 TOOL CALLS
+REVIEWED IN 11 TOOL CALLS

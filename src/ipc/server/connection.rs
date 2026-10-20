@@ -140,6 +140,36 @@ pub(crate) async fn handle_connection(
                 return Ok(());
             }
         }
+
+        // The tail still waiting for its newline is a line that has not ended
+        // yet, so it is subject to the line limit — and it is the only part
+        // of the buffer that is.
+        //
+        // Checking the WHOLE buffer would be wrong: the buffer can hold
+        // several complete pipelined frames, so its length is not the length
+        // of any one line. After the loop above every complete line has been
+        // split off, so what remains IS the unterminated tail.
+        //
+        // The check only applies when the line limit is the TIGHTER of the
+        // two bounds. By default `max_line_length` equals
+        // `max_connection_bytes` (both 1 MiB), and the connection byte budget
+        // is then the binding constraint: it is checked at the top of the
+        // loop and the client is told the byte budget was exceeded, which is
+        // the accurate answer and the one the oversize-connection test pins.
+        // With a line limit configured below the byte budget, this check is
+        // what stops an unterminated line from buffering past its limit.
+        if config.max_line_length < config.max_bytes && buf.len() > config.max_line_length {
+            warn!(
+                "Unterminated line exceeds max length ({}), dropping connection",
+                config.max_line_length
+            );
+            let resp = Response::Error {
+                code: 413,
+                message: format!("line exceeds max_line_length ({})", config.max_line_length),
+            };
+            let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
+            return Ok(());
+        }
     }
 }
 

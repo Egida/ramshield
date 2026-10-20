@@ -145,6 +145,26 @@ impl EnforcementService {
             let lsn = wal
                 .append(&entry)
                 .map_err(|e| EnforcementError::Wal(e.to_string()))?;
+            // Make the record durable before anything else observes it.
+            //
+            // The caller merges this decision into the CRDT and then into the
+            // store and the XDP map. If the record is not durable yet, a crash
+            // can leave the CRDT and the store AHEAD of the log — and
+            // recovery, which rebuilds both from the log, would then silently
+            // drop the block.
+            //
+            // The mesh path already does this (`append_mesh_wal` syncs before
+            // its merge). This is the local path's equivalent, and it was
+            // missing: the local block was merged into the CRDT while its WAL
+            // record was still only in the writer's buffer.
+            //
+            // `append_is_durable()` keeps the cost honest: under `SyncEach`
+            // the append already fsynced, and a second fsync would be pure
+            // waste on the hot path.
+            if !wal.append_is_durable() {
+                wal.sync()
+                    .map_err(|e| EnforcementError::Wal(e.to_string()))?;
+            }
             self.last_wal_lsn = Some(lsn);
             Some(lsn)
         } else {

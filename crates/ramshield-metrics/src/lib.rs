@@ -28,6 +28,12 @@ pub struct Metrics {
     pub requests_total: Arc<AtomicU64>,
     pub blocks_total: Arc<AtomicU64>,
     pub events_ingested: Arc<AtomicU64>,
+    /// Number of detection pre-aggregation flushes.
+    ///
+    /// Each flush walks the whole shared pre-aggregation map, so the flush
+    /// rate is the direct driver of the detection path's CPU cost at high IP
+    /// cardinality. Exported so an operator can watch it.
+    pub pre_aggs_flushes: Arc<AtomicU64>,
     /// Conflated aggregate of IPC rejections: auth 401s + connection
     /// refusals + channel-full event drops. Clean breakdown:
     /// ipc_event_drops / ipc_auth_rejections / ipc_rejected_connections.
@@ -185,6 +191,7 @@ impl Metrics {
             requests_total: Arc::new(AtomicU64::new(0)),
             blocks_total: Arc::new(AtomicU64::new(0)),
             events_ingested: Arc::new(AtomicU64::new(0)),
+            pre_aggs_flushes: Arc::new(AtomicU64::new(0)),
             events_rejected: Arc::new(AtomicU64::new(0)),
             ipc_event_drops: Arc::new(AtomicU64::new(0)),
             ipc_auth_rejections: Arc::new(AtomicU64::new(0)),

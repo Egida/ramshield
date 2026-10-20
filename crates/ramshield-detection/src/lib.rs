@@ -126,8 +126,6 @@ pub struct DetectionEngine {
     /// pre-aggregation entry limit is a hard bound, not a racy trigger.
     pre_aggs_merge_lock: std::sync::Mutex<()>,
     last_pre_aggs_flush_ns: AtomicU64,
-    /// F1: single-flusher gate (N batch workers share the flush trigger).
-    flushing: AtomicBool,
     /// F9: batch/subnet threads, joined at shutdown (was: detached + blind
     /// 5s sleep in main). Each does a final flush before exit.
     worker_handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -146,14 +144,6 @@ pub struct DetectionEngine {
     /// Serializes capacity check/evict/insert so concurrent detector paths
     /// cannot exceed PENDING_MITIGATION_CAP between a len() check and insert.
     pending_mitigation_lock: std::sync::Mutex<()>,
-}
-
-/// Releases the single-flusher gate even on early return/panic.
-struct FlushGuard<'a>(&'a AtomicBool);
-impl Drop for FlushGuard<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
 }
 
 impl DetectionEngine {
@@ -240,7 +230,6 @@ impl DetectionEngine {
             pre_aggs: DashMap::with_hasher_and_shard_amount(ahash::RandomState::new(), 64),
             pre_aggs_merge_lock: std::sync::Mutex::new(()),
             last_pre_aggs_flush_ns: AtomicU64::new(now_ns()),
-            flushing: AtomicBool::new(false),
             worker_handles: std::sync::Mutex::new(Vec::new()),
             // P2: one SHM open shared by proxy and CGNAT guard.
             shm_table: shm_table.clone(),

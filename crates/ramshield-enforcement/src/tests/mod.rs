@@ -1345,3 +1345,60 @@ mod send_assert {
         assert_send::<EnforcementService>();
     }
 }
+
+/// The LOCAL enforcement path must make its WAL record durable before the
+/// decision is merged into the CRDT and projected onto the store and the XDP
+/// map.
+///
+/// The mesh path has always done this: `append_mesh_wal` syncs the record
+/// before the CRDT merge, so a crash can never leave the CRDT ahead of the
+/// durable log. The local path did not — it appended and merged
+/// immediately, so under any durability mode that does not fsync on append
+/// (`GroupCommit`, `Flush`, `None`) the CRDT, the store and the XDP map could
+/// all be ahead of the log. Recovery rebuilds the CRDT and the store FROM the
+/// log, so a crash in that window silently drops the block: the operator was
+/// told the block was applied, the data plane was enforcing it, and after the
+/// restart it was gone.
+///
+/// `GroupCommit` is the mode under test because it is the one that batches:
+/// the append itself does not fsync, so only an explicit sync can make the
+/// record durable.
+#[tokio::test]
+async fn local_enforce_makes_its_wal_record_durable_before_merging() {
+    // A unique directory per test, in the system temp dir. The enforcement
+    // crate has no `tempfile` dev-dependency; the other tests in this module
+    // use the same convention.
+    let dir = std::env::temp_dir().join(format!(
+        "rs_enf_durable_{}_{}",
+        std::process::id(),
+        "group_commit"
+    ));
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let wal = Arc::new(
+        Wal::open(
+            dir.to_str().expect("dir"),
+            false,
+            ramshield_types::Durability::GroupCommit,
+            64 * 1024 * 1024,
+            0,
+        )
+        .expect("wal"),
+    );
+    let mut s = svc(Box::new(RecordingApplier::new())).with_wal(Arc::clone(&wal));
+
+    // TWO blocks. Under `GroupCommit` the first append happens with the
+    // window already due, so it fsyncs on its own. The SECOND append lands
+    // inside the group-commit window, so only an explicit sync can make it
+    // durable — which is exactly the case the local path was missing.
+    let first: IpAddr = "203.0.113.9".parse().expect("ip");
+    let second: IpAddr = "203.0.113.10".parse().expect("ip");
+    s.enforce(block_cmd(first, 60)).await.expect("enforce");
+    s.enforce(block_cmd(second, 60)).await.expect("enforce");
+
+    assert!(
+        wal.durable_lsn() >= 2,
+        "both blocks' WAL records must be durable once enforce() returns, \
+         durable_lsn={}",
+        wal.durable_lsn()
+    );
+}

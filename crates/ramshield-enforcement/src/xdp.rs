@@ -213,47 +213,70 @@ unsafe fn raw_get_next_key<K: Copy>(
     Ok(Some(unsafe { next.assume_init() }))
 }
 
-/// Enumerate the keys resident in a BPF map and stage the ones that are not in
-/// `expected` for deferred deletion.
+/// What a reconcile must do to the kernel map, derived from a single
+/// enumeration of the map and the expected key set.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReconcilePlan {
+    /// Resident keys that are not expected: these must be removed.
+    pub stale: Vec<BlocklistKey>,
+    /// Expected keys that are not resident: these must be inserted.
+    ///
+    /// Only the ABSENT expected keys belong here. Re-inserting an already
+    /// resident key costs one `bpf_map_update_elem` syscall per blocked IP
+    /// per reconcile cycle and takes the very bucket lock the XDP data path
+    /// takes on every packet, so rewriting the whole map on every cycle
+    /// competes with packet processing for the same locks.
+    pub missing: Vec<BlocklistKey>,
+}
+
+/// Enumerate the map once and compute the reconcile plan.
 ///
-/// The cursor MUST advance past every key we visit, including the staged ones.
-/// A staged key is still resident in the map — that is the entire point of the
-/// staged-deletion buffer — so leaving the cursor pointing at the previous key
-/// makes `bpf_map_get_next_key` return the same key on every call, and the
-/// enumeration never terminates.
+/// The single walk yields both halves of the plan:
 ///
-/// `next_key` models `bpf_map_get_next_key`: given the previously visited key
-/// it returns the next resident key, or `None` at the end of the map. `None`
-/// asks for the first key.
-fn enumerate_stale_keys<F>(
+/// * every resident key that is not in `expected` is `stale` (delete it);
+/// * every key in `expected` that the walk did not see is `missing`
+///   (insert it).
+///
+/// Because the walk already visits every resident key, the absent expected
+/// keys are exactly `expected` minus what was seen — so the plan costs one
+/// syscall per resident key and nothing more, and it never rewrites a key
+/// that is already correct.
+fn plan_reconcile<F>(
     mut next_key: F,
     expected: &std::collections::HashSet<BlocklistKey>,
-) -> std::io::Result<Vec<BlocklistKey>>
+) -> std::io::Result<ReconcilePlan>
 where
     F: FnMut(Option<&BlocklistKey>) -> std::io::Result<Option<BlocklistKey>>,
 {
     let mut prev_key: Option<BlocklistKey> = None;
-    let mut staged_deletions: Vec<BlocklistKey> = Vec::new();
+    let mut plan = ReconcilePlan::default();
+    let mut seen: std::collections::HashSet<BlocklistKey> =
+        std::collections::HashSet::with_capacity(expected.len());
     loop {
         let next = next_key(prev_key.as_ref())?;
         match next {
             Some(k) => {
-                if !expected.contains(&k) {
-                    // Stage for deferred deletion instead of in-loop delete.
-                    staged_deletions.push(k);
+                if expected.contains(&k) {
+                    // Resident AND expected: nothing to do. Remember that we
+                    // saw it so it is not scheduled for insertion.
+                    seen.insert(k);
+                } else {
+                    // Resident but not expected: stage for deferred deletion.
+                    plan.stale.push(k);
                 }
                 // Advance the cursor past EVERY key we visit, including the
-                // staged ones. A staged key is still resident in the map, so
-                // leaving the cursor on the previous key makes
-                // `bpf_map_get_next_key` return this same key again on every
-                // call: the enumeration never terminates and the staging buffer
-                // grows without bound.
+                // staged ones — see the doc comment on `plan_reconcile`.
                 prev_key = Some(k);
             }
             None => break,
         }
     }
-    Ok(staged_deletions)
+    plan.missing = expected
+        .iter()
+        .filter(|k| !seen.contains(*k))
+        .copied()
+        .collect();
+    Ok(plan)
 }
 
 /// bpf_map_delete_elem — remove `key` from the map.
@@ -556,7 +579,7 @@ impl XdpApplier for AyaXdpApplier {
                 // STAGED DELETION BUFFER: decouple enumeration from deletion
                 // to avoid race conditions where in-loop deletion interrupts
                 // raw_get_next_key iteration and returns ENOENT.
-                let staged_deletions = enumerate_stale_keys(
+                let plan = plan_reconcile(
                     |prev| {
                         // SAFETY: `fd_raw` comes from the BLOCKLIST/BLOCKLIST6 map
                         // borrowed as `m` for this whole closure, so it stays open;
@@ -567,12 +590,42 @@ impl XdpApplier for AyaXdpApplier {
                 )
                 .map_err(MapError::from)?;
                 // Execute deletions after collection to avoid race conditions.
-                let stale_count = staged_deletions.len();
-                for k in staged_deletions.iter() {
+                let stale_count = plan.stale.len();
+                for k in plan.stale.iter() {
                     // SAFETY: same live map fd and 16-byte key layout as before.
                     unsafe { raw_delete_elem(fd_raw, k) }.map_err(MapError::from)?;
                 }
-                for k in &expected {
+                // Insert ONLY the expected keys that are not already resident.
+                // Re-inserting a resident key costs one `bpf_map_update_elem`
+                // syscall per blocked IP per cycle and takes the same bucket
+                // lock the XDP data path takes on every packet — at a large
+                // blocklist that makes the periodic reconcile a competitor of
+                // the data plane for no benefit, since the key is already
+                // correct.
+                //
+                // VALUE SEMANTICS. The map value is the ABSOLUTE EXPIRY
+                // (`blocklist_value`: now + ttl, or PERMANENT for ttl == 0),
+                // on the same CLOCK_MONOTONIC the BPF program reads with
+                // `bpf_ktime_get_ns`, and the program drops a packet only
+                // while `now < expiry`. A resident key therefore keeps the
+                // expiry `apply_block` gave it, and the reconcile no longer
+                // rewrites it to PERMANENT.
+                //
+                // That is consistent with the rest of the system:
+                //
+                // * `apply_block` writes the real expiry;
+                // * the keep-alive re-runs the whole enforce path at the
+                //   cooldown boundary (ttl/2), which re-applies the block
+                //   and so refreshes the kernel expiry before it passes;
+                // * `expire_due` reaps the block at the same TTL and issues
+                //   the unblock that removes the map entry.
+                //
+                // The old PERMANENT rewrite was therefore redundant on the
+                // normal path. The one behaviour difference is the corner
+                // case where the keep-alive is missed: the block now lapses
+                // at its TTL instead of the reconcile extending it
+                // indefinitely, which is what a TTL is for.
+                for k in plan.missing.iter() {
                     m.insert(*k, PERMANENT, 0)?;
                 }
                 Ok(stale_count)
@@ -595,11 +648,23 @@ impl XdpApplier for AyaXdpApplier {
                 .into_iter()
                 .map(|network: &IpNetwork| cidr_key(*network))
                 .collect();
-            let is_expected = |k: &LpmKey<[u64; 2]>| {
-                expected
-                    .iter()
-                    .any(|e| e.prefix_len() == k.prefix_len() && e.data() == k.data())
-            };
+            // Membership test via a hash set, not a linear scan.
+            //
+            // The old code ran `expected.iter().any(...)` once per resident
+            // key, so the CIDR reconcile was O(resident x expected) — quadratic.
+            // At a few thousand configured CIDRs that is millions of
+            // comparisons per reconcile cycle, and the reconcile cycle runs
+            // every 10 seconds. The key comparison is a prefix-length plus
+            // data equality, so it hashes cleanly.
+            // `LpmKey` is `#[repr(C, packed)]` and derives neither `Hash` nor
+            // `Eq`, so the set is keyed by the plain tuple of the two fields
+            // the comparison used: the prefix length and the address data.
+            let expected_set: std::collections::HashSet<(u32, [u64; 2])> = expected
+                .iter()
+                .map(|k| (k.prefix_len(), k.data()))
+                .collect();
+            let is_expected =
+                |k: &LpmKey<[u64; 2]>| expected_set.contains(&(k.prefix_len(), k.data()));
             self.with_cidr_map(name, |trie| {
                 let current: Vec<LpmKey<[u64; 2]>> = trie.keys().collect::<Result<Vec<_>, _>>()?;
                 for key in current {
@@ -796,39 +861,96 @@ mod tests {
     /// after the cursor, `None` at the end of the map). It is a model of the
     /// KERNEL SYSCALL, not of the code under test: the enumeration logic
     /// being exercised here is the production function.
+    /// The reconcile must INSERT only the expected keys that are absent from
+    /// the map.
+    ///
+    /// The old code re-inserted every expected key on every reconcile cycle:
+    /// one `bpf_map_update_elem` syscall per blocked IP per cycle, each one
+    /// taking the very bucket lock the XDP data path takes on every packet.
+    /// At a large blocklist that turns the periodic reconcile into a
+    /// data-plane competitor, and it is pure waste — the key is already
+    /// correct.
     #[test]
-    fn reconcile_enumeration_terminates_with_a_stale_key() {
+    fn reconcile_plan_inserts_only_absent_expected_keys() {
         let resident = [bkey(0x1000), bkey(0x1001)];
         let expected: std::collections::HashSet<BlocklistKey> =
-            [bkey(0x1001)].into_iter().collect();
+            [bkey(0x1000), bkey(0x1002)].into_iter().collect();
 
         let mut calls = 0usize;
         let mut next_key = |prev: Option<&BlocklistKey>| -> std::io::Result<Option<BlocklistKey>> {
             calls += 1;
             if calls > 64 {
-                // Fail loudly instead of hanging the test run.
-                return Err(std::io::Error::other(
-                    "enumeration did not terminate: the cursor did not advance past a staged key",
-                ));
+                return Err(std::io::Error::other("enumeration did not terminate"));
             }
-            match prev {
-                None => Ok(resident.first().copied()),
-                Some(p) => {
-                    let idx = resident
-                        .iter()
-                        .position(|k| k == p)
-                        .ok_or_else(|| std::io::Error::other("cursor key is not resident"))?;
-                    Ok(resident.get(idx + 1).copied())
-                }
-            }
+            Ok(match prev {
+                None => Some(resident[0]),
+                Some(p) if *p == resident[0] => Some(resident[1]),
+                _ => None,
+            })
         };
 
-        let staged = enumerate_stale_keys(&mut next_key, &expected)
-            .expect("enumeration must terminate with a stale key present");
+        let plan = plan_reconcile(&mut next_key, &expected).expect("plan");
+
         assert_eq!(
-            staged,
-            vec![bkey(0x1000)],
-            "exactly the stale key is staged, and only once"
+            plan.stale,
+            vec![bkey(0x1001)],
+            "only the resident non-expected key is stale"
+        );
+        assert_eq!(
+            plan.missing,
+            vec![bkey(0x1002)],
+            "only the absent expected key is missing"
+        );
+        assert!(
+            !plan.missing.contains(&bkey(0x1000)),
+            "a resident expected key must not be re-inserted"
+        );
+    }
+
+    /// The cursor MUST advance past every key we visit, including the staged
+    /// ones.
+    ///
+    /// A staged key is still resident in the map — that is the entire point of
+    /// the staged-deletion buffer — so leaving the cursor pointing at the
+    /// previous key makes `bpf_map_get_next_key` return the same key on every
+    /// call and the enumeration never terminates. The old reconcile loop
+    /// advanced the cursor only for keys that were still expected, so a single
+    /// resident stale key hung the enforcement control plane and grew the
+    /// staging buffer without bound.
+    #[test]
+    fn reconcile_enumeration_terminates_with_a_stale_key() {
+        let resident = [bkey(0x1000), bkey(0x1001)];
+        // Only the first resident key is expected; the second is stale.
+        let expected: std::collections::HashSet<BlocklistKey> =
+            [bkey(0x1000)].into_iter().collect();
+
+        let mut calls = 0usize;
+        let mut next_key = |prev: Option<&BlocklistKey>| -> std::io::Result<Option<BlocklistKey>> {
+            calls += 1;
+            if calls > 64 {
+                return Err(std::io::Error::other("enumeration did not terminate"));
+            }
+            Ok(match prev {
+                None => Some(resident[0]),
+                Some(p) if *p == resident[0] => Some(resident[1]),
+                _ => None,
+            })
+        };
+
+        let plan = plan_reconcile(&mut next_key, &expected).expect("plan");
+
+        assert!(
+            calls <= 8,
+            "the enumeration must terminate, took {calls} calls"
+        );
+        assert_eq!(
+            plan.stale,
+            vec![bkey(0x1001)],
+            "the stale resident key must be staged for deletion"
+        );
+        assert!(
+            plan.missing.is_empty(),
+            "the expected key is already resident, nothing to insert"
         );
     }
 }

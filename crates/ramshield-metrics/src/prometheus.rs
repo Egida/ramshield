@@ -44,6 +44,12 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_pre_aggs_flushes_total",
+            self.pre_aggs_flushes.load(Ordering::Relaxed),
+            "Detection pre-aggregation flushes; each one walks the whole shared aggregate map.",
+            "counter"
+        ));
+        out.push_str(&emit!(
             "ramshield_frames_rejected_total",
             self.frames_rejected.load(Ordering::Relaxed),
             "IPC frames rejected at parse or auth-stripped decode.",

@@ -13,6 +13,11 @@ impl Metrics {
         self.events_ingested.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Record one detection pre-aggregation flush.
+    pub fn inc_pre_aggs_flush(&self) {
+        self.pre_aggs_flushes.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_rejected(&self, n: u64) {
         self.events_rejected.fetch_add(n, Ordering::Relaxed);
     }
