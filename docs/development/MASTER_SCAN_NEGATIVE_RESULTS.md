@@ -278,8 +278,18 @@ correct and bounded under extreme high traffic. Every layer was checked.
 `BLOCKLIST`/`BLOCKLIST6` as `LruHashMap`, with the comment *"LRU_HASH: kernel
 auto-evicts coldest entry when full — no E2BIG under botnet flood."* The
 kernel evicts the coldest entry rather than failing the insert, so a flood of
-unique source IPs degrades the oldest blocks instead of permanently breaking
-the map.
+unique source IPs evicts the coldest (least-recently-used) block instead of
+permanently breaking the map.
+
+The trade-off is real, and it is **fail-open for the evicted IP**: while its
+entry is out of the map, that IP is not filtered. The reconciler restores it
+— the plan's `missing` set is every expected key the map walk did not see, and
+each is re-inserted as `PERMANENT`
+(`crates/ramshield-enforcement/src/xdp.rs:628-629`) — so the window is at most
+one reconcile interval (10 s: 40 ticks x 250 ms,
+`crates/ramshield-enforcement/src/service/run.rs:34-39`). The map never
+refuses an insert, which is what keeps it available under a flood; the price
+is that an evicted block is unenforced for that window.
 
 **2. The per-IP userspace map is capped, atomically, and fails closed.**
 See §7f: `write.rs:108-129` reserves capacity before the entry exists with a
@@ -323,9 +333,20 @@ if a deployment ever holds thousands of concurrent prefix blocks."* Given
 point 4, that assumption is sound, and the upgrade path is recorded.
 
 **No change made.** The kernel and userspace block maps are bounded at every
-layer, the LRU absorbs per-IP floods, the prefix trie is self-cleaning, and
-the one residual — a 10 s over-enforcement window on an expired prefix — is
-bounded and in the safe direction.
+layer, the LRU absorbs per-IP floods, and the prefix trie is self-cleaning.
+There are **two** bounded residuals, in opposite directions:
+
+- **CIDR — fail-closed.** An expired prefix stays in the trie until the next
+  reconcile: at most 10 s of over-enforcement. That is the safe direction for
+  a mitigation system.
+- **Per-IP — fail-open.** An LRU-evicted block is not enforced until the next
+  reconcile re-inserts it: at most 10 s during which that IP is unfiltered.
+  This is the availability-friendly direction, and it is the price of a map
+  that never refuses an insert.
+
+Both are bounded, but they are not the same direction, and the per-IP one
+must be sized for: a deployment whose peak concurrent block set approaches
+the map capacity should raise the map size, because eviction is silent.
 
 ---
 
