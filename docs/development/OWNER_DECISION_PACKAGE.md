@@ -207,6 +207,26 @@ SHM ABI) produced, per batch:
 | owner decision package | `pkg_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
 | panic-claim correction | `panicfix_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
 
+**One precision note on the first batch.** Its gate run (`scan_gates.log`,
+22:55) predates the commit and ran against the *staged index*, which was
+byte-identical to what was committed apart from the review report added in the
+same commit. The direct evidence on the committed tree itself is CI: all four
+workflows green on `2868250`. Every later batch was gated on the committed
+tree.
+
+### Preserve state, verified after the last push
+
+| Item | State |
+|---|---|
+| Stashes | 24 |
+| `refs/backup/pre-merge` | `1ebfc2ca0095d25c5d782bf0d577d62f10574b0b` |
+| Tracked `.bak`/`.orig` | 3, untouched |
+| Main worktree (`.../beta/rs`) | `feature/mesh-f01-hmac-edge-secrets` at `f75abb5`, 11 pre-existing untracked files, unmodified |
+| Audit-branch worktree | `fix/audit-branch-aworset-restore` at `3301b9d`, unpushed |
+| Master worktree (`.../rs-local-backlog-dispatcher`) | local `master` at `d369d27`, clean |
+| Other worktrees | `ramshield-pr19-fix` at `918732b`, two backlog-dispatcher worktrees, all untouched |
+| Deployment | none, and none authorized |
+
 **Two superseded logs remain on disk and both show failures.** `perf_gates.log`
 (11/14, 2 failed) and `perf2_gates.log` (11/14, 3 failed) are from the
 *intermediate* second-batch tree, before the IPC line-limit check was
