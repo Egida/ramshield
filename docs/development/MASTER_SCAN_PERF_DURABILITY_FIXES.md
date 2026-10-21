@@ -320,6 +320,13 @@ for the process lifetime.
 | IPC `BATCH_MAX` applied after serde allocates the batch | **Kept.** The allocation is already bounded by the 1 MiB frame limit, so this is a hardening gap, not an exhaustion vector. Changing the wire contract to reject instead of truncate is an API decision. |
 | The default unauthenticated privileged IPC posture | **Not changed.** Policy decision for the owner. |
 | Tracked stale copies `README.md.bak`, `src/engine/boot.rs.bak`, `src/engine/boot.rs.orig` | **Not changed.** On the preserve list; deletion needs an explicit owner decision. |
+> **Update (owner Decision 3, option A):** these three stale tracked copies were
+> deleted after their content was proven to be preserved in git history —
+> `README.md.bak` was byte-identical to the current `README.md`, and the two
+> `boot.rs` copies were identical to each other and exist in history as a
+> historical `src/engine/boot.rs` (`89578b6`, `49c9caa`). See
+> `docs/development/OWNER_DECISION_PACKAGE.md`.
+
 | The mesh findings (CRDT tombstone race, unblock-not-projected-but-ACKed, cursor regression, per-peer authorization) | **Not in this batch.** The owner asked for the non-mesh findings first. They are the next candidates. |
 
 ---

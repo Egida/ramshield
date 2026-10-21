@@ -158,6 +158,29 @@ stays parked until this decision is answered.** That deviation is recorded
 here rather than left implicit. If the answer is "no", the branch should be
 deleted and the recommendation kept as a written proposal only.
 
+### Executed — option C (defer) is in force
+
+The deferral is recorded here so it does not depend on anyone's memory:
+
+- The branch `feature/mesh-f01-hmac-edge-secrets` is parked at **`f75abb5`**
+  and **unpublished**: `git branch -r --contains
+  feature/mesh-f01-hmac-edge-secrets` returns nothing, and no remote branch
+  name matches it. It has never been published, so no consumer can depend on
+  it.
+- It is **not merged** into `master` and it is **not** re-based onto it. It
+  stays exactly as it was built.
+- It changes **no default**: the mesh remains opt-in via `mesh.enabled`, and
+  `require_auth` / `auth_keys` are untouched. Nothing in the shipped product
+  depends on it.
+- It is **re-decided when F-02 and F-03 land**, because those two define the
+  merge/cursor semantics the pairwise secrets must interoperate with. Until
+  then the branch is frozen: no further commits, no rebase, no force-push.
+- The residual limitation above stands either way: within one edge, a
+  symmetric shared secret cannot provide per-node identity isolation, and no
+  claim of that kind may be made.
+
+**F-02 and F-03 remain parked** and are not started by this decision.
+
 ### Options
 
 | | Option |
@@ -201,6 +224,23 @@ They are **tracked in git**, so they ship with the repository permanently.
 `src/engine/boot.rs.bak` and `src/engine/boot.rs.orig` are stale copies of a
 file that has since changed substantially (257 lines of drift) and that
 contains credential-handling code.
+
+### Executed — option A (delete) is done
+
+The three tracked stale copies were deleted, **after** their content was
+proven to be preserved in git history:
+
+| File | Blob | Recovery |
+|---|---|---|
+| `README.md.bak` | `66d19e41` | **byte-identical to the current `README.md`** (`diff` = 0 lines) |
+| `src/engine/boot.rs.bak` | `f249549a` | that exact content exists as a historical `src/engine/boot.rs` (`89578b6`, `49c9caa`) |
+| `src/engine/boot.rs.orig` | `f249549a` | **byte-identical to `boot.rs.bak`**, same history |
+
+Every blob was confirmed present in the object database before the deletion
+(`git cat-file -e <blob>`), and each is recoverable with
+`git show <commit>:<path>`. Nothing was lost: the two `boot.rs` copies were
+identical to each other, and the `README.md.bak` was identical to the file it
+shadowed.
 
 ### Options
 

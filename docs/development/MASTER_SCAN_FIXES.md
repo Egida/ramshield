@@ -183,6 +183,13 @@ the other panics (F-3, F-4) rather than by a dedicated test.
 | `panic = "abort"` in the release profile | **Kept.** Both `catch_unwind` sites in the tree (`src/dashboard/auth.rs`, `crates/ramshield-protocol/src/auth.rs`) are inside `#[cfg(test)]` modules, so no production code relies on unwinding. The setting is a deliberate hardening choice, and it raises the stakes of the panic fixes above — which is why F-3 and F-4 matter. |
 | Default unauthenticated privileged IPC posture (`docs/IPC.md` claims role authorisation that the default path skips, and hard-codes the actor to `"admin"`) | **Not in this push.** This is a policy decision for the repository owner, not a mechanical defect. |
 | Tracked stale copies `README.md.bak`, `src/engine/boot.rs.bak`, `src/engine/boot.rs.orig` | **Not in this push.** These are on the preserve list for this work; deleting tracked files needs an explicit owner decision. They are not compiled by Cargo and are invisible to `rg --type rust`. |
+> **Update (owner Decision 3, option A):** these three stale tracked copies were
+> deleted after their content was proven to be preserved in git history —
+> `README.md.bak` was byte-identical to the current `README.md`, and the two
+> `boot.rs` copies were identical to each other and exist in history as a
+> historical `src/engine/boot.rs` (`89578b6`, `49c9caa`). See
+> `docs/development/OWNER_DECISION_PACKAGE.md`.
+
 | Per-IP `IpAgg` map growth, replay-store bounds, native XDP frame-size bound, dashboard body limits, config-patch path, `inc_blocks` | **Not in this push.** Open scan candidates without a confirmed reproduction. |
 | `src/engine/waf.rs` | **Not a reachable vulnerability.** The module has zero production callers; the issues are dead-code concerns. |
 
