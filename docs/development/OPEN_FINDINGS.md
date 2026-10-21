@@ -33,10 +33,11 @@ are the ones used here.
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 | rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
-| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — found while re-verifying I-011; no code change yet | no — the fix shape is mechanical, but it touches the block write path |
+| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED in PR #39** (`fix/f9-enforcement-lost-update`) — the store has two block-only mutators under one shard lock; not yet merged | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — 2 of 54 fixed; the rest are listed in `docs/development/DOC_DRIFT_SWEEP.md` | no — per-file documentation edits |
+| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — the sweep is on `master` (`f900664`); the operator-facing claims are fixed, the rest are listed per claim in `docs/development/DOC_DRIFT_SWEEP.md` | no — per-file documentation edits |
+| F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 
 ---
 
