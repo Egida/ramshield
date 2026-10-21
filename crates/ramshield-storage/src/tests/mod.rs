@@ -863,3 +863,279 @@ fn threat_sample_queue_is_bounded() {
         s.threat_sample.len()
     );
 }
+
+#[test]
+fn a_block_does_not_roll_back_the_detection_counters() {
+    // F-9: the block path used to be get() -> mutate -> insert(), two lock
+    // acquisitions. A detection flush that ran in between advanced the
+    // record's counters, and the block then published its stale snapshot
+    // back - rewinding the attacker's accumulated evidence, and with it
+    // the warm-up count that `hot || cusum_fired || pulse_fired` needs.
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1));
+    let ram_lim = 64 * 1024 * 1024;
+
+    // A record with some detection history, then the detection flush
+    // advances it - this is the write that used to be lost.
+    store
+        .insert(ip, Value::IpRecord(blank_record(ip)), None, ram_lim)
+        .unwrap();
+    let (_, stored) = store.update_ip(ip, blank_record(ip), ram_lim, |r| {
+        r.sample_count = 6;
+        r.cusum_s = 2.5;
+        r.request_count = 42;
+    });
+    assert!(stored);
+
+    // The block lands.
+    let mut block = blank_record(ip);
+    block.block_state = BlockState::Blocked {
+        reason: BlockReason::HighRps,
+        since_ns: 1_000,
+    };
+    store.block_ip(ip, block, ram_lim).unwrap();
+
+    match store.get(&ip) {
+        Some(Value::IpRecord(r)) => {
+            assert!(
+                matches!(r.block_state, BlockState::Blocked { .. }),
+                "the block did not land"
+            );
+            assert_eq!(
+                r.sample_count, 6,
+                "the block rolled the detection sample count back"
+            );
+            assert_eq!(r.cusum_s, 2.5, "the block rolled the CUSUM back");
+            assert_eq!(
+                r.request_count, 42,
+                "the block rolled the request count back"
+            );
+        }
+        other => panic!("expected IpRecord, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unblock_does_not_roll_back_the_detection_counters() {
+    // F-9, the mirror: the unblock path had the same window.
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2));
+    let ram_lim = 64 * 1024 * 1024;
+
+    let mut blocked = blank_record(ip);
+    blocked.block_state = BlockState::Blocked {
+        reason: BlockReason::HighRps,
+        since_ns: 1_000,
+    };
+    store
+        .insert(ip, Value::IpRecord(blocked), None, ram_lim)
+        .unwrap();
+    let (_, stored) = store.update_ip(ip, blank_record(ip), ram_lim, |r| {
+        r.sample_count = 6;
+        r.request_count = 42;
+    });
+    assert!(stored);
+
+    assert!(store.unblock_ip(&ip), "the unblock did not land");
+
+    match store.get(&ip) {
+        Some(Value::IpRecord(r)) => {
+            assert_eq!(r.block_state, BlockState::Clean, "the unblock did not land");
+            assert_eq!(
+                r.sample_count, 6,
+                "the unblock rolled the detection sample count back"
+            );
+            assert_eq!(
+                r.request_count, 42,
+                "the unblock rolled the request count back"
+            );
+        }
+        other => panic!("expected IpRecord, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_blocked_index_is_updated_under_the_same_lock_as_the_record() {
+    // F-9 follow-up. The vacant branch of `block_ip` published the record
+    // with `insert` - which releases the shard lock - and updated the
+    // blocked index afterwards. A reader that saw the record in that
+    // window saw a blocked record that was not in the index, and a
+    // concurrent unblock landing there decremented a counter that was
+    // still zero: a u64 underflow, and an index left holding a key whose
+    // record was clean.
+    //
+    // The observer below does what such a reader does: it takes the shard
+    // lock, reads the record, and then reads the index. With the index
+    // update inside the lock, the two can never disagree - a reader that
+    // can see the record can also see the index entry.
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    let store = Arc::new(Store::new(16));
+    let ram_lim = 64 * 1024 * 1024;
+
+    for round in 0..200u32 {
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(
+            10,
+            98,
+            (round / 200) as u8,
+            (round % 200) as u8,
+        ));
+        let mut block = blank_record(ip);
+        block.block_state = BlockState::Blocked {
+            reason: BlockReason::HighRps,
+            since_ns: 1_000,
+        };
+
+        let writer_store = store.clone();
+        let writer_block = block.clone();
+        let writer = std::thread::spawn(move || {
+            writer_store.block_ip(ip, writer_block, ram_lim).unwrap();
+        });
+
+        // The observer can only read the record once the writer has
+        // released the shard lock - which is exactly the window.
+        let mut saw_record_without_index = false;
+        for _ in 0..200_000 {
+            if let Some(Value::IpRecord(r)) = store.get(&ip) {
+                if matches!(r.block_state, BlockState::Blocked { .. })
+                    && !store.blocked_set.contains_key(&ip)
+                {
+                    saw_record_without_index = true;
+                }
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        writer.join().unwrap();
+
+        assert!(
+            !saw_record_without_index,
+            "round {round}: the record was visible before the blocked index was updated"
+        );
+    }
+}
+
+#[test]
+fn an_unblock_creates_no_record_for_an_unknown_ip() {
+    // An unblock must not resurrect a clean record for an IP there is no
+    // state for - the store would then hold a record nobody ever saw.
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+    assert!(!store.unblock_ip(&ip), "nothing to unblock");
+    assert!(store.get(&ip).is_none(), "an unblock created a record");
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn a_block_keeps_the_store_blocked_index_in_step() {
+    // The store keeps its own blocked index; a block that does not
+    // update it leaves the dashboard and the eviction path disagreeing
+    // with the records.
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 4));
+    let ram_lim = 64 * 1024 * 1024;
+
+    let mut block = blank_record(ip);
+    block.block_state = BlockState::Blocked {
+        reason: BlockReason::HighRps,
+        since_ns: 1_000,
+    };
+    store.block_ip(ip, block, ram_lim).unwrap();
+    assert_eq!(
+        store
+            .blocked_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the blocked index did not follow"
+    );
+    assert!(
+        store.blocked_set.contains_key(&ip),
+        "the blocked set did not follow"
+    );
+
+    assert!(store.unblock_ip(&ip));
+    assert_eq!(
+        store
+            .blocked_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the blocked index did not follow"
+    );
+    assert!(
+        !store.blocked_set.contains_key(&ip),
+        "the blocked set did not follow"
+    );
+}
+
+#[test]
+fn a_block_never_makes_the_detection_counters_go_backwards() {
+    // F-9, the property that matters: the enforcement actor's block and
+    // detection's flush touch the same record. A block must never publish
+    // a stale snapshot of the detection counters, or the attacker's
+    // accumulated evidence is rewound - and with it the warm-up count
+    // that `hot || cusum_fired || pulse_fired` needs to reach.
+    //
+    // The counter only ever grows, so a reader that sees it shrink has
+    // caught a stale write. That is what this watches for.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let store = Arc::new(Store::new(16));
+    let ip: IpAddr = "10.99.0.5".parse().unwrap();
+    let ram_lim = 64 * 1024 * 1024;
+    store
+        .insert(ip, Value::IpRecord(blank_record(ip)), None, ram_lim)
+        .unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flusher = {
+        let store = store.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                store.update_ip(ip, blank_record(ip), ram_lim, |r| {
+                    r.request_count += 1;
+                    r.cusum_s += 0.25;
+                    r.request_count
+                });
+            }
+        })
+    };
+    let blocker = {
+        let store = store.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let mut block = blank_record(ip);
+                block.block_state = BlockState::Blocked {
+                    reason: BlockReason::HighRps,
+                    since_ns: 1,
+                };
+                store.block_ip(ip, block, ram_lim).unwrap();
+            }
+        })
+    };
+
+    let mut last = 0u64;
+    let mut drops = 0u64;
+    for _ in 0..50_000 {
+        if let Some(Value::IpRecord(r)) = store.get(&ip) {
+            if r.request_count < last {
+                drops += 1;
+            }
+            last = r.request_count;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    flusher.join().unwrap();
+    blocker.join().unwrap();
+
+    assert_eq!(
+        drops, 0,
+        "a block published a stale snapshot: the detection counters went backwards"
+    );
+}
