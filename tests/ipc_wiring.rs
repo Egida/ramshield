@@ -160,3 +160,92 @@ fn ipc_wiring_unterminated_line_is_capped_at_the_tighter_line_limit() {
 
     engine.shutdown();
 }
+
+/// P0: an unauthenticated request must not be able to MUTATE enforcement state.
+///
+/// With the default configuration the IPC has no `auth_keys` and
+/// `require_auth = false`, so `auth_enforced` is false and every frame is
+/// accepted without an auth envelope. The role table was therefore skipped
+/// entirely and the actor fell back to a hard-coded `"admin"` — which meant
+/// **any local process could `unblock_ip` and remove an active mitigation** on
+/// a customer under attack.
+///
+/// The read and telemetry paths must stay open: the telemetry ingest is the
+/// hot path from the proxy and it carries hostile inbound data, so
+/// authenticating it buys nothing.
+#[test]
+fn ipc_wiring_unauthenticated_mutation_is_refused() {
+    let mut cfg = Config::default();
+    cfg.ipc.tcp_addr = "127.0.0.1:17895".into();
+
+    let store = Arc::new(ramshield::storage::Store::new(cfg.engine.shard_count));
+    let metrics = Arc::new(ramshield::metrics::Metrics::new());
+    let engine = Arc::new(Engine::new(cfg.clone(), store, metrics));
+    let _handle = engine.clone().start_async().expect("start");
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut stream = TcpStream::connect("127.0.0.1:17895").expect("connect");
+
+    // A state-mutating request with no authenticated principal: refused.
+    writeln!(stream, r#"{{"type":"unblock_ip","ip":"203.0.113.7"}}"#).expect("write");
+    let mut resp = String::new();
+    BufReader::new(&stream).read_line(&mut resp).expect("read");
+    let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_eq!(
+        v["type"], "error",
+        "an unauthenticated mutation must not be accepted: {resp}"
+    );
+    assert_eq!(
+        v["code"], 401,
+        "expected an unauthorized error for an unauthenticated mutation, got: {resp}"
+    );
+
+    // The telemetry ingest path must stay open — it is the hot path from the
+    // proxy and carries hostile inbound data.
+    writeln!(
+        stream,
+        r#"{{"type":"report_connection","ip":"203.0.113.8","bytes":10,"status_code":200,"proto_fp":0}}"#
+    )
+    .expect("write");
+    let mut resp2 = String::new();
+    BufReader::new(&stream).read_line(&mut resp2).expect("read");
+    let v2: serde_json::Value = serde_json::from_str(&resp2).expect("valid JSON");
+    assert_ne!(
+        v2["code"], 401,
+        "the telemetry ingest path must stay unauthenticated: {resp2}"
+    );
+
+    engine.shutdown();
+}
+
+/// The operator escape hatch: `ipc.require_auth_for_mutations = false`
+/// restores the unauthenticated operator path for deployments that have no
+/// credentials to configure.
+///
+/// The flag is only reachable in the no-credentials configuration — with
+/// `auth_keys` set, every frame must carry a valid HMAC envelope and carries
+/// a principal, so the gate never fires.
+#[test]
+fn ipc_wiring_unauthenticated_mutation_is_allowed_when_explicitly_enabled() {
+    let mut cfg = Config::default();
+    cfg.ipc.tcp_addr = "127.0.0.1:17896".into();
+    cfg.ipc.require_auth_for_mutations = false;
+
+    let store = Arc::new(ramshield::storage::Store::new(cfg.engine.shard_count));
+    let metrics = Arc::new(ramshield::metrics::Metrics::new());
+    let engine = Arc::new(Engine::new(cfg.clone(), store, metrics));
+    let _handle = engine.clone().start_async().expect("start");
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut stream = TcpStream::connect("127.0.0.1:17896").expect("connect");
+    writeln!(stream, r#"{{"type":"unblock_ip","ip":"203.0.113.7"}}"#).expect("write");
+    let mut resp = String::new();
+    BufReader::new(&stream).read_line(&mut resp).expect("read");
+    let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_ne!(
+        v["code"], 401,
+        "the escape hatch must let the request past the gate, got: {resp}"
+    );
+
+    engine.shutdown();
+}

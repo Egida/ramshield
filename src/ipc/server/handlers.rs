@@ -64,6 +64,35 @@ pub(crate) fn process_request(
         };
     }
 
+    // P0: an unauthenticated request must not mutate enforcement state.
+    //
+    // With `ipc.auth_keys` configured, `auth_enforced` is true and every
+    // frame carries a verified principal, so the role table above already
+    // applied and this branch is not reachable. It is reachable only in the
+    // no-credentials configuration, where the role table was skipped
+    // entirely and the actor fell back to a hard-coded "admin" — so any
+    // local process could `unblock_ip` and remove an active mitigation on a
+    // customer under attack.
+    //
+    // The read and telemetry paths stay open deliberately: the telemetry
+    // ingest is the hot path from the proxy and carries hostile inbound
+    // data, so authenticating it buys nothing.
+    if principal.is_none()
+        && req.is_mutation()
+        && engine.config.load().ipc.require_auth_for_mutations
+    {
+        engine.metrics.inc_rejected(1);
+        engine.metrics.inc_ipc_auth_rejections(1);
+        return Response::Error {
+            code: 401,
+            message: "unauthorized: a state-mutating request requires an authenticated \
+                      principal; configure ipc.auth_keys, or set \
+                      ipc.require_auth_for_mutations = false to restore the \
+                      unauthenticated operator path"
+                .to_string(),
+        };
+    }
+
     // P1: attribute enforcement commands to the authenticated principal.
     // When no principal is available (open loopback / unauthenticated path),
     // fall back to the historical hard-coded actor so behaviour is unchanged

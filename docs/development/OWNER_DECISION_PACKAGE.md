@@ -12,6 +12,21 @@ and a recommendation. Each one can be answered in a single line.
 
 ---
 
+## Decisions 1–3 — TAKEN
+
+The owner authorised the recommended course ("proceed in verbose mode, go
+ahead"). The three decisions below were therefore executed as recommended:
+
+| | Decision | Outcome |
+|---|---|---|
+| 1 | P0 — the unauthenticated-by-default local control plane | **B** — a verified principal/session is now required for mutating requests; the read and telemetry paths stay open. Implemented as `ipc.require_auth_for_mutations` and `dashboard.require_auth_for_config`, both defaulting to `true`, with explicit escape hatches. |
+| 2 | P0 — the parked pairwise-HMAC branch | **C** — deferred. The branch stays parked and unpublished until F-02/F-03 define the semantics it must interoperate with. |
+| 3 | P2 — the three tracked `.bak`/`.orig` files | **A** — deleted, after confirming their content is preserved in git history. |
+
+The rest of this document is the record of what those decisions were and why.
+
+---
+
 ## Decision 1 (P0) — the IPC control plane is unauthenticated by default
 
 **The roadmap does not cover this.** The controlling roadmap

@@ -59,6 +59,15 @@ Use the baseline values only when they are appropriate for your workload. Detect
 | `connection_idle_timeout_ms` | `30000` | 30000 |
 | `auth_keys` | `[]` | `[]` |
 | `require_auth` | `false` | `false` |
+| `require_auth_for_mutations` | `true` | `true` |
+
+`require_auth_for_mutations` refuses a state-mutating request (`block_ip`,
+`block_cidr`, `unblock_ip`, `unblock_cidr`, `flush`) that carries no verified
+principal. It is only reachable when `auth_keys` is empty — with keys
+configured, every frame carries a principal and the role table applies. Set it
+to `false` to restore the unauthenticated operator path on a host where that is
+an accepted risk; it cannot widen the exposure past loopback, because a
+non-loopback bind still requires `auth_keys`.
 
 For a non-loopback IPC bind, configuration validation requires authentication and also requires `behind_tls_proxy = true`.
 
@@ -70,6 +79,7 @@ For a non-loopback IPC bind, configuration validation requires authentication an
 | `http_addr` | `127.0.0.1:9999` | `127.0.0.1:9999` |
 | `block_log_size` | `1000` | `1000` |
 | `admin_password_hash` | unset | unset |
+| `require_auth_for_config` | `true` | `true` |
 | `session_ttl_secs` | `28800` | `28800` |
 | `max_login_attempts` | `50` | `50` |
 | `max_password_length` | `1024` | `1024` |

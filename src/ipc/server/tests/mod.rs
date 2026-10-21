@@ -238,3 +238,61 @@ fn parse_ipc_keys_fails_closed_on_bad_entries() {
     cfg.ipc.auth_keys = vec!["k1:0123456789abcdef0123456789abcdef".into()];
     assert!(parse_ipc_keys(&cfg).is_ok());
 }
+
+/// P0: the protocol's mutating classification and the IPC's role table must
+/// agree.
+///
+/// `Request::is_mutation()` drives the unauthenticated-path gate: a request
+/// that mutates enforcement state is refused when it carries no verified
+/// principal. `authorize` is the role table applied when a principal IS
+/// present. If the two ever disagree — a new variant added to one and
+/// forgotten in the other — a request could be classified as read-only and
+/// still change enforcement state, which is exactly the hole this change
+/// closes.
+///
+/// A request is a mutation exactly when a ReadOnly principal is denied it
+/// but an Admin is allowed it. Every request variant is covered, so adding a
+/// variant to the enum without classifying it fails here.
+#[test]
+fn mutating_classification_agrees_with_the_role_table() {
+    let cases = [
+        ("check_ip", r#"{"type":"check_ip","ip":"10.0.0.1"}"#),
+        (
+            "block_ip",
+            r#"{"type":"block_ip","ip":"10.0.0.1","reason":"t","ttl_secs":60}"#,
+        ),
+        (
+            "block_cidr",
+            r#"{"type":"block_cidr","cidr":"10.0.0.0/24","reason":"t","ttl_secs":60}"#,
+        ),
+        ("unblock_ip", r#"{"type":"unblock_ip","ip":"10.0.0.1"}"#),
+        (
+            "unblock_cidr",
+            r#"{"type":"unblock_cidr","cidr":"10.0.0.0/24"}"#,
+        ),
+        ("get_ip_stats", r#"{"type":"get_ip_stats","ip":"10.0.0.1"}"#),
+        ("get_stats", r#"{"type":"get_stats"}"#),
+        ("get_status", r#"{"type":"get_status"}"#),
+        (
+            "report_connection",
+            r#"{"type":"report_connection","ip":"10.0.0.1","bytes":1,"status_code":200,"proto_fp":0}"#,
+        ),
+        (
+            "report_connections",
+            r#"{"type":"report_connections","events":[]}"#,
+        ),
+        ("flush", r#"{"type":"flush"}"#),
+    ];
+    for (name, json) in cases {
+        let req: Request = serde_json::from_str(json)
+            .unwrap_or_else(|e| panic!("{name} did not parse as a Request: {e}"));
+        let read_only_ok = authorize(&p(KeyRole::ReadOnly), &req).is_ok();
+        let admin_ok = authorize(&p(KeyRole::Admin), &req).is_ok();
+        assert!(admin_ok, "{name}: an Admin must be allowed to do anything");
+        assert_eq!(
+            req.is_mutation(),
+            !read_only_ok && admin_ok,
+            "{name}: is_mutation() disagrees with the role table"
+        );
+    }
+}

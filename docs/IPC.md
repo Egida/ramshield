@@ -8,22 +8,49 @@ Transport: TCP, address from `ipc.tcp_addr`, max concurrent connections from `ip
 
 ### Default posture
 
-**The out-of-the-box IPC is unauthenticated.** `ipc.auth_keys` defaults to
-empty and `ipc.require_auth` defaults to `false`
+**The out-of-the-box IPC does not authenticate reads, and does not allow
+unauthenticated writes.** `ipc.auth_keys` defaults to empty and
+`ipc.require_auth` defaults to `false`
 (`crates/ramshield-config/src/sections/ipc.rs`), so with the default
-configuration the server accepts frames that carry no `auth` envelope at all:
+configuration the server accepts frames that carry no `auth` envelope at all.
+What happens then depends on the request:
 
-- there is no principal, so the "Min role" column in the request table below
-  is **not** applied — role authorization only runs when a principal is
-  present (`src/ipc/server/handlers.rs`, `process_request`);
-- there is no verified key, so the enforcement command's `actor` falls back
-  to the historical hard-coded `"admin"`.
+- a **state-mutating** request — `block_ip`, `block_cidr`, `unblock_ip`,
+  `unblock_cidr`, `flush` — is **refused with 401**. With no principal there
+  is no role to check, so the request is refused rather than allowed
+  (`src/ipc/server/handlers.rs`, `process_request`;
+  `ipc.require_auth_for_mutations`, default `true`). This is what stops any
+  local process from removing an active mitigation on a customer under
+  attack.
+- a **read or telemetry** request is accepted: `check_ip`, `get_ip_stats`,
+  `get_stats`, `get_status`, `report_connection`, `report_connections`. The
+  telemetry ingest is the hot path from the proxy and carries hostile inbound
+  data, so authenticating it buys nothing. The "Min role" column in the
+  request table below is **not** applied when there is no principal, and the
+  enforcement command's `actor` falls back to the historical hard-coded
+  `"admin"` — which is why a *read* is harmless but a *write* is not.
+
+**The telemetry path stays open, and it feeds detection.** A `Telemetry` key
+may always submit `report_connection`/`report_connections`, so an
+unauthenticated local process can still inject observations into the detection
+pipeline, and detection can react to them. This change closes the *removal* of
+a mitigation, not the *influence* over it — that path is the proxy's own hot
+path, and it is left open deliberately.
+
+**The operational consequence:** with no `ipc.auth_keys` configured there is
+no way to authenticate, so the mutating requests cannot succeed at all. An
+operator that needs them must configure `ipc.auth_keys`. Set
+`ipc.require_auth_for_mutations = false` to restore the unauthenticated
+operator path on a host where that is an accepted risk.
 
 The bind defaults to `127.0.0.1:7890`, so this is a **loopback-only** surface:
-any local process on the host can drive it. Widening the exposure is
+any local process on the host can reach it. Widening the exposure is
 prevented at startup — a non-loopback `ipc.tcp_addr` fails `validate()` unless
 `ipc.auth_keys` is non-empty *and* `ipc.behind_tls_proxy = true` is asserted
-(`crates/ramshield-config/src/validate.rs`).
+(`crates/ramshield-config/src/validate.rs`). The
+`require_auth_for_mutations` escape hatch therefore cannot widen the exposure
+past loopback: a public bind still requires HMAC keys, and with keys present
+every frame carries a principal and the role table applies.
 
 Everything below this paragraph describes the **authenticated** mode, which is
 what you get once `ipc.auth_keys` is configured.

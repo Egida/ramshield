@@ -19,6 +19,15 @@ use net::is_public_bind;
 
 pub type ConfigHandle = Arc<ArcSwap<Config>>;
 
+/// Serde default for a boolean flag that must default to `true`.
+///
+/// `#[serde(default)]` on a `bool` yields `false`. The flags that use this
+/// helper opt IN to a restriction, so `false` would be the insecure default
+/// and the spelling has to be explicit.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]

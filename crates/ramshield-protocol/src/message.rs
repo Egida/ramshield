@@ -85,6 +85,29 @@ pub enum Request {
     Flush,
 }
 
+impl Request {
+    /// Does this request mutate enforcement state?
+    ///
+    /// This is the single source of truth for the mutating set. The IPC
+    /// authorization table (`src/ipc/server/auth.rs`) requires at least
+    /// `Operator` for exactly these variants, and the unauthenticated-path
+    /// gate refuses them outright. Keeping the classification here — in the
+    /// protocol crate, next to the enum — means the wire contract and the
+    /// policy cannot drift apart. The dependency runs one way: the role
+    /// table in `src/ipc/server/auth.rs` is derived from this list, not the
+    /// other way round.
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            Request::BlockIp { .. }
+                | Request::BlockCidr { .. }
+                | Request::UnblockIp { .. }
+                | Request::UnblockCidr { .. }
+                | Request::Flush
+        )
+    }
+}
+
 /// Server-to-client responses.
 /// Wire format: internally-tagged JSON, same convention as Request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

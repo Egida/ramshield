@@ -17,6 +17,19 @@ pub struct DashboardConfig {
     /// Generate: `echo -n 'pw' | argon2 "$(head -c16 /dev/urandom | xxd -p)" -id -e`
     #[serde(default)]
     pub admin_password_hash: Option<String>,
+    /// Require a valid session for `POST /api/config` even when
+    /// `admin_password_hash` is unset.
+    ///
+    /// With a password hash configured, every `/api/*` route already requires
+    /// a session, so this setting is not reachable. It matters only in the
+    /// no-credentials configuration, where the config patch would otherwise
+    /// be open to any local process — and the patch can change the daemon's
+    /// behaviour for the lifetime of the process.
+    ///
+    /// The dashboard has no unblock route, so this is not the severity of the
+    /// IPC's equivalent; it is the same class of control, decided together.
+    #[serde(default = "default_true")]
+    pub require_auth_for_config: bool,
     /// Session lifetime in seconds (default 8h).
     #[serde(default = "default_session_ttl_secs")]
     pub session_ttl_secs: u64,
@@ -86,6 +99,7 @@ impl Default for DashboardConfig {
             http_addr: "127.0.0.1:9999".into(),
             block_log_size: default_block_log_size(),
             admin_password_hash: None,
+            require_auth_for_config: true,
             session_ttl_secs: default_session_ttl_secs(),
             max_login_attempts: default_max_login_attempts(),
             max_password_length: default_max_password_length(),

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::metrics::{BlockRecord, DashboardSnapshot, ModuleStats, SubnetRow};
 
@@ -347,7 +347,44 @@ async fn api_set_config(
             }),
         );
     }
+    // The CSRF counter records the outcome of the CSRF check alone. It is
+    // incremented before the session gate below, so a request that passed
+    // CSRF and was then refused for a missing session counts as "CSRF
+    // allowed" — which is exactly what it was. The session refusal is
+    // counted separately.
     state.auth.metrics.inc_csrf_allowed();
+
+    // P0: the config patch mutates the running daemon's configuration, so it
+    // requires a valid session even when the dashboard has no password
+    // configured.
+    //
+    // With `dashboard.admin_password_hash` set, the `require_auth` middleware
+    // already gates every `/api/*` route, so this branch is reachable only
+    // in the no-credentials configuration — where the patch would otherwise
+    // be open to any local process, and the CSRF check (which fails open for
+    // a request carrying neither `Origin` nor `Referer`) was the only thing
+    // in the way.
+    //
+    // The CSRF check runs first, so a cross-origin request is still reported
+    // as 403 rather than 401: the origin is the more specific fact, and the
+    // status must not depend on whether the caller happens to hold a session.
+    //
+    // The patch is still validated below, so it cannot widen an exposure; it
+    // can only change non-security configuration for the lifetime of the
+    // process. The dashboard has no unblock route, so this is not the
+    // severity of the IPC's equivalent — it is the same class of control,
+    // decided together.
+    if state.engine.config.load().dashboard.require_auth_for_config
+        && !auth::session_valid(&state.auth, &headers)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ConfigResponse {
+                ok: false,
+                config: ConfigView::from_config(&state.engine.config.load()),
+            }),
+        );
+    }
     // P2 fix: GET /api/config returns auth_keys as "id:<redacted>" and
     // admin_password_hash as "<redacted>". An operator (or UI) POSTing the
     // viewed config back used to PASS validate() — the placeholder strings
@@ -373,6 +410,18 @@ async fn api_set_config(
         cfg.detection = v;
     }
     if let Some(v) = patch.ipc {
+        // A session-gated admin can relax the IPC mutation gate. That is
+        // within an admin's authority, but it must not be silent: the
+        // unauthenticated local mutator surface reopens for the lifetime of
+        // the process.
+        if v.require_auth_for_mutations
+            && !state.engine.config.load().ipc.require_auth_for_mutations
+        {
+            warn!(
+                "config patch disables ipc.require_auth_for_mutations — the unauthenticated \
+                 local mutator surface is reopened for the lifetime of the process"
+            );
+        }
         cfg.ipc = v;
     }
     if let Some(v) = patch.forecasting {
@@ -384,6 +433,14 @@ async fn api_set_config(
         .as_ref()
         .and_then(|d| d.admin_password_hash.clone());
     if let Some(v) = patch.dashboard {
+        if v.require_auth_for_config
+            && !state.engine.config.load().dashboard.require_auth_for_config
+        {
+            warn!(
+                "config patch disables dashboard.require_auth_for_config — the unauthenticated \
+                 local config patch is reopened for the lifetime of the process"
+            );
+        }
         cfg.dashboard = v;
     }
     let invalid = cfg.validate().is_err() || contains_placeholder(&cfg);
@@ -784,9 +841,15 @@ mod tests {
 
     /// F1 regression: same-origin POST (Origin matches Host) is allowed —
     /// the guard must not break legitimate dashboard use.
+    ///
+    /// A legitimate caller holds a session: the config patch requires one
+    /// even when the dashboard has no password configured, so that a config
+    /// patch is not open to any local process.
     #[tokio::test]
     async fn post_config_same_origin_allowed() {
         let state = test_app_state();
+        let token = "b".repeat(64);
+        state.auth.register_session(&token);
         let app = Router::new()
             .route("/api/config", post(api_set_config))
             .with_state(state.clone());
@@ -797,6 +860,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("host", "127.0.0.1:9999")
                     .header("origin", "http://127.0.0.1:9999")
+                    .header("cookie", format!("{}={}", auth::COOKIE_NAME, token))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
             )
@@ -954,6 +1018,156 @@ mod tests {
             ct,
             Some("text/event-stream"),
             "SSE endpoint must set content-type text/event-stream"
+        );
+    }
+
+    /// P0: `POST /api/config` must require a valid session even when the
+    /// dashboard has no password configured.
+    ///
+    /// With `dashboard.admin_password_hash` unset the dashboard has no
+    /// authentication at all, so the CSRF check (which fails open for a
+    /// request carrying neither `Origin` nor `Referer`) was the only thing
+    /// between any local process and a full configuration patch. The patch is
+    /// validated, so it cannot widen an exposure — but it can change the
+    /// daemon's behaviour for the lifetime of the process.
+    ///
+    /// With a password hash configured, the `require_auth` middleware already
+    /// gates every `/api/*` route, so this branch is reachable only in the
+    /// no-credentials configuration.
+    #[tokio::test]
+    async fn config_patch_requires_a_session_without_a_configured_password() {
+        let state = test_app_state();
+        let app = Router::new()
+            .route("/api/config", post(api_set_config))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the config patch must not be open to any local process"
+        );
+    }
+
+    /// The operator escape hatch: `dashboard.require_auth_for_config = false`
+    /// restores the unauthenticated config patch.
+    #[tokio::test]
+    async fn config_patch_is_allowed_when_the_gate_is_disabled() {
+        use crate::metrics::Metrics;
+        use crate::storage::Store;
+        let mut cfg = Config::default();
+        cfg.dashboard.require_auth_for_config = false;
+        let engine = Arc::new(Engine::new(
+            cfg,
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        ));
+        engine.mark_pipeline_ready_for_test();
+        let auth = Arc::new(auth::AuthState::new(
+            None,
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(Metrics::new()),
+            4,
+        ));
+        let state = AppState { engine, auth };
+        let app = Router::new()
+            .route("/api/config", post(api_set_config))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the escape hatch must let the patch past the gate"
+        );
+    }
+
+    /// The route-authorization matrix, **authenticated mode**: with an admin
+    /// password hash configured, the auth middleware refuses an
+    /// unauthenticated `POST /api/config` before the handler runs.
+    ///
+    /// The hash value is never verified here — the middleware only checks
+    /// that a session cookie is present and valid — so a placeholder is
+    /// enough to make the middleware active.
+    #[tokio::test]
+    async fn config_patch_is_refused_without_a_session_when_auth_is_enabled() {
+        use crate::metrics::Metrics;
+        use crate::storage::Store;
+        let engine = Arc::new(Engine::new(
+            Config::default(),
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        ));
+        engine.mark_pipeline_ready_for_test();
+        let auth = Arc::new(auth::AuthState::new(
+            Some("not-a-real-phc-string".to_string()),
+            3600,
+            50,
+            1024,
+            vec![],
+            true,
+            Arc::new(Metrics::new()),
+            4,
+        ));
+        assert!(auth.enabled(), "the auth middleware must be active");
+        let state = AppState { engine, auth };
+        let app = Router::new()
+            .route("/api/config", post(api_set_config))
+            .layer(axum_mw::from_fn_with_state(
+                state.clone(),
+                auth::require_auth,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "an unauthenticated config patch must be refused in authenticated mode"
+        );
+
+        // Distinguish the middleware's refusal from the handler's own gate:
+        // the middleware answers `{"error":"unauthorized"}`, the handler
+        // answers a `ConfigResponse`. Both are 401, so the status alone
+        // would not prove which one refused the request.
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains(r#""error":"unauthorized""#),
+            "the auth middleware must be the one that refused, not the route gate; body: {body}"
         );
     }
 }

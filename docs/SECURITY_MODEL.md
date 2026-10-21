@@ -12,7 +12,8 @@ external traffic
 proxy / telemetry producer        untrusted input
    ↓
 IPC protocol                      authenticated boundary WHEN ipc.auth_keys is set;
-                                  loopback-only and UNAUTHENTICATED by default
+                                  loopback-only by default, and an
+                                  unauthenticated frame may READ but not WRITE
    ↓
 detection                        bounded state
    ↓
@@ -24,12 +25,19 @@ XDP / SHM                         kernel/local projections
 The telemetry path must be treated as hostile data. IPC framing, authentication, replay protection, timeouts and size bounds are part of the boundary.
 
 The IPC boundary is **authenticated only when `ipc.auth_keys` is configured**.
-Out of the box the IPC binds `127.0.0.1:7890`, requires no authentication, and
-applies no role check, so the boundary is a loopback boundary rather than an
-authenticated one. A non-loopback bind fails `validate()` unless HMAC keys are
-set and a TLS-terminating proxy is asserted, so the unauthenticated mode cannot
-be widened past loopback by configuration alone. See `docs/IPC.md` →
-*Default posture* for the details.
+Out of the box the IPC binds `127.0.0.1:7890` and requires no authentication,
+so the boundary is a loopback boundary rather than an authenticated one. A
+non-loopback bind fails `validate()` unless HMAC keys are set and a
+TLS-terminating proxy is asserted, so the unauthenticated mode cannot be
+widened past loopback by configuration alone.
+
+An unauthenticated frame may **read** but not **write**: a state-mutating
+request (`block_ip`, `block_cidr`, `unblock_ip`, `unblock_cidr`, `flush`)
+without a verified principal is refused with 401, because there is no role to
+check and an unauthenticated `unblock_ip` would remove an active mitigation.
+The telemetry ingest stays open — it is the hot path from the proxy and
+carries hostile inbound data, so authenticating it buys nothing. See
+`docs/IPC.md` → *Default posture* for the details.
 
 ## Failure policy
 

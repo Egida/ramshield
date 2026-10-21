@@ -87,14 +87,31 @@ Two properties of that route are worth knowing before exposing it:
   carrying **neither** header is accepted, on the grounds that only a browser
   can smuggle cookies into a cross-site request. That is a browser-shaped
   defence, not an authentication one.
-- **Authentication.** With `dashboard.admin_password_hash` unset, the
-  dashboard has no authentication at all (`auth.enabled()` is
-  `password_hash.is_some()`), so any local process can post a patch. The
-  patch is still validated, and a patch that would widen an exposure — for
-  example a public bind without credentials — is rejected by
+- **Authentication.** `POST /api/config` requires a **valid session**, even
+  when `dashboard.admin_password_hash` is unset
+  (`dashboard.require_auth_for_config`, default `true`). With no password
+  configured there are no sessions, so the patch cannot be applied at all
+  until an operator sets a password hash and logs in. With a hash
+  configured, the `require_auth` middleware already gates every `/api/*`
+  route. The patch is additionally validated, and a patch that would widen an
+  exposure — for example a public bind without credentials — is rejected by
   `Config::validate()`. The dashboard has no unblock route, so this cannot
   remove an active mitigation; it can change other daemon configuration for
-  the lifetime of the process.
+  the lifetime of the process. Set `dashboard.require_auth_for_config = false`
+  to restore the unauthenticated patch on a host where that is an accepted
+  risk.
+
+  **How to get the config patch working again.** With no
+  `admin_password_hash` there are no sessions, so `POST /api/config` is
+  always 401. To restore it, either
+
+  - set `dashboard.admin_password_hash` to a valid PHC string and restart,
+    then log in at `/login` and use the session cookie; or
+  - set `dashboard.require_auth_for_config = false` in `config.toml` and
+    restart, which reopens the unauthenticated patch for that host.
+
+  Both are config-file changes and take effect at startup; there is no
+  in-process way to mint a session without a password.
 
 ## Logs
 

@@ -36,6 +36,22 @@ pub struct IpcConfig {
     /// without this flag fails `validate()`. Loopback never needs it.
     #[serde(default)]
     pub behind_tls_proxy: bool,
+    /// Require a verified principal for state-mutating requests
+    /// (block/unblock/flush) even when `auth_keys` is empty.
+    ///
+    /// With `auth_keys` configured, every frame must carry a valid HMAC
+    /// envelope and therefore carries a principal, so this setting is not
+    /// reachable. It matters only in the no-credentials configuration, where
+    /// the role table is skipped entirely and the actor falls back to a
+    /// hard-coded `"admin"` — so any local process could `unblock_ip` and
+    /// remove an active mitigation.
+    ///
+    /// Set this to false only to restore the unauthenticated operator path on
+    /// a host where that is an accepted risk. A non-loopback bind still
+    /// requires `auth_keys` and `behind_tls_proxy`, so this flag can never
+    /// widen the exposure past loopback.
+    #[serde(default = "default_true")]
+    pub require_auth_for_mutations: bool,
 }
 
 /// IPC key roles (P2 authorization).
@@ -85,6 +101,7 @@ impl Default for IpcConfig {
             key_roles: Vec::new(),
             require_auth: false,
             behind_tls_proxy: false,
+            require_auth_for_mutations: true,
         }
     }
 }

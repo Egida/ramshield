@@ -4,7 +4,7 @@
 use axum::{
     Form, Router,
     extract::{ConnectInfo, Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Json, Response},
     routing::get,
@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-const COOKIE_NAME: &str = "rs_session";
+pub(crate) const COOKIE_NAME: &str = "rs_session";
 
 /// Build the Set-Cookie value for a session token. Pure so unit tests can
 /// assert HttpOnly / SameSite / Secure / Path / Max-Age without the full
@@ -266,7 +266,7 @@ impl AuthState {
     /// Record a verified token as an active session. Split out of the login
     /// flow so the async handler can verify on a blocking thread and register
     /// here.
-    fn register_session(&self, token: &str) {
+    pub(crate) fn register_session(&self, token: &str) {
         self.sessions.insert(token.to_string(), Instant::now());
     }
 
@@ -294,6 +294,29 @@ impl AuthState {
     }
 }
 
+/// Validate the session cookie on a request, independently of whether the
+/// dashboard has a password configured.
+///
+/// The `require_auth` middleware gates every route when authentication is
+/// enabled. This is the same check, exposed for a route that must require a
+/// session even in the no-credentials configuration — `POST /api/config`,
+/// which changes the running daemon's behaviour. One implementation, so the
+/// cookie parsing cannot drift between the middleware and the route gate.
+pub fn session_valid(auth: &AuthState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix(COOKIE_NAME)
+                    .and_then(|rest| rest.strip_prefix('='))
+            })
+        })
+        .map(|tok| auth.validate(tok))
+        .unwrap_or(false)
+}
+
 /// Middleware: gate every request unless auth disabled or path exempted.
 pub async fn require_auth(
     State(state): State<crate::dashboard::AppState>,
@@ -311,20 +334,7 @@ pub async fn require_auth(
     if path == "/healthz" || path == "/livez" || path == "/login" || path == "/metrics" {
         return next.run(req).await;
     }
-    let valid = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|c| {
-                let c = c.trim();
-                c.strip_prefix(COOKIE_NAME)
-                    .and_then(|rest| rest.strip_prefix('='))
-            })
-        })
-        .map(|tok| auth.validate(tok))
-        .unwrap_or(false);
-    if valid {
+    if session_valid(auth, req.headers()) {
         return next.run(req).await;
     }
     if path.starts_with("/api/") {
