@@ -405,6 +405,12 @@ fn every_sha_cited_in_a_ledger_names_a_commit() {
     // that was never made, is the same class of error as a wrong status: it
     // points the reader at something that does not exist.
     //
+    // So a ledger may only cite a SHA that a reader can find in the
+    // shipped tree. A SHA from an unpublished or unmerged branch is not
+    // one: a clone of this repository does not have that commit, so the
+    // citation points at nothing. Name the branch instead - a branch name
+    // is a handle that survives, a parked tip SHA does not.
+    //
     // A SHALLOW checkout cannot answer this: the objects for the older
     // commits are simply not there, and the cited SHAs reach 788 commits
     // back. So the check says what it could not verify and does not claim

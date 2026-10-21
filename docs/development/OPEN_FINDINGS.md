@@ -341,7 +341,7 @@ bound to a SHA with the note that it has never been satisfied on any
 single SHA.
 
 **One review claim was corrected before it was written down.** The review
-stated that the parked branch `feature/mesh-f01-hmac-edge-secrets` (tip `f75abb5`) "contains no
+stated that the parked branch `feature/mesh-f01-hmac-edge-secrets` (unpublished) "contains no
 `crates/ramshield-mesh` source change". That is wrong: the branch carries
 625 changed lines in `crates/ramshield-mesh/src/transport.rs` plus test
 changes. The conclusion the reviewer drew — that none of it is on master —
