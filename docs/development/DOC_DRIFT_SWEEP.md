@@ -1,8 +1,8 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 17 fixed, 45 open.** The
-open ones are spread over six crate READMEs: `ramshield-types` 13,
-`ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8,
+**Status:** OPEN, partially worked. **62 claims: 30 fixed, 32 open.** The
+open ones are spread over six crate READMEs: `ramshield-config` 1,
+`ramshield-storage` 8, `ramshield-metrics` 7, `ramshield-forecasting` 8,
 `ramshield-analytics` 6, `ramshield-xdp` 2. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
@@ -98,26 +98,36 @@ Method: `git show`/file reads on the audited tree, `grep -n`/`grep -rn` for call
 > "**Dependencies:** `uuid`."
 
 Code: `Cargo.toml:8-10` → `thiserror = "1"`, `serde = {…derive}`, `uuid = {…v4,serde}`. Two deps undocumented.
+**Status: FIXED.** The README now names `serde`, `thiserror` and `uuid`, the dev-dependency `serde_json`, and the `storage` feature that no dependent enables. `crates/ramshield-types/tests/readme_claims.rs` checks the list against `Cargo.toml`.
+
 
 **F2 (MEDIUM)** `crates/ramshield-types/README.md:172`
 > "**Read by:** every other crate in the workspace."
 
 Code: dependents of `ramshield-types` = analytics, protocol, storage, enforcement, config, forecasting, detection (+root). `cgnat`, `metrics`, `xdp`, `mesh`, `ramwal` do not depend on it.
+**Status: FIXED.** The README now names the eight crates that read it - seven plus the root package - and the five that do not. The test checks the list against the workspace manifests.
+
 
 **F3 (MEDIUM)** `crates/ramshield-types/README.md:170`
 > "this crate has no logic, only types."
 
 Code: `src/error.rs:36-71` reason string mapping, `src/ip_network.rs:39-72` CIDR normalization, `src/util.rs:20-25` eviction on push.
+**Status: FIXED.** The README now says the crate is not type-only: it owns the reason-string mapping, the CIDR normalisation and validation, and the ring buffer's eviction.
+
 
 **F4 (MEDIUM)** `crates/ramshield-types/README.md:120`
 > "Used for status code history, event ring buffers, and block logs."
 
 Code: repo-wide grep `BoundedVecDeque` → hits only `crates/ramshield-types/src/util.rs`. Zero users.
+**Status: FIXED.** The README now says the type has no user in the workspace, where the old README claimed three uses.
+
 
 **F5 (MEDIUM)** `crates/ramshield-types/README.md:162`
 > "IP networks can't be `DashMap` keys directly (no `Hash` impl for `IpAddr + prefix_len`)."
 
 Code: `src/ip_network.rs:8` — `#[derive(… Eq, Hash, Serialize)] pub struct IpNetwork`. Hash exists.
+**Status: FIXED.** The README now says `IpNetwork` derives `Hash` and can key a map directly, and that `pack()` is a separate `u128` form which is not on a production path.
+
 
 ---
 
@@ -464,6 +474,8 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 **F50 (MEDIUM)** Phantom-crate callers across READMEs: `crates/ramshield-config/README.md:232-238` (`ramshield-engine`, `ramshield-ipc`, `ramshield-wal`, `ramshield-dashboard`), `crates/ramshield-metrics/README.md:167,169` (`ramshield-engine`, `ramshield-dashboard`, `ramshield-ipc`), `crates/ramshield-storage/README.md:129` (`ramshield-dashboard`), `crates/ramshield-enforcement/README.md:139` (`ramshield-dashboard`, `ramshield-metrics`). Code: workspace members `Cargo.toml:2-16` = root + config, detection, enforcement, forecasting, metrics, protocol, storage, types, xdp, cgnat, analytics, mesh, ramwal — **no** engine/ipc/wal/dashboard crates exist.
 
 **F51 (LOW)** `crates/ramshield-types/README.md:24` — "Nine workspace crates need to share" → 7 crates actually depend on `ramshield-types` (F2 grep).
+**Status: FIXED.** The README now says eight crates - seven plus the root package - and names them.
+
 
 **F52 (LOW)** `crates/ramshield-forecasting/README.md:50` + `:98` + `src/lib.rs:69` — "O(1) memory (3 floats)", "not part of the public API", "3 floats = 24 bytes". Code: `src/lib.rs:71-76` `EwmAVar { ewma: f64, var_ewma: f64, count: u64, alpha: f64 }` = 32 B; `pub struct` → public type.
 
@@ -510,30 +522,44 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 Code: `crates/ramshield-types/src/error.rs:73-80` — the enum is `None | Flush | Fsync | GroupCommit`, with `GroupCommit` the `#[default]`. `NoSync` and `Fdatasync` are not variants, so an operator who copies them into `wal.durability` gets a config parse error - and the config crate's README, which was corrected, now names the real tokens, so the two READMEs contradict each other.
 
 Replacement: `pub enum Durability { None, Flush, Fsync, GroupCommit }` and "Controls how `Wal::append()` syncs to disk. `None` for benchmarking, `Flush` for production, `Fsync` where every block must survive power loss, `GroupCommit` (the default) for group-committed `fsync`."
+**Status: FIXED.** The README now shows the real enum and maps each variant to what it does. It also says the shipped configuration default is `Flush`, which the enum's `#[default]` is not.
+
 
 **F56 (P2)** `crates/ramshield-types/README.md:131-140` — the `RsError` variant list.
 
 Code: `crates/ramshield-types/src/error.rs` — the real variants are `NotFound(String)`, `CapacityExceeded { limit_mb }`, `Serde(String)`, `Io(std::io::Error)`, `CorruptWal { offset }` and `RecordTooLarge { size, max }`.
+**Status: FIXED.** The README now shows the real variants, and says that `RsError` is the storage crate's error type rather than the whole system's.
+
 
 **F57 (P2)** `crates/ramshield-types/README.md:49-60` — the `EnforceCommand` field list.
 
 Code: `crates/ramshield-types/src/command.rs:23-39` — the real fields are `decision_id: Uuid`, `policy_version: u64`, `source: String`, `actor: String`, `timestamp_utc: i64`, `ttl_seconds: u64`, `reason: String`, `ip: IpAddr`, `cidr: Option<IpNetwork>`, `action: EnforceAction`, `evidence_source: EvidenceSource`. There is no `id` and no `source_ip`/`source_port`, and `reason` is a `String`.
+**Status: FIXED.** The README now shows the real fields, says that `cidr` is the one `Option`, and says that `reason` is a wire string rather than a `BlockReason`.
+
 
 **F58 (P2)** `crates/ramshield-types/README.md:77-83` — the `EnforceResult` field list.
 
 Code: `crates/ramshield-types/src/command.rs:48-56` — the real fields are `decision_id: Uuid`, `committed: bool`, `applied: bool`, `wal_lsn: Option<u64>`, `xdp_applied: bool`, `error: Option<String>`.
+**Status: FIXED.** The README now shows the real fields, and says what `committed`, `applied` and `xdp_applied` each mean - they can disagree.
+
 
 **F59 (P2)** `crates/ramshield-types/README.md:30-36` — the `ConnectionEvent` field list.
 
 Code: `crates/ramshield-types/src/events.rs:65-75` — the real fields are `ip: IpAddr`, `timestamp_ns: u64`, `bytes: u64`, `status_code: u16`, `proto_fingerprint: u32`, `l7: Option<L7Metadata>`.
+**Status: FIXED.** The README now shows the real fields, and says that `l7` is optional so the legacy L3/L4 contract stays wire-compatible.
+
 
 **F60 (P2)** `crates/ramshield-types/README.md:142-149` — the `EnforcementError` variant list.
 
 Code: `crates/ramshield-types/src/command.rs:58-69` — the real variants are `Wal(String)`, `Storage(String)`, `Xdp(String)`, `Duplicate(Uuid)` and `InvalidCommand(String)`. There is no `AlreadyProcessed` and no `Deduplicated`.
+**Status: FIXED.** The README now shows the real variants, and says that a repeated decision id returns the original result rather than an error.
+
 
 **F61 (P3)** `crates/ramshield-types/README.md:121-124` — the `BoundedVecDeque` field list.
 
 Code: the real struct has a public `cap: usize` and a private `inner`.
+**Status: FIXED.** The README no longer shows a field list. It names the type's path, says that `cap` is a public field, and says that no crate in the workspace uses the type.
+
 
 **F62 (P2)** `crates/ramshield-xdp/README.md:7` — the claim that the BPF build degrades gracefully.
 
