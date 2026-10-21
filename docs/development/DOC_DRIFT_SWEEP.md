@@ -14,16 +14,21 @@ counts, not run results.
 fixed in the same pass that produced this file, because they are
 operator-facing and wrong in the direction that matters:
 
-- **F6** — `crates/ramshield-types/README.md` listed four `BlockReason`
+- **`crates/ramshield-types/README.md`** listed four `BlockReason`
   variants and two wire tokens (`rate_limit`, `pulse_wave`) that no code
   emits. The real enum has eight variants; the README now lists them and
-  their tokens.
-- **F1** — `crates/ramshield-forecasting/README.md` had the hypothesis
-  index map inverted: it said H1 was FlashCrowd and H3 Volumetric. The
-  code is the other way round, and it blocks on H1 (volumetric) and H2
-  (slow ramp) while deliberately NOT blocking on H3 (flash crowd). An
-  operator reading the README concluded the exact opposite of what the
-  daemon does.
+  their tokens. This is the report's **F6** in the body.
+- **`crates/ramshield-forecasting/README.md`** had the hypothesis index
+  map inverted: it said H1 was FlashCrowd and H3 Volumetric. The code is
+  the other way round, and it blocks on H1 (volumetric) and H2 (slow ramp)
+  while deliberately NOT blocking on H3 (flash crowd). An operator
+  reading the README concluded the exact opposite of what the daemon does.
+  This is the report's **"F1 (CRITICAL)"** in the *Worst three* list.
+
+**A warning about the report's own numbering.** The report reuses some
+`F` numbers for two different findings: `F1`, `F6` and `F28` each appear
+twice with different meanings (once in the body, once in the *Worst
+three* list). Cite the file and the claim, not the number.
 
 The rest are recorded below, unfixed. They are documentation defects, not
 code defects: no production behaviour depends on them, and the fixes are
