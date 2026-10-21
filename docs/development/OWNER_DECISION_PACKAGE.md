@@ -767,6 +767,74 @@ exist yet. The required test — a race between a detection `update_ip` and
 the block path, asserting the stat fields are not rolled back — must fail on
 the current code first.
 
+### The lint-no-unwrap filter counted braces inside string literals
+
+**Commit:** `705d098`, on branch `fix/i-013-synproxy-fixture-parity`. The
+branch would have failed the `lint-no-unwrap` workflow with **65
+violations**, every one of them a false positive.
+
+**Root cause.** `.github/scripts/ci_filter_testcode.py` finds the end of a
+`#[cfg(test)]` block by counting brace depth over the raw file text. A
+brace inside a string literal is not a block delimiter, and both directions
+of that mistake are wrong:
+
+- A `}` in a string ends the block early, so every test line after it is
+  reported as a production violation. The I-020 test contains
+  `load_blocks.find("\n  }")` (`src/dashboard/mod.rs:587`), so the block
+  ended there and the 65 lines after it were all flagged.
+- A `{` in a string extends the block past its end, so a **real**
+  production `.unwrap()` after the test module is hidden from the gate.
+  Reproduced on this tree before the fix: a test module containing
+  `let marker = "{";` classified a later production `.unwrap()` as test
+  code.
+
+**Fix.** The filter now blanks string literals, raw strings, char literals
+and comments before counting depth, preserving byte offsets and line
+numbers so everything still refers to the original file. A lifetime (`'a`)
+is not mistaken for a char literal.
+
+**Evidence.** The gate's own command reports **0** violations on this tree,
+down from 65. Four regression tests were added to
+`.github/scripts/filter_test/test_filter.py`; three of the four fail
+against the old filter and all four pass against the new one, and the four
+pre-existing filter tests still pass. A production `.unwrap()` is still
+reported.
+
+### The SYNPROXY fixture was only pinned on the ports
+
+**Commit:** `40f3d28`. The I-013 test rendered the ruleset from the **code
+default**, so only the ports were pinned. The daemon installs the ruleset
+the loaded config gives it, and the shipped config is
+`config.baseline.toml`, so any other knob drifting in the baseline — mss,
+wscale, a connection limit, a rate limit, `[xdp].interface` — left the
+fixture describing a ruleset the daemon never installs, undetected. The
+test now renders from the baseline; mutating baseline `mss 1460` → `1300`
+and `[xdp].interface` `eth0` → `ens5` makes it fail, where the old test
+passed. The baseline port list was also read with `as u16`, which
+truncates — a baseline port of 65558 compared equal to 22 and passed; it
+now uses `u16::try_from`.
+
+**Also in that commit:** the nft fixture was never syntax-checked in CI.
+No workflow installed nftables, so `nft -c -f tests/fixtures/synproxy.nft`
+ran only from two local scripts that no workflow calls. `ci.yml` now
+installs nftables and runs the check with `sudo` (`nft -c` needs the
+netlink cache, which needs CAP_NET_ADMIN). The Rust test is the stronger
+check for parity, but it checks no nft syntax at all.
+
+### An IPC test timed out under host load, not a code change
+
+**Commit:** `908a83c`. `ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset`
+failed with "read failed before any frame arrived". It asserts that a 413
+error frame is sent instead of a bare RST, so a timeout says nothing about
+that behaviour.
+
+**It was not caused by the change.** The same prebuilt binary, run five
+times on a host at load average 14, failed twice and passed three times.
+A copy of the test with the read timeout raised to 30s passed six times
+out of six under the same load, and with the timeout at 10s the file
+passed eight times out of eight. The read timeout is now 10s in both tests
+that wait for a frame; the behaviour under test is unchanged.
+
 ### Preserve state, verified after the last push
 
 | Item | State |
