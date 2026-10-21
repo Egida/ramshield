@@ -73,6 +73,29 @@ The dashboard currently exposes:
 
 Authenticated dashboard routes should be treated as administrative interfaces.
 
+`POST /api/config` applies a typed patch to the **running engine's** config
+handle (`state.engine.config.store(..)`, `src/dashboard/mod.rs:399`). It does
+**not** write the configuration file: nothing in the dashboard path touches
+disk, so a patched configuration is **reverted on restart** to whatever is on
+disk. A patch that fails `Config::validate()` is rejected with 400 and nothing
+is applied.
+
+Two properties of that route are worth knowing before exposing it:
+
+- **CSRF.** A request carrying an `Origin` or `Referer` header that does not
+  match the `Host` is rejected with 403 before the patch is parsed. A request
+  carrying **neither** header is accepted, on the grounds that only a browser
+  can smuggle cookies into a cross-site request. That is a browser-shaped
+  defence, not an authentication one.
+- **Authentication.** With `dashboard.admin_password_hash` unset, the
+  dashboard has no authentication at all (`auth.enabled()` is
+  `password_hash.is_some()`), so any local process can post a patch. The
+  patch is still validated, and a patch that would widen an exposure — for
+  example a public bind without credentials — is rejected by
+  `Config::validate()`. The dashboard has no unblock route, so this cannot
+  remove an active mitigation; it can change other daemon configuration for
+  the lifetime of the process.
+
 ## Logs
 
 Run the daemon with a normal info level:

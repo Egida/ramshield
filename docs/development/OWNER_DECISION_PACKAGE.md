@@ -52,6 +52,41 @@ item, and needs either a new item or an explicit decision here.
   per-request-type distinction between the hot path and the mutating path
   today; introducing one is a bounded change.
 
+### The same question, one level over: the dashboard's config patch
+
+The dashboard is the IPC's sibling, and the triage surfaced it while
+verifying the IPC path. It is **not** the same severity — the dashboard has
+no unblock route, so it cannot remove an active mitigation — but it is the
+same *kind* of surface, and it should be decided together with the IPC rather
+than separately:
+
+- `dashboard.enabled` defaults to **true** and `dashboard.admin_password_hash`
+  defaults to **None**
+  (`crates/ramshield-config/src/sections/dashboard.rs:88`), and
+  `auth.enabled()` is `password_hash.is_some()`
+  (`src/dashboard/auth.rs:160`), so with the default configuration the
+  dashboard has **no authentication**.
+- `POST /api/config` accepts a typed patch from **any local process**: the
+  CSRF check fails open when the request carries neither `Origin` nor
+  `Referer` (`src/dashboard/mod.rs:276` — a browser-shaped defence, not an
+  authentication one), and with no password hash there is no session to
+  check.
+- The patch is validated, and `Config::validate()` rejects a patch that would
+  widen an exposure (a public bind without credentials or without TLS), so
+  the practical ceiling is "change non-security daemon configuration for the
+  lifetime of the process".
+- The bind defaults to `127.0.0.1:9999`, and a public bind without a
+  password hash fails `validate()` at boot — the same containment as the IPC.
+
+**Recommendation: decide it with the IPC, in the same decision.** If option B
+is taken for the IPC, the dashboard's natural counterpart is "require a
+session for the mutating route (`POST /api/config`) while leaving the
+read-only routes open", which keeps the HUD usable locally and stops a local
+process from reconfiguring the daemon. The startup-warning variant is not
+available here either: `default_config_validates` asserts that the default
+config produces no exposure warnings, so adding one would mean changing that
+test, and the decision it encodes is deliberate.
+
 ### Options
 
 | | Option | Closes the P0 | Cost |

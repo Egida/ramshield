@@ -268,6 +268,55 @@ would have required changing the existing `default_config_validates`
 assertion, and that test encodes the decision. The existing test was left
 untouched.
 
+### 7e. The triage's "recommended next fixes" — two accepted, three rejected
+
+The triage ended with six recommendations. Checked against the source:
+
+- **L2 — REJECTED, and applying it would introduce a bug.** The suggestion
+  was to bound the native copy by `min(tp_snaplen, tp_len)` and to add
+  `tp_len <= frame_size`. `tp_len` is the **original** packet length, before
+  capture truncation, so it can legitimately exceed the snaplen and exceed
+  `frame_size`; rejecting on `tp_len > frame_size` would reject valid
+  frames. And `tp_len` is never read at all — the packet slice is sized by
+  `tp_snaplen`, the captured length, which is the correct value to copy.
+  `src/engine/native.rs` never references `tp_len` outside the header struct
+  definition. No change.
+- **L6 — REJECTED, on a premise that was stale.** The suggestion was to
+  increment `blocks_total` only when the XDP apply succeeded. The metric's
+  exported `HELP` text is *"Total blocks issued."* — which is exactly what it
+  counts — and the failures are exported separately as
+  `ramshield_xdp_apply_failures_total`; the count of blocks actually in
+  effect is `snapshot.blocks_applied`, which the dashboard already serves. The
+  three counters are coherent and each is named for what it measures. The
+  recommendation rests on the metrics README, which said *"Total block
+  decisions applied"* — that was a **stale README**, corrected in `079cbae`;
+  the code was never wrong. An earlier note of mine that the smoke script
+  would break under the change was also wrong:
+  `scripts/metrics_smoke.py:180` reads the SSE field
+  `detection.blocks_total`, which is `snapshot.blocks_applied`
+  (`src/dashboard/mod.rs:454`) — a different counter from the Prometheus
+  metric. No change.
+- **L4 — ACCEPTED as a documentation fix.** `POST /api/config` applies the
+  patch to the **running engine's** config handle
+  (`state.engine.config.store(..)`, `src/dashboard/mod.rs:399`) and nothing in
+  the dashboard path writes to disk, so **a patched configuration is reverted
+  on restart**. That is now stated in `docs/OPERATIONS.md`, together with the
+  CSRF behaviour (fails open when neither `Origin` nor `Referer` is present)
+  and the authentication consequence.
+- **L3 — NOT ACTIONED.** The dashboard's body-reading routes are already
+  bounded by axum's default extractor limit (2 MiB), and the dashboard binds
+  loopback by default. Tightening it to 64 KiB would be a default change that
+  could reject a legitimate large configuration patch, for a local-only
+  surface. Raised with the owner as part of Decision 1 rather than changed
+  unilaterally.
+- **L5 — NOT ACTIONED.** Argon2 is constant-time, the failure table is
+  bounded, the CPU is semaphore-bounded, and every error path fails closed. A
+  global (rather than per-IP) login-failure ceiling is a policy choice, not a
+  defect.
+- **L7 — POLICY, folded into Decision 1.** See the owner decision package.
+
+---
+
 ### 7c. L7 (documentation) — the docs were accurate; the security model was not
 
 `docs/CONFIGURATION.md:80` already said *"A non-loopback dashboard bind
