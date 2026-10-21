@@ -290,8 +290,15 @@ all four workflows, all green:
 | `b1a9e9e` † | — | — | — | — |
 | `79f4eac` | `39548303921` | `39548303936` | `39548303910` | `39548303966` |
 | `6efa8f9` | `39549061946` | `39549061814` | `39549061576` | `39549062048` |
+| `60ce0f1` | `39552618200` | `39552618088` | `39552618184` | `39552618107` |
+| `54ee1b7` † | — | — | — | — |
 
-† `b1a9e9e` and `79f4eac` were pushed in **one** push (`e5caac1..79f4eac`),
+† `b1a9e9e` and `79f4eac` were pushed in **one** push, and `54ee1b7` was
+pushed on its own — but like `b1a9e9e` it is covered by the four green runs
+on the branch head that contains it (`79f4eac` for `b1a9e9e`, `6efa8f9` for
+`54ee1b7`).
+
+`b1a9e9e` and `79f4eac` were pushed in **one** push (`e5caac1..79f4eac`),
 so GitHub Actions ran once, on the branch head `79f4eac`, which contains
 `b1a9e9e` as its parent. `b1a9e9e` therefore has no run of its own; the four
 green runs on `79f4eac` cover it.
@@ -311,6 +318,7 @@ SHM ABI) produced, per batch:
 | control-plane posture (Decision 1) | `posture_gates.log`, `final_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
 | owner decisions A and C | `dec_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
 | verification trail update | `trail_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
+| native ingest drop accounting (audit F3) | `native3_gates.log` | 14/14 | 1849 passed / 0 failed / 42 ignored |
 
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
