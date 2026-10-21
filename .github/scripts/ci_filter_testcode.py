@@ -16,12 +16,108 @@ import sys
 from collections import defaultdict
 
 
+def strip_literals(content: str) -> str:
+    """Blank out string and char literal contents, preserving every byte offset.
+
+    Brace depth must be counted over code, not over text. A `{` or `}` inside
+    a string literal is not a block delimiter: reading one as one ends a
+    cfg(test) block early (later test code is then reported as production
+    code) or extends it past its end (real production code is then hidden).
+    Both directions are wrong, so the literal contents are replaced with
+    spaces. Length and line breaks are preserved, so offsets and line numbers
+    still refer to the original file.
+    """
+    out = list(content)
+    i = 0
+    n = len(content)
+    while i < n:
+        ch = content[i]
+        if ch == "/" and i + 1 < n and content[i + 1] == "/":
+            # Line comment: ends at the newline.
+            j = content.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif ch == "/" and i + 1 < n and content[i + 1] == "*":
+            # Block comment: ends at the matching */.
+            j = content.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif ch == '"' or (
+            ch == "r"
+            and i + 1 < n
+            and (content[i + 1] == '"' or content[i + 1] == "#")
+        ):
+            # String literal. A raw string (r"..", r#".."#) has no escapes and
+            # ends at the closing quote followed by its hashes.
+            raw = ch == "r"
+            j = i + (1 if raw else 0)
+            hashes = 0
+            if raw:
+                while j < n and content[j] == "#":
+                    hashes += 1
+                    j += 1
+                if j >= n or content[j] != '"':
+                    # Not a raw string after all (e.g. an identifier).
+                    i += 1
+                    continue
+            j += 1
+            while j < n:
+                if not raw and content[j] == "\\":
+                    j += 2
+                    continue
+                if content[j] == '"':
+                    k = j + 1
+                    while k < n and content[k] == "#" and hashes > 0:
+                        k += 1
+                        hashes -= 1
+                    if hashes == 0:
+                        j = k
+                        break
+                j += 1
+            for k in range(i, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif ch == "'":
+            # Char literal ('a', '\n') or a lifetime ('a). A lifetime has no
+            # closing quote, so only blank a literal that closes.
+            j = i + 1
+            closed = False
+            if j < n and content[j] == "\\":
+                j += 2
+                while j < n and content[j] != "'":
+                    j += 1
+                closed = j < n
+            elif j + 1 < n and content[j + 1] == "'":
+                j += 2
+                closed = True
+            if closed:
+                for k in range(i, j):
+                    if out[k] != "\n":
+                        out[k] = " "
+                i = j
+            else:
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
 def find_test_lines(src_path: str) -> set[int]:
     """Return the set of line numbers inside cfg attributes containing test."""
     if not os.path.isfile(src_path):
         return set()
     with open(src_path) as f:
         content = f.read()
+
+    # Count braces over code only: a brace inside a string literal or a
+    # comment is not a block delimiter.
+    code = strip_literals(content)
 
     test_lines: set[int] = set()
     # Match both #[cfg(test)] and forms such as #[cfg(all(test, target_os = "linux"))].
@@ -31,16 +127,16 @@ def find_test_lines(src_path: str) -> set[int]:
     ]
 
     for pos in cfg_positions:
-        brace_start = content.find("{", pos)
+        brace_start = code.find("{", pos)
         if brace_start == -1:
             continue
         # #[cfg(test)] mod tests; / #[cfg(test)] use x; declare no block here.
-        semi = content.find(";", pos)
+        semi = code.find(";", pos)
         if semi != -1 and semi < brace_start:
             continue
         depth = 0
-        line_no = content[:brace_start].count("\n") + 1
-        for ch in content[brace_start:]:
+        line_no = code[:brace_start].count("\n") + 1
+        for ch in code[brace_start:]:
             if ch == "\n":
                 line_no += 1
             if ch == "{":

@@ -78,6 +78,104 @@ fn production() {
             missing = Path(temp) / "missing.rs"
             self.assertEqual(FILTER.find_test_lines(str(missing)), set())
 
+    def test_closing_brace_in_a_string_literal_does_not_end_the_test_block(self):
+        # A '}' inside a string is not a block delimiter. Reading it as one
+        # ends the cfg(test) block early, and every later test line is then
+        # reported as a production violation.
+        source = '''#[cfg(test)]
+mod tests {
+    fn t() {
+        let marker = "\\n  }";
+        marker.unwrap();
+    }
+    fn later() {
+        later_value.expect("later");
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        first = next(i for i, line in enumerate(lines, 1) if "marker.unwrap" in line)
+        later = next(i for i, line in enumerate(lines, 1) if "later_value.expect" in line)
+        self.assertIn(first, test_lines)
+        self.assertIn(later, test_lines)
+
+    def test_opening_brace_in_a_string_literal_does_not_hide_production_code(self):
+        # A '{' inside a string is not a block delimiter. Reading it as one
+        # extends the test block past its end, and a real production
+        # violation after the module is then hidden from the gate.
+        source = '''#[cfg(test)]
+mod tests {
+    fn t() {
+        let marker = "{";
+        marker.unwrap();
+    }
+}
+
+fn production() {
+    value.unwrap();
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
+        self.assertNotIn(production_line, test_lines)
+
+    def test_raw_string_and_comment_braces_are_ignored(self):
+        source = '''#[cfg(test)]
+mod tests {
+    fn t() {
+        let raw = r#"a " brace"#;
+        let hash = r#"}"#;
+        // a } in a line comment
+        /* a { in a block comment */
+        raw.unwrap();
+    }
+}
+
+fn production() {
+    value.unwrap();
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        test_line = next(i for i, line in enumerate(lines, 1) if "raw.unwrap" in line)
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
+        self.assertIn(test_line, test_lines)
+        self.assertNotIn(production_line, test_lines)
+
+    def test_char_literal_brace_does_not_shift_the_block(self):
+        source = """#[cfg(test)]
+mod tests {
+    fn t() {
+        let c = '}';
+        c.unwrap();
+    }
+}
+
+fn production() {
+    value.unwrap();
+}
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        test_line = next(i for i, line in enumerate(lines, 1) if "c.unwrap" in line)
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
+        self.assertIn(test_line, test_lines)
+        self.assertNotIn(production_line, test_lines)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
