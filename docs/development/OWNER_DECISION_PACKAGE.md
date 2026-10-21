@@ -273,7 +273,15 @@ gates green on each, all four GitHub workflows green on each.
 ### Verification evidence
 
 The authoritative, durable record is GitHub CI — every pushed SHA below ran
-all four workflows, all green:
+all four workflows, all green.
+
+**How to read this table.** A commit cannot contain the CI result of its own
+push, because the result does not exist until the commit is pushed. So each
+SHA's four run IDs are recorded by its *successor* commit. The consequence is
+that the newest SHA on `master` is always absent from this table by exactly
+one row: its runs are read from GitHub Actions directly
+(`gh run list --branch master`). Every SHA from `2868250` onward is recorded
+here, and none is missing except that trailing row.
 
 | SHA | CI | Review Pipeline | lint-no-unwrap | Subnet Stress Pin |
 |---|---|---|---|---|
@@ -291,6 +299,7 @@ all four workflows, all green:
 | `79f4eac` | `39548303921` | `39548303936` | `39548303910` | `39548303966` |
 | `6efa8f9` | `39549061946` | `39549061814` | `39549061576` | `39549062048` |
 | `60ce0f1` | `39552618200` | `39552618088` | `39552618184` | `39552618107` |
+| `26c3ab6` | `39554107784` | `39554107721` | `39554107885` | `39554107749` |
 | `54ee1b7` † | — | — | — | — |
 
 † `b1a9e9e` and `79f4eac` were pushed in **one** push, and `54ee1b7` was
