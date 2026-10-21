@@ -366,7 +366,7 @@ is how each row was attributed.
 | 27 | 10-21 09:12 | `queue_gates.log` | `d18535b` | 14/14 | 1852/0/42 | green |
 | 28 | 10-21 10:28 | `f1_push_gates.log` | `d1f4a81` | 14/14 | 1858/0/42 | green |
 | 29 | 10-21 11:35 | `bench_gates.log` | `5a8a32f` | 14/14 | 1858/0/42 | green |
-| 30 | 10-21 12:20 | `backlog_gates.log` | (this commit) | 14/14 | 1858/0/42 | green |
+| 30 | 10-21 12:20 | `backlog_gates.log` | `e6d01ab` | 14/14 | 1858/0/42 | green |
 
 ### F1 — CGNAT shared-memory lookup (closed)
 
@@ -470,6 +470,10 @@ the hard-coded systemd path, the tracked `fix.patch`, `hostNetwork`/
 `NET_ADMIN`, the absent `rs/STATUS.md`, the dashboard session gate and its
 default, the XDP reconcile regression test, and the Containerfile layer
 order. All confirmed as stated.
+
+**CI on the pushed SHA `e6d01ab`:** CI `39579193491` success, Review
+Pipeline `39579193457` success, lint-no-unwrap `39579193310` success,
+Subnet Stress Pin `39579193318` success.
 
 **One review claim was wrong and was corrected.** The review stated that
 the parked branch `f75abb5` "contains no `crates/ramshield-mesh` source
