@@ -693,6 +693,80 @@ fixture gate is also still manual-only — no workflow runs
 `nft -c -f tests/fixtures/synproxy.nft` and `nft` is not installed on the
 CI runner image — so the Rust test is what protects the fixture in CI.
 
+### I-024 — the protocol README documented a signing string the code never used
+
+**Commit:** `8727e05`, on branch `fix/i-013-synproxy-fixture-parity` (base
+`bd417cd`). Not pushed, not on master.
+
+`crates/ramshield-protocol/README.md` said `sign()` computes
+`HMAC-SHA256(key, "{ts_ms}:{payload}")` and quoted a 30-second skew
+window. The implementation signs `ts_ms` ++ `"."` ++ `key_id` ++ `payload`
+(`crates/ramshield-protocol/src/auth.rs:34-39`) and allows
+`MAX_CLOCK_SKEW_MS = 10_000` ms (`auth.rs:24`). Three errors: the
+separator, the missing `key_id`, and a skew figure three times the code's.
+The last one is not cosmetic — the IPC server derives the replay store's
+TTL from that constant (`src/ipc/server.rs:198-207`), so a reader who
+trusted the README would size the replay window wrong.
+
+The README was rewritten from the implementation, not from any proposed
+format: the real `sign`/`verify` signatures, the MAC input byte layout and
+why `key_id` is inside it, the fact that the payload is the compact
+serialization of the frame with the `auth` object removed
+(`src/ipc/server/auth.rs:114-117`), the real skew window, and the real
+replay semantics — the nonce is the verifier's own HMAC digest, not a
+client-supplied random value (`replay_store.rs:1-7`), saturation rejects
+rather than evicts, and the server runs a 65s TTL against the 10s skew.
+
+**Two tests keep it true, both seen red.** `golden_vector_pins_the_mac_input_layout`
+asserts an exact digest for a fixed key, key_id, timestamp and payload; the
+expected value was computed independently of the crate (HMAC-SHA256 over
+`ts_ms` ++ `"."` ++ `key_id` ++ `payload`), so the test pins the wire format
+instead of re-deriving it with the code under test. Mutating the separator
+in `sign` — a field the backlog row never named — fails it.
+`crates/ramshield-protocol/tests/readme_protocol.rs` reads the README and
+checks its stated facts against the code's own `MAX_CLOCK_SKEW_MS`;
+reverting the README to the old signing string fails it.
+
+**Gates on that exact SHA:** `cargo fmt --all -- --check` 0, `cargo clippy
+--workspace --all-targets --all-features -- -D warnings` 0, `cargo test
+--workspace --all-features` 0, `nft -c -f tests/fixtures/synproxy.nft` 0.
+No production behaviour changed — the only non-test change is the README.
+
+### F9 — enforcement's block path is a lost update against detection
+
+**Status:** OPEN (P1), recorded in `docs/development/OPEN_FINDINGS.md`. No
+code change was made for it.
+
+It was found while re-verifying backlog row I-011, and it is not what that
+row describes. I-011 asks whether cardinality-driven LRU eviction can erase
+an attacker's history; **there is no LRU eviction** —
+`crates/ramshield-storage/src/store/capacity.rs:23-51` evicts on TTL only,
+production inserts carry no TTL, and under RAM pressure the store refuses
+net-new keys rather than evicting live ones. The row's stated mechanism does
+not exist.
+
+The real defect is in the same area: the enforcement block path is a
+read-modify-write across two lock acquisitions
+(`crates/ramshield-enforcement/src/service/enforce.rs:244-283` does `get()`
+-> mutate -> `insert()`), `store.get()` returns `None` for an expired
+record (`crates/ramshield-storage/src/store/access.rs:4-10`) so the default
+`IpRecord` **erases the detection history**, and a concurrent detection
+flush in that window has its `cusum_s`/`sample_count`/pulse counters
+**rolled back** by the stale `insert()`. This is the mirror image of the P0
+fixed in `write.rs:156-173`: that fix made `update_ip` mutate in place so it
+cannot clobber `block_state`; the same window still lets enforcement clobber
+the stat fields. If a block lands concurrently with a flush, the
+attacker's accumulated evidence is rewound and
+`CUSUM_WARMUP_SAMPLES = 6` may never be reached, so the attack is never
+detected.
+
+It is recorded rather than patched in the same pass as the I-013/I-020/I-024
+closures: the fix touches the block write path and its XDP projection
+ordering, and it needs a block-only single-shard-lock mutator that does not
+exist yet. The required test — a race between a detection `update_ip` and
+the block path, asserting the stat fields are not rolled back — must fail on
+the current code first.
+
 ### Preserve state, verified after the last push
 
 | Item | State |

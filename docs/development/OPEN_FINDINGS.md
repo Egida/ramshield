@@ -4,12 +4,14 @@ The durable task list for the issues that still need implementation. Every
 entry states the current status, the required fix, and the closure criterion,
 so a later pass can pick it up without re-deriving the intent.
 
-**Two numbering namespaces.** The **roadmap's** `F-01..F-08`
+**Three numbering namespaces.** The **roadmap's** `F-01..F-08`
 (`/home/m/Downloads/ramshield-remediation-roadmap-v1.2.md`) and the **21
 October audit's** `F1..F8`
 (`/home/m/Downloads/ramshield_master_audit_2026-10-21.md`) are different
 lists and must not be confused. This file tracks the **audit's** numbering.
 The roadmap's own `F-02` and `F-03` remain parked and unauthorised.
+**F9** is neither: it was found later, in this repository, while re-verifying
+backlog row I-011, and is tracked here only so it is not lost.
 
 Each audit finding was independently verified against the source in
 `docs/development/MASTER_AUDIT_2026_10_21_REVIEW.md`. The audit itself was
@@ -30,6 +32,7 @@ are the ones used here.
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 | rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
+| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — found while re-verifying I-011; no code change yet | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 
 ---
@@ -327,6 +330,72 @@ benchmark supports it on the actual implementation and target machine.
 **Not started:** the audit's claim that PR `#34` is a draft describing 50 MB
 as a target was **UNVERIFIED** by the review (a remote-only artifact). The
 reviewer did not contradict it but did not confirm it.
+
+---
+
+## F9 — Enforcement's block path is a lost update against detection
+
+**Status:** OPEN (P1) — found while re-verifying backlog row I-011, and
+**not** what that row describes. No code change has been made.
+
+**Where it came from.** Backlog row I-011 asks whether "cardinality-driven
+LRU eviction" can erase an attacker's CUSUM/pulse-wave history. Its premise
+is wrong: there is no LRU eviction. `crates/ramshield-storage/src/store/capacity.rs:23-51`
+evicts only on TTL expiry, production inserts carry no TTL
+(`crates/ramshield-storage/src/lib.rs:91-99`), and under RAM pressure the
+store **refuses net-new keys** rather than evicting live ones
+(`crates/ramshield-storage/src/store/write.rs:103-152`). The row's stated
+mechanism does not exist in the code.
+
+**The real defect, in the same area.** The enforcement actor's block path is
+a read-modify-write across two lock acquisitions:
+
+- `crates/ramshield-enforcement/src/service/enforce.rs:244-283` does
+  `store.get(&cmd.ip)` -> mutate `block_state` -> `store.insert(...)`.
+- `store.get()` returns `None` for an expired record
+  (`crates/ramshield-storage/src/store/access.rs:4-10`), so the
+  `unwrap_or(IpRecord { cusum_s: 0.0, sample_count: 0, ... })` default
+  **replaces the record and erases its detection history**.
+- Between the `get()` and the `insert()`, a concurrent detection flush can
+  run `update_ip` and advance `cusum_s`, `sample_count` and the pulse
+  counters. The enforcement `insert()` then writes back its stale snapshot,
+  **rolling those counters back**. This is the mirror image of the P0 fixed
+  in `write.rs:156-173` — that fix made `update_ip` mutate in place so it
+  cannot clobber `block_state`; the same window still lets enforcement
+  clobber the *stat* fields.
+
+**Why it matters.** Detection's own state is the attacker's history. If a
+block lands concurrently with a flush, the attacker's accumulated evidence
+is rewound, and `CUSUM_WARMUP_SAMPLES = 6`
+(`crates/ramshield-detection/src/rate_tracker.rs:18`) may never be reached,
+so `hot || cusum_fired || pulse_fired || relative_fired`
+(`crates/ramshield-detection/src/merge.rs:140-163`) never fires for that IP.
+
+**Required fix.** Give the block path the same single-shard-lock treatment
+`update_ip` has: one mutate that touches only `block_state` and leaves the
+stat fields alone, instead of `get()` + `insert()`. The store's own
+contract already says the mutation must not touch `block_state`
+(`write.rs:165-168`) — a second, block-only mutator is the missing piece.
+It must also not resurrect a *clean* record for an IP that is still
+blocked, which is what the expired-record default does today.
+
+**Required test.** A test that races a detection `update_ip` against the
+block path and asserts the stat fields are not rolled back. It must fail on
+the current code.
+
+**Not started, and not a quick fix.** This touches the block write path and
+its XDP projection ordering, so it is a medium-risk change, not a bounded
+one-file fix. It is recorded here rather than patched in the same pass as
+the I-013/I-020/I-024 closures.
+
+**A second, related observation** (policy, not a defect): an IP refused by
+the RAM budget is dropped from detection entirely
+(`crates/ramshield-detection/src/flush.rs:216-239`, `stored == false` ->
+`cold_skipped`), so its `sample_count` restarts at 0 and the CUSUM warmup
+never completes. The refusal is already observable
+(`capacity_exceeded_count` / `capacity_exceeded_ips`); whether a
+capacity-refused IP should fail open or fail closed is a posture decision
+and is not proposed here.
 
 ---
 
