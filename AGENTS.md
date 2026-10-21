@@ -111,7 +111,7 @@ All crates include comprehensive test suites:
 - **Buffer pools**: `BufWriter` with fixed-size buffers avoids fragmentation
 
 ### Error Handling & Resilience
-- **Fail-fast**: XDP panics only on catastrophic map corruption; otherwise continues
+- **Fail-fast**: the release profile sets `panic = "abort"`, so a panic in ANY thread aborts the whole daemon — there is no per-thread survival. The XDP path has no panic site: the eBPF program cannot panic, and a map update failure is a BPF helper error that returns the fail-open action
 - **Poisoning**: WAL transitions to `Poisoned` state on write failure; caller must reopen
 - **Deadlines**: Timeouts on all remote operations; graceful degradation
 - **Circuit breakers**: Mesh rejects sync requests when bandwidth exceeds thresholds

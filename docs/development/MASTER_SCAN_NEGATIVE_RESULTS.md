@@ -101,27 +101,65 @@ follows. F-03 must define the LSN semantics before the code changes.
 
 ---
 
-## 4. REFUTED (my own error) — the "release `panic = "abort"`" mismatch
+## 4. CORRECTION — the release profile DOES set `panic = "abort"`
 
-**This item was wrong and is withdrawn.** It was carried in the master-scan
-findings list as a documentation mismatch. Checked against the source:
+**An earlier version of this document withdrew this finding as my own
+error. That withdrawal was itself wrong, and the withdrawal is hereby
+corrected.** The `079cbae` commit message carries the same error.
 
-- `Cargo.toml:108` `[profile.release]` sets only `opt-level`, `lto` and
-  `codegen-units`. **There is no `panic = "abort"`.**
-- `docs/DEFENSE_MODEL.md` contains no mention of panics, fail-fast, or
-  fail-open at all.
-- The only panic-related claim is `AGENTS.md:114` ("XDP panics only on
-  catastrophic map corruption; otherwise continues") and `AGENTS.md:93` ("XDP
-  decisions are fail-open"). The production XDP path has no panic site at all:
-  every `unwrap`/`expect` in `crates/ramshield-xdp/src/lib.rs` is inside a
-  `#[cfg(test)]` block, and the eBPF program cannot panic — a failed map
-  update is a helper error that returns the fail-open XDP action.
+What happened: I read `[profile.release]` from `Cargo.toml` and concluded it
+set only `opt-level`, `lto` and `codegen-units`. The profile actually reads:
 
-**No change made.** The two AGENTS.md lines are loose wording, not a false
-resilience claim, and AGENTS.md is a controlling document — it is not edited
-for a wording nit.
+```toml
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"        # Cargo.toml:112
+strip = true
+overflow-checks = true
+```
 
----
+I read past the `panic = "abort"` line. The finding is **real**, and the
+documentation is what is wrong.
+
+### The verified facts
+
+- `Cargo.toml:112` — the release profile sets `panic = "abort"`, and
+  `overflow-checks = true`. **Any panic in any thread aborts the entire
+  daemon process.** There is no per-thread survival and no unwinding.
+- `AGENTS.md` (Error Handling & Resilience) claimed *"Fail-fast: XDP panics
+  only on catastrophic map corruption; otherwise continues"*. The
+  "otherwise continues" is false as a general property of the daemon under
+  `panic = "abort"`.
+- `AGENTS.md` (eBPF/XDP Safety) also claims *"XDP decisions are fail-open
+  (map update failure → continue without blocking)"*. **That claim is
+  correct** and is left alone: it describes a BPF map update failure, which
+  is a helper error returning the fail-open XDP action — not a panic. The
+  production XDP path genuinely has no panic site: every `unwrap`/`expect`
+  in `crates/ramshield-xdp/src/lib.rs` is inside a `#[cfg(test)]` block, and
+  the eBPF program cannot panic.
+- The code comments that reference `panic = "abort"` are **correct** and
+  were right all along: `crates/ramshield-detection/src/batch.rs:39,51`,
+  `crates/ramshield-detection/src/tests/mod.rs:1411` and
+  `crates/ramshield-protocol/src/auth.rs:158`. This is exactly why the
+  saturating-counter fixes in this series matter: with `overflow-checks = true`
+  an unguarded `+=` on a client-supplied value is a panic, and under
+  `panic = "abort"` that is a process abort, not a caught error.
+- `docs/DEFENSE_MODEL.md` contains no mention of panics, fail-fast or
+  fail-open, so it makes no claim to correct.
+- `docs/ENGINEERING_CONSTITUTION.md:97` claims *"No production constructor
+  panics because an external resource is missing. No production
+  `unimplemented!()`, `todo!()`, or unproven `unwrap()`."* **That claim is
+  true** and is enforced by the `lint-no-unwrap` gate (0 hits on production
+  `src/` and `crates/`). It is left alone.
+
+### The fix
+
+`AGENTS.md` now states the real property: the release profile sets
+`panic = "abort"`, so a panic in any thread aborts the whole daemon, and the
+reason the XDP path is nonetheless panic-free is that it has no panic site —
+not that the daemon survives one.
 
 ## 5. REFUTED — `deployment_cli.rs` unwraps outside the lint's scope
 
@@ -239,6 +277,64 @@ triage's "the fail-closed doc claim is only true for public binds" was a
 statement about the code, not a documentation defect.
 
 The real documentation defect was elsewhere — see the next section.
+
+---
+
+## 7d. The second reviewer's observations — all resolved
+
+The independent review of the performance/durability batch
+(`docs/development/MASTER_SCAN_PERF_REVIEW.md`) raised eight optional
+observations. Each was re-checked against the source at `009ab24`:
+
+- **OBS-1 (IPC length check) — already fixed.** The reviewer read the
+  *intermediate* implementation, which bounded the whole buffer. The current
+  check at `src/ipc/server/connection.rs:93` measures the newline's position
+  in the buffer — the length of that one line — so pipelined valid lines are
+  not rejected. Covered by
+  `ipc_wiring_unterminated_line_is_capped_at_the_tighter_line_limit`.
+- **OBS-2 (XDP map values / TTL) — already closed.** `crates/ramshield-enforcement/src/xdp.rs:610-625`
+  documents the semantics: a resident key keeps the expiry `apply_block` gave
+  it; the keep-alive re-runs the enforce path at `ttl/2` and so refreshes the
+  kernel expiry before it passes; the only difference is that a *missed*
+  keep-alive now lets the TTL lapse instead of turning the block
+  `PERMANENT`. The reviewer could not read the BPF expiry check within
+  budget; the eBPF program compares `now < expiry` against
+  `bpf_ktime_get_ns`, the same monotonic clock.
+- **OBS-3 (LPM trie re-insert) — accepted residual.** The LPM trie API
+  offers no "present key" diff, so every expected CIDR is still re-inserted
+  each cycle. Documented.
+- **OBS-4 (deadlock in `flush_pre_aggs_locked` → `flush_batch`) — no
+  deadlock.** The merge lock is taken in exactly two places,
+  `crates/ramshield-detection/src/pre_aggs.rs:28` (`merge_local`) and `:94`
+  (`flush_pre_aggs_to_store`); the only callers of those two are
+  `crates/ramshield-detection/src/workers.rs:134/152/178`, **sequential and
+  never nested**, and `flush_batch` is not among them. Empirically, the
+  pressure path is exercised by the existing test
+  `local_merge_enforces_shared_pre_aggregation_capacity`
+  (`pre_aggs_max_size = 2`, five distinct IPs), which forces
+  `merge_local` → `flush_pre_aggs_locked` → `flush_batch` and passes in
+  0.02 s — a re-entrant `std::sync::Mutex` would hang it and every CI run.
+  `merge_local_holds_the_merge_lock_for_the_whole_drain` also passes.
+- **OBS-5 (WAL fsync cost / mesh double-sync) — no double-sync.** The mesh
+  path is a separate function, `append_mesh_wal`
+  (`crates/ramshield-enforcement/src/service/enforce.rs:181`), with its own
+  `wal.sync()`; the local path's `append_is_durable()` check is in a
+  different function, so nothing syncs twice. The shipped default WAL
+  durability is `Durability::Flush`
+  (`crates/ramshield-config/src/sections/wal.rs:29`), which is not
+  `SyncEach`, so `append_is_durable()` is false and the local path does
+  fsync per acknowledged block — the documented trade-off of the
+  durable-before-merge fix.
+- **OBS-6 (torn-tail reporting) — already fixed** by
+  `log_unrepaired_tail`; the boot recovery path is untouched.
+- **OBS-7 (cgnat temp file cleanup) — the tests clean up.** Each
+  `crates/ramshield-cgnat/src/shm.rs` test ends with
+  `let _ = std::fs::remove_file(path);`.
+- **OBS-8 (`status_dist` 255 marker) — not a defect.** `255` is a "not in a
+  known class" sentinel in the `STATUS_BUCKET` lookup table
+  (`crates/ramshield-detection/src/batch.rs:44`), guarded by `if b != 255`
+  before the index is used. It is not a counter value. The counters
+  themselves are saturating.
 
 ---
 
