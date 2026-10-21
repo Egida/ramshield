@@ -49,8 +49,8 @@ struct ConnectionConfig {
     idle_timeout: Duration,
     max_line_length: usize,
     config: ConfigHandle,
-    /// Per-key nonce store. Bounded LRU + 10s TTL; lives for the server's
-    /// lifetime. Shared by every connection via Arc.
+    /// Per-key nonce store. Bounded capacity + 65s TTL; lives for the
+    /// server's lifetime. Shared by every connection via Arc.
     replay_store: Arc<ramshield_protocol::auth::ReplayStore>,
 }
 
@@ -105,10 +105,11 @@ pub struct IpcServer {
     active_connections: Arc<AtomicU64>,
     rejected_connections: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
-    /// Per-key LRU nonce store for replay protection. Capacity = 256 entries
-    /// per key, entries expire after 10s. Sized to cover the max concurrent
-    /// IPC clients with headroom; evicted entries leave a brief hole but that
-    /// only slightly widens the replay window — acceptable tradeoff vs memory.
+    /// Nonce store for replay protection. 1024 entries globally, 256 per
+    /// key, entries expire after 65s. Sized to cover the max concurrent IPC
+    /// clients with headroom. Saturation REJECTS a new nonce rather than
+    /// evicting a live one, so capacity pressure cannot reopen a replay
+    /// window — there is no eviction hole here.
     replay_store: Arc<ramshield_protocol::auth::ReplayStore>,
 }
 
