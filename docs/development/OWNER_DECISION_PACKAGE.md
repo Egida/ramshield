@@ -612,6 +612,87 @@ tree's own direct evidence is the four green CI workflows on that SHA. The
 "Commit it gated" column names the commit that followed the run, not a tree
 that was already committed when the run happened.
 
+### I-013 and I-020 — closed on `fix/i-013-synproxy-fixture-parity`
+
+Two backlog rows were closed in one pass, each on its own commit, both on
+branch `fix/i-013-synproxy-fixture-parity` (base `bd417cd`, i.e. current
+`origin/master`). Neither commit is pushed and neither is on `master`.
+
+| Row | Commit | What changed |
+|---|---|---|
+| I-013 SYNPROXY fixture parity | `72981e1` | `tests/fixtures/synproxy.nft` + 2 tests in `src/engine/synproxy.rs` |
+| I-020 dashboard quarantine search | `9978268` | `src/dashboard/static/index.html` + 1 test in `src/dashboard/mod.rs` |
+
+**I-013.** The fixture declared only `tcp dport { 22, 443 }` while
+`SynproxyConfig::default()` and `config.baseline.toml` both configure
+`[22, 53, 80, 443]`. The fixture is the file the `nft -c -f
+tests/fixtures/synproxy.nft` gate checks, so the gate was proving syntax
+for a ruleset production never loads. The daemon's installed ruleset is
+unchanged — it already used `[22, 53, 80, 443]`; only the checked-in
+fixture was wrong.
+
+The fixture is now the generator's own output, and `nft_fixture_is_the_rendered_ruleset`
+compares it against `render_ruleset()` for the default config, so every
+knob is pinned — ports, mss, wscale, connection limits, rate limits — not
+just the field the row named. A hand-maintained copy of generated output
+is what drifted; the test removes the duplication rather than policing one
+field of it. `baseline_config_ports_match_the_code_default` keeps the
+shipped baseline config on the same port set as the code default.
+
+Production code is untouched: `git diff -U0 src/engine/synproxy.rs` is a
+single hunk, `@@ -262,0 +263,89 @@ mod tests {`, entirely inside the
+existing `#[cfg(test)] mod tests`. The fixture's table is
+`ramshield_synproxy_fixture`, distinct from the live
+`ramshield_synproxy` table, and `nft -c` only checks — it applies nothing.
+
+**I-020.** The Active Quarantine Feed shipped a search box that did
+nothing: `#tableSearch` had no listener and `filterTable()` was defined
+but never called. Two things the row does not name decided the fix. The
+feed repaints every 5s — `refresh()` → `loadBlocks()` rebuilds the rows
+with `body.replaceChildren()`, destroying the display styles the filter
+set — so binding the input alone yields a filter that visibly reverts to
+"show all" within one refresh interval; the filter is now re-applied
+after the rebuild. And the placeholder promised "Filter by IP, CIDR, or
+module" while the rows carry `BlockRecord.ip`, a single `IpAddr` rendered
+as a string, never a CIDR: a query like `10.0.0.0/8` matches nothing.
+Verified against the shipped `filterTable()` — IP and module filter
+correctly, a CIDR query matches zero rows — so the placeholder now says
+what the filter does.
+
+**Gates, on the exact resulting SHAs, no pipe on any command:**
+
+| Gate | `72981e1` | `9978268` |
+|---|---|---|
+| `cargo fmt --all -- --check` | 0 | 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 | 0 |
+| `cargo test --workspace --all-features` | 0 | 0 |
+| `nft -c -f tests/fixtures/synproxy.nft` | 0 | 0 |
+
+**The negative controls, because a green gate that cannot fail is not
+evidence.** The nft gate fails on a deliberately broken copy of the
+fixture: `dport { 22, 99999 }` → exit 1 ("Service out of range"), closing
+brace removed → exit 1 ("syntax error, unexpected end of file"). The
+I-013 test fails on a fixture whose *unrelated* knob was changed
+(`ct count over 128` → `64`): "tests/fixtures/synproxy.nft has drifted
+from the ruleset the daemon installs". The I-020 test was seen red twice,
+once per half: reverting the binding fails it with "the search input must
+call filterTable on input", and removing only the re-apply line fails it
+with "loadBlocks must re-apply the filter after it rebuilds the rows".
+
+**Two claims from the read-only row reviews were wrong and were not
+acted on.** One review stated the filter "already covers IP, CIDR and
+module" because block rows carry a CIDR string in the IP cell; `BlockRecord.ip`
+is an `IpAddr` string, and a CIDR query matches zero rows, which was
+measured before the placeholder was changed. Another review recommended
+adding `oninput` alone; the 5s rebuild would have undone it, which is why
+the re-apply is there.
+
+**Not covered.** DOM-level behaviour of the dashboard filter: the repo has
+no JS test harness in CI and adding one is a new dependency. The nft
+fixture gate is also still manual-only — no workflow runs
+`nft -c -f tests/fixtures/synproxy.nft` and `nft` is not installed on the
+CI runner image — so the Rust test is what protects the fixture in CI.
+
 ### Preserve state, verified after the last push
 
 | Item | State |
