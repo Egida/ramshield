@@ -1781,6 +1781,106 @@ mod frame_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// Bind a pair of mesh handles to two distinct local ports.
+    ///
+    /// The ports are reserved first because each handle needs the
+    /// other's address in its peer list, and a handle cannot report the
+    /// port it got until it is bound. Between the reservation and the
+    /// bind, the port can be taken by another test running in parallel
+    /// in this same binary - on a kernel that recycles a just-released
+    /// ephemeral port, which is what a CI runner does. The failure is
+    /// `AddrInUse` and it says nothing about what the test checks.
+    ///
+    /// So the pair is bound under a retry: a bind that loses the race
+    /// releases the port it holds and the pair is reserved again.
+    async fn bind_pair(
+        state_a: Arc<AworsetBlocklist>,
+        state_b: Arc<AworsetBlocklist>,
+    ) -> (
+        MeshHandle,
+        MeshHandle,
+        std::net::SocketAddr,
+        std::net::SocketAddr,
+    ) {
+        for _ in 0..8 {
+            let addrs = reserve_ports(2).await;
+            let (addr_a, addr_b) = (addrs[0], addrs[1]);
+            let a = MeshHandle::bind(
+                1,
+                state_a.clone(),
+                addr_a,
+                vec![MeshPeer::new(2, addr_b, NODE_B_KEY.to_vec())],
+                NODE_A_KEY.to_vec(),
+            )
+            .await;
+            let b = MeshHandle::bind(
+                2,
+                state_b.clone(),
+                addr_b,
+                vec![MeshPeer::new(1, addr_a, NODE_A_KEY.to_vec())],
+                NODE_B_KEY.to_vec(),
+            )
+            .await;
+            match (a, b) {
+                (Ok(a), Ok(b)) => return (a, b, addr_a, addr_b),
+                (Err(e), _) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                (Err(e), _) => panic!("bind node A: {e}"),
+                (_, Err(e)) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                (_, Err(e)) => panic!("bind node B: {e}"),
+            }
+        }
+        panic!("could not bind a pair of mesh handles");
+    }
+
+    /// Reserve `n` distinct free ports.
+    ///
+    /// Binding to :0 and dropping the probe to learn a free port is a
+    /// TOCTOU race: if one probe is released before the next is taken, the
+    /// OS can hand the just-released port straight back to the next
+    /// probe, and the two handles then want the same port. The second
+    /// bind fails with `AddrInUse`, and the test fails for a reason that
+    /// has nothing to do with what it tests.
+    ///
+    /// Every probe is held until every address is known, so the OS cannot
+    /// give the same port twice.
+    async fn reserve_ports(n: usize) -> Vec<std::net::SocketAddr> {
+        let mut probes = Vec::with_capacity(n);
+        let mut addrs = Vec::with_capacity(n);
+        for _ in 0..n {
+            let probe = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve port");
+            addrs.push(probe.local_addr().expect("port address"));
+            probes.push(probe);
+        }
+        // Release them all at once, now that every address is known.
+        drop(probes);
+        addrs
+    }
+
+    #[test]
+    fn reserved_ports_are_distinct() {
+        // The pair-binding tests reserve two ports and then bind both. If
+        // the two reservations can come back with the same port, the
+        // second bind fails with `AddrInUse` and the test fails for a
+        // reason that has nothing to do with what it checks. Holding
+        // every probe until every address is known is what makes that
+        // impossible: a bound port is not handed out twice.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            for _ in 0..200 {
+                let addrs = reserve_ports(2).await;
+                assert_ne!(
+                    addrs[0], addrs[1],
+                    "two reservations returned the same port"
+                );
+            }
+        });
+    }
+
     /// Distinct per-node keys: every node signs with its own key only.
     const NODE_A_KEY: &[u8] = b"mesh-test-node-a-auth-key-0001";
     const NODE_B_KEY: &[u8] = b"mesh-test-node-b-auth-key-0002";
@@ -1917,37 +2017,9 @@ mod frame_tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let probe_a = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("reserve node A address");
-            let addr_a = probe_a.local_addr().expect("node A address");
-            drop(probe_a);
-            let probe_b = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("reserve node B address");
-            let addr_b = probe_b.local_addr().expect("node B address");
-            drop(probe_b);
-
             let blocklist_a = Arc::new(AworsetBlocklist::new(1));
             let blocklist_b = Arc::new(AworsetBlocklist::new(2));
-            let a = MeshHandle::bind(
-                1,
-                blocklist_a.clone(),
-                addr_a,
-                vec![MeshPeer::new(2, addr_b, NODE_B_KEY.to_vec())],
-                NODE_A_KEY.to_vec(),
-            )
-            .await
-            .expect("bind node A");
-            let b = MeshHandle::bind(
-                2,
-                blocklist_b.clone(),
-                addr_b,
-                vec![MeshPeer::new(1, addr_a, NODE_A_KEY.to_vec())],
-                NODE_B_KEY.to_vec(),
-            )
-            .await
-            .expect("bind node B");
+            let (a, b, _addr_a, addr_b) = bind_pair(blocklist_a.clone(), blocklist_b.clone()).await;
 
             let ip_a = IpAddr::V6(Ipv6Addr::from(0xabcdu128));
             let delta_a = blocklist_a.record_ban(ip_a, 60_000, 1);
@@ -2226,11 +2298,7 @@ mod frame_tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let probe = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("probe listener");
-            let unavailable_peer = probe.local_addr().expect("probe address");
-            drop(probe);
+            let unavailable_peer = reserve_ports(1).await.remove(0);
 
             let handle = MeshHandle::bind(
                 1,
@@ -2268,11 +2336,7 @@ mod frame_tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let probe = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("probe listener");
-            let address = probe.local_addr().expect("probe address");
-            drop(probe);
+            let address = reserve_ports(1).await.remove(0);
 
             let handle = MeshHandle::bind(
                 1,
@@ -2488,38 +2552,12 @@ mod frame_tests {
             .build()
             .expect("test runtime");
         runtime.block_on(async {
-            let probe = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("reserve receiver");
-            let receiver_addr = probe.local_addr().expect("receiver address");
-            drop(probe);
-            let probe = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("reserve sender");
-            let sender_addr = probe.local_addr().expect("sender address");
-            drop(probe);
             let sender_state = Arc::new(AworsetBlocklist::new(1));
             let receiver_state = Arc::new(AworsetBlocklist::new(2));
             let ip = IpAddr::V6(Ipv6Addr::from(0xfeedbeefu128));
             sender_state.record_ban(ip, 60_000, 2);
-            let sender = MeshHandle::bind(
-                1,
-                sender_state.clone(),
-                sender_addr,
-                vec![MeshPeer::new(2, receiver_addr, NODE_B_KEY.to_vec())],
-                NODE_A_KEY.to_vec(),
-            )
-            .await
-            .expect("bind sender");
-            let receiver = MeshHandle::bind(
-                2,
-                receiver_state.clone(),
-                receiver_addr,
-                vec![MeshPeer::new(1, sender_addr, NODE_A_KEY.to_vec())],
-                NODE_B_KEY.to_vec(),
-            )
-            .await
-            .expect("bind receiver");
+            let (sender, receiver, sender_addr, receiver_addr) =
+                bind_pair(sender_state.clone(), receiver_state.clone()).await;
             sender
                 .request_full_sync(receiver_addr, 17, sender_state.export_snapshot())
                 .await;
