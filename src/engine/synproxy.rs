@@ -283,7 +283,13 @@ mod tests {
             ))
             .expect("read synproxy.nft fixture");
 
-            let cfg = SynproxyConfig::default();
+            // Render from the SHIPPED BASELINE, not from the code default.
+            // The daemon installs the ruleset the baseline configures, so the
+            // baseline is what the fixture has to match. Rendering from the
+            // code default instead would let the baseline drift on any knob
+            // other than the ports and reopen exactly the defect this test
+            // exists to close.
+            let (interface, cfg) = super::tests::baseline_synproxy_config();
             let ports = cfg
                 .ports
                 .iter()
@@ -291,7 +297,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             let rendered = super::render_ruleset(
-                "eth0",
+                &interface,
                 &ports,
                 cfg.mss,
                 cfg.wscale,
@@ -320,6 +326,68 @@ mod tests {
         }
     }
 
+    /// Read the shipped baseline config's [synproxy] section and the XDP
+    /// interface the daemon installs on. Returns (interface, config).
+    ///
+    /// The daemon renders the SYNPROXY ruleset from the loaded config, so the
+    /// baseline file is the only thing that says what the fixture must be.
+    fn baseline_synproxy_config() -> (String, SynproxyConfig) {
+        let path = format!("{}/config.baseline.toml", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let value: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let section = &value["synproxy"];
+        let get_u16 = |key: &str| -> u16 {
+            let raw = section[key]
+                .as_integer()
+                .unwrap_or_else(|| panic!("{path} [synproxy].{key} is missing or not an integer"));
+            u16::try_from(raw)
+                .unwrap_or_else(|_| panic!("{path} [synproxy].{key} = {raw} does not fit in u16"))
+        };
+        let get_u32 = |key: &str| -> u32 {
+            let raw = section[key]
+                .as_integer()
+                .unwrap_or_else(|| panic!("{path} [synproxy].{key} is missing or not an integer"));
+            u32::try_from(raw)
+                .unwrap_or_else(|_| panic!("{path} [synproxy].{key} = {raw} does not fit in u32"))
+        };
+        let ports: Vec<u16> = section["ports"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} has no [synproxy].ports array"))
+            .iter()
+            .map(|v| {
+                let raw = v
+                    .as_integer()
+                    .unwrap_or_else(|| panic!("{path} [synproxy].ports holds a non-integer"));
+                u16::try_from(raw).unwrap_or_else(|_| {
+                    panic!("{path} [synproxy].ports holds {raw}, not a TCP port")
+                })
+            })
+            .collect();
+        let interface = value["xdp"]["interface"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{path} has no [xdp].interface string"))
+            .to_string();
+        (
+            interface,
+            SynproxyConfig {
+                enabled: section["enabled"].as_bool().unwrap_or(false),
+                ports,
+                mss: get_u16("mss"),
+                wscale: u8::try_from(section["wscale"].as_integer().unwrap_or_else(|| {
+                    panic!("{path} [synproxy].wscale is missing or not an integer")
+                }))
+                .unwrap_or_else(|_| panic!("{path} [synproxy].wscale does not fit in u8")),
+                max_connections_per_source: get_u32("max_connections_per_source"),
+                max_connections_total: get_u32("max_connections_total"),
+                new_connections_per_second: get_u32("new_connections_per_second"),
+                new_connection_burst: get_u32("new_connection_burst"),
+                new_connections_total_per_second: get_u32("new_connections_total_per_second"),
+                new_connection_total_burst: get_u32("new_connection_total_burst"),
+            },
+        )
+    }
+
     /// I-013: the shipped baseline config must configure the same ports as
     /// the code default the generator renders from.
     #[test]
@@ -333,9 +401,12 @@ mod tests {
             .unwrap_or_else(|| panic!("{path} has no [synproxy].ports array"))
             .iter()
             .map(|v| {
-                v.as_integer()
-                    .unwrap_or_else(|| panic!("{path} [synproxy].ports holds a non-integer"))
-                    as u16
+                let raw = v
+                    .as_integer()
+                    .unwrap_or_else(|| panic!("{path} [synproxy].ports holds a non-integer"));
+                u16::try_from(raw).unwrap_or_else(|_| {
+                    panic!("{path} [synproxy].ports holds {raw}, which is not a TCP port")
+                })
             })
             .collect();
         assert_eq!(
