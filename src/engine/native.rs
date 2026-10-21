@@ -9,13 +9,14 @@
 //! This is observation, not inline enforcement. XDP/netfilter remain the
 //! enforcement layers.
 use crossbeam_channel::Sender;
+use ramshield_metrics::Metrics;
 use ramshield_types::{ConnectionEvent, IpNetwork};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[cfg(target_os = "linux")]
 const TPACKET_V3: i32 = 2;
@@ -99,6 +100,7 @@ pub fn spawn(
     trusted_overlay_cidrs: Vec<IpNetwork>,
     tx: Sender<ConnectionEvent>,
     shutdown: Arc<AtomicBool>,
+    metrics: Arc<Metrics>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     #[cfg(target_os = "linux")]
     {
@@ -112,6 +114,13 @@ pub fn spawn(
                 let budget = Arc::new(AtomicU64::new(0));
                 let epoch = Arc::new(AtomicU64::new(0));
                 let epoch_base = std::time::Instant::now();
+                // Counts how many times the "downstream channel is closed"
+                // error was actually EMITTED, shared by every worker so the
+                // daemon logs it once. A closed channel rejects every
+                // subsequent event, so an error log per event would be a
+                // log flood; the drop counter records the volume and this
+                // counter records that the error was raised exactly once.
+                let disconnect_log_emissions = Arc::new(AtomicU64::new(0));
                 let mut handles = Vec::with_capacity(workers);
                 for worker in 0..workers {
                     let iface = interface.clone();
@@ -121,6 +130,11 @@ pub fn spawn(
                     let b = budget.clone();
                     let e = epoch.clone();
                     let base = epoch_base;
+                    // Clone outside the `move` closure: the closure takes
+                    // ownership of what it captures, so cloning inside it
+                    // would move the handle on the first iteration.
+                    let m = metrics.clone();
+                    let dl = disconnect_log_emissions.clone();
                     handles.push(
                         std::thread::Builder::new()
                             .name(format!("rs-native-{worker}"))
@@ -135,6 +149,8 @@ pub fn spawn(
                                     e,
                                     base,
                                     worker,
+                                    m,
+                                    dl,
                                 ) {
                                     warn!(worker, error=%err, "native packet capture stopped");
                                 }
@@ -154,6 +170,7 @@ pub fn spawn(
             trusted_overlay_cidrs,
             tx,
             shutdown,
+            metrics,
         );
         Err(std::io::Error::other(
             "native_ingest requires Linux AF_PACKET",
@@ -224,6 +241,8 @@ fn run_linux(
     epoch: Arc<AtomicU64>,
     epoch_base: std::time::Instant,
     worker: usize,
+    metrics: Arc<Metrics>,
+    disconnect_log_emissions: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     // B02: Early validation before any unsafe mmap or pointer arithmetic.
     // 1. Interface exists and is usable.
@@ -267,6 +286,8 @@ fn run_linux(
         &epoch,
         epoch_base,
         worker,
+        &metrics,
+        &disconnect_log_emissions,
     );
     unsafe {
         libc::close(fd);
@@ -287,6 +308,8 @@ fn run_socket(
     epoch: &Arc<AtomicU64>,
     epoch_base: std::time::Instant,
     worker: usize,
+    metrics: &Metrics,
+    disconnect_log_emissions: &AtomicU64,
 ) -> std::io::Result<()> {
     // B02: After socket creation, before mmap, validate interface index and bind.
     let ifname = std::ffi::CString::new(interface)
@@ -503,6 +526,8 @@ fn run_socket(
                 budget,
                 epoch,
                 epoch_base,
+                metrics,
+                disconnect_log_emissions,
             );
 
             // SAFETY: hdr still points at the validated packet header in this block.
@@ -648,6 +673,7 @@ fn set_sockopt<T>(fd: i32, level: i32, name: i32, value: &T) -> std::io::Result<
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)] // Producer state stays explicit at this boundary.
 fn process_packet(
     packet: &[u8],
     max_eps: u64,
@@ -656,6 +682,8 @@ fn process_packet(
     budget: &Arc<AtomicU64>,
     epoch: &Arc<AtomicU64>,
     epoch_base: std::time::Instant,
+    metrics: &Metrics,
+    disconnect_log_emissions: &AtomicU64,
 ) {
     let second = epoch_base.elapsed().as_secs();
     let seen = epoch.load(Ordering::Relaxed);
@@ -708,7 +736,40 @@ fn process_packet(
         proto_fingerprint: fp,
         l7: None,
     };
-    let _ = tx.try_send(ev);
+    // The capture thread must never block on a full downstream queue, so the
+    // send is non-blocking and a rejected event is dropped. That is the
+    // right overload policy for a real-time ingest path — but only if the
+    // loss is visible, and before this change the result was discarded
+    // outright, so no counter moved and the loss was invisible both to the
+    // operator and to the metrics export.
+    match tx.try_send(ev) {
+        Ok(()) => {}
+        Err(crossbeam_channel::TrySendError::Full(_)) => {
+            // Backpressure: the downstream queue is saturated.
+            metrics.inc_native_ingest_drop(1);
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            // The downstream channel is closed. This is not backpressure —
+            // the detection pipeline is gone — so it is counted separately
+            // and logged. Every subsequent event is rejected too, so the
+            // log is emitted once per daemon; the disconnect counter records
+            // the volume.
+            metrics.inc_native_ingest_drop(1);
+            metrics.inc_native_ingest_disconnect(1);
+            // compare_exchange, not a load-then-store: exactly one thread
+            // may emit the error even if several workers notice the closed
+            // channel at the same moment. The counter makes the one-shot
+            // property observable to a test.
+            if disconnect_log_emissions
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                error!(
+                    "native capture: the downstream event channel is closed — observation events are being dropped"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1326,6 +1387,8 @@ mod tests {
             let budget = Arc::new(AtomicU64::new(0));
             let epoch = Arc::new(AtomicU64::new(0));
             let epoch_base = std::time::Instant::now();
+            let metrics = Arc::new(Metrics::new());
+            let disconnect_log_emissions = Arc::new(AtomicU64::new(0));
 
             let start = std::time::Instant::now();
             for _ in 0..PACKETS_PER_SAMPLE {
@@ -1337,6 +1400,8 @@ mod tests {
                     &budget,
                     &epoch,
                     epoch_base,
+                    &metrics,
+                    &disconnect_log_emissions,
                 );
             }
             let elapsed = start.elapsed();
@@ -1380,5 +1445,270 @@ mod tests {
         assert!(!syn);
         assert!(!fragmented);
         assert!(!overlay);
+    }
+
+    /// A synthetic Ethernet+IPv4+TCP frame the native producer accepts.
+    fn sample_frame() -> Vec<u8> {
+        let mut ip = vec![0u8; 40];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&(40u16).to_be_bytes());
+        ip[9] = 6;
+        ip[12..16].copy_from_slice(&[198, 51, 100, 7]);
+        ip[16..20].copy_from_slice(&[192, 0, 2, 10]);
+        ip[20..22].copy_from_slice(&(40000u16).to_be_bytes());
+        ip[22..24].copy_from_slice(&(443u16).to_be_bytes());
+        ip[32] = 0x50;
+        ip[33] = 0x02;
+        eth(0x0800, &ip)
+    }
+
+    /// The native producer must not drop an observation event silently.
+    ///
+    /// The capture path sends without blocking, so a saturated or closed
+    /// channel drops the event rather than stalling the capture thread.
+    /// That is the right overload policy for a real-time ingest path — but
+    /// only if it is *visible*. Before this change the `try_send` result was
+    /// discarded outright, so no counter moved: the loss was invisible both
+    /// to the operator and to the metrics export.
+    #[test]
+    fn native_ingest_counts_a_drop_when_the_channel_is_full() {
+        let metrics = Metrics::new();
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        // Fill the channel so the next send is rejected as Full.
+        tx.try_send(ConnectionEvent {
+            ip: "198.51.100.7".parse().unwrap(),
+            timestamp_ns: 0,
+            bytes: 1,
+            status_code: 0,
+            proto_fingerprint: 0,
+            l7: None,
+        })
+        .expect("seed the channel");
+
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        let disconnect_log_emissions = AtomicU64::new(0);
+
+        process_packet(
+            &sample_frame(),
+            1000,
+            &[],
+            &tx,
+            &budget,
+            &epoch,
+            epoch_base,
+            &metrics,
+            &disconnect_log_emissions,
+        );
+
+        assert_eq!(
+            metrics.native_ingest_drops.load(Ordering::Relaxed),
+            1,
+            "a dropped observation event must be counted"
+        );
+        assert_eq!(
+            metrics
+                .native_ingest_drops_disconnected
+                .load(Ordering::Relaxed),
+            0,
+            "a full channel is not a disconnected channel"
+        );
+        assert_eq!(
+            disconnect_log_emissions.load(Ordering::Relaxed),
+            0,
+            "a full channel is backpressure, not a dead pipeline — nothing to log"
+        );
+    }
+
+    /// A **closed** downstream channel is a different failure from a full
+    /// one: the detection pipeline is gone, not busy. It must be counted
+    /// separately so an operator can tell the two apart, and it must be
+    /// logged — but only once, because every subsequent event would also be
+    /// rejected and a per-event log would be a flood.
+    #[test]
+    fn native_ingest_counts_a_disconnect_separately_from_a_full_channel() {
+        let metrics = Metrics::new();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        let disconnect_log_emissions = AtomicU64::new(0);
+
+        process_packet(
+            &sample_frame(),
+            1000,
+            &[],
+            &tx,
+            &budget,
+            &epoch,
+            epoch_base,
+            &metrics,
+            &disconnect_log_emissions,
+        );
+
+        assert_eq!(
+            metrics.native_ingest_drops.load(Ordering::Relaxed),
+            1,
+            "a dropped observation event must be counted"
+        );
+        assert_eq!(
+            metrics
+                .native_ingest_drops_disconnected
+                .load(Ordering::Relaxed),
+            1,
+            "a closed channel must be counted as a disconnect, not as backpressure"
+        );
+        assert_eq!(
+            disconnect_log_emissions.load(Ordering::Relaxed),
+            1,
+            "the first disconnect must be logged"
+        );
+    }
+
+    /// The disconnect error must be logged exactly once, however many events
+    /// are rejected afterwards — otherwise a dead pipeline becomes a log
+    /// flood that hides everything else.
+    #[test]
+    fn native_ingest_logs_a_disconnect_only_once() {
+        let metrics = Metrics::new();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        let disconnect_log_emissions = AtomicU64::new(0);
+
+        for _ in 0..5 {
+            process_packet(
+                &sample_frame(),
+                1000,
+                &[],
+                &tx,
+                &budget,
+                &epoch,
+                epoch_base,
+                &metrics,
+                &disconnect_log_emissions,
+            );
+        }
+
+        assert_eq!(
+            metrics.native_ingest_drops.load(Ordering::Relaxed),
+            5,
+            "every rejected event must be counted"
+        );
+        assert_eq!(
+            metrics
+                .native_ingest_drops_disconnected
+                .load(Ordering::Relaxed),
+            5
+        );
+        assert_eq!(
+            disconnect_log_emissions.load(Ordering::Relaxed),
+            1,
+            "the error must be emitted once, however many events are rejected"
+        );
+    }
+
+    /// The success path must not move either counter: a delivered event is
+    /// not a drop.
+    #[test]
+    fn native_ingest_does_not_count_a_delivered_event_as_a_drop() {
+        let metrics = Metrics::new();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        let disconnect_log_emissions = AtomicU64::new(0);
+
+        process_packet(
+            &sample_frame(),
+            1000,
+            &[],
+            &tx,
+            &budget,
+            &epoch,
+            epoch_base,
+            &metrics,
+            &disconnect_log_emissions,
+        );
+
+        assert_eq!(rx.len(), 1, "the event must have been delivered");
+        assert_eq!(
+            metrics.native_ingest_drops.load(Ordering::Relaxed),
+            0,
+            "a delivered event is not a drop"
+        );
+        assert_eq!(
+            metrics
+                .native_ingest_drops_disconnected
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(disconnect_log_emissions.load(Ordering::Relaxed), 0);
+    }
+
+    /// The one-shot error must hold under contention: several workers may
+    /// notice the closed channel at the same moment, and exactly one of
+    /// them may emit the error.
+    #[test]
+    fn native_ingest_emits_the_disconnect_error_once_under_contention() {
+        let metrics = Arc::new(Metrics::new());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        let disconnect_log_emissions = Arc::new(AtomicU64::new(0));
+
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let tx = tx.clone();
+            let metrics = metrics.clone();
+            let budget = budget.clone();
+            let epoch = epoch.clone();
+            let disconnect_log_emissions = disconnect_log_emissions.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    process_packet(
+                        &sample_frame(),
+                        1_000_000,
+                        &[],
+                        &tx,
+                        &budget,
+                        &epoch,
+                        epoch_base,
+                        &metrics,
+                        &disconnect_log_emissions,
+                    );
+                }
+            }));
+        }
+        for t in threads {
+            t.join().expect("worker thread");
+        }
+
+        assert_eq!(
+            metrics.native_ingest_drops.load(Ordering::Relaxed),
+            800,
+            "every rejected event must be counted"
+        );
+        assert_eq!(
+            metrics
+                .native_ingest_drops_disconnected
+                .load(Ordering::Relaxed),
+            800
+        );
+        assert_eq!(
+            disconnect_log_emissions.load(Ordering::Relaxed),
+            1,
+            "exactly one thread may emit the error, however many notice the closed channel"
+        );
     }
 }

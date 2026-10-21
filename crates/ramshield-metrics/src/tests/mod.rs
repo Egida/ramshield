@@ -68,3 +68,29 @@ fn block_log_cap_floor_is_one() {
     m.record_block("10.0.0.1", "high_rps", "detection");
     assert_eq!(m.block_log.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn native_ingest_drop_counters_are_exported() {
+    let m = Metrics::new();
+    let rendered = m.render_prometheus();
+    assert!(
+        rendered.contains("ramshield_native_ingest_drops_total 0"),
+        "the native ingest drop counter must be exported:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_native_ingest_drops_disconnected_total 0"),
+        "the native ingest disconnect counter must be exported:\n{rendered}"
+    );
+
+    m.inc_native_ingest_drop(3);
+    m.inc_native_ingest_disconnect(1);
+    let rendered = m.render_prometheus();
+    assert!(
+        rendered.contains("ramshield_native_ingest_drops_total 3"),
+        "the counter must reflect the drops:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_native_ingest_drops_disconnected_total 1"),
+        "the disconnect counter must be broken out:\n{rendered}"
+    );
+}

@@ -105,6 +105,30 @@ ramshield_events_total 5490000
 ramshield_blocks_total 47
 ```
 
+### Native ingest drops
+
+The native capture path (Linux, `native_ingest.enabled`) sends observation
+events downstream **without blocking**, so a saturated queue drops the event
+rather than stalling the capture thread. That is the intended overload
+policy, but only if the loss is visible:
+
+| Metric | Meaning |
+|---|---|
+| `ramshield_native_ingest_drops_total` | Every observation event the native producer built but could not hand to the downstream channel. |
+| `ramshield_native_ingest_drops_disconnected_total` | The subset where the downstream channel was **closed** rather than full — the detection pipeline is gone, not busy. |
+
+A full channel is backpressure and needs no log line. A closed channel is
+logged once per daemon (every subsequent event is rejected too, so a log per
+event would be a flood) and is broken out so an operator can tell the two
+apart.
+
+These count **channel rejections only**. A packet that never becomes an
+observation event — a non-IP frame, a trusted-overlay skip, or one refused by
+the per-second admission budget — is not counted, because no event was built
+to deliver. They are also Prometheus-only: the dashboard's own drop figures
+do not include native ingest drops, so an operator reading only the dashboard
+will not see this loss.
+
 `ramshield_blocks_total` counts block **decisions issued** — it matches the
 `HELP` text the exporter emits. A block whose kernel (XDP) projection failed
 is still counted here, because the decision was issued; those failures are

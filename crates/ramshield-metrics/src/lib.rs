@@ -51,6 +51,22 @@ pub struct Metrics {
     /// Low-signal events shed at the IPC high-water mark to preserve space
     /// for attack telemetry (status>=400, anomalous fp, >64 KiB).
     pub events_shed: Arc<AtomicU64>,
+    /// Observation events the native capture producer built but could not
+    /// hand to the downstream channel. The native ingest path uses a
+    /// non-blocking send, so a saturated or closed channel drops the event
+    /// rather than stalling the capture thread; this counter is the only
+    /// operator-visible record that it happened.
+    ///
+    /// Scope: **channel rejections only**. A packet that never becomes an
+    /// event — a non-IP frame, a trusted-overlay skip, or one refused by the
+    /// per-second admission budget — is not counted here, because no event
+    /// was built to deliver.
+    pub native_ingest_drops: Arc<AtomicU64>,
+    /// The subset of `native_ingest_drops` caused by the downstream channel
+    /// being **closed** rather than full. A closed channel means the
+    /// detection pipeline is gone, not merely busy — a strictly more serious
+    /// condition, and it is broken out so an operator can tell the two apart.
+    pub native_ingest_drops_disconnected: Arc<AtomicU64>,
     /// Instantaneous bounded ingest-queue occupancy (gauge; written by the
     /// engine snapshot path — see Engine::dashboard_snapshot / get_module_stats).
     pub ingest_channel_depth: Arc<AtomicU64>,
@@ -199,6 +215,8 @@ impl Metrics {
             ipc_rejected_connections: Arc::new(AtomicU64::new(0)),
             frames_rejected: Arc::new(AtomicU64::new(0)),
             events_shed: Arc::new(AtomicU64::new(0)),
+            native_ingest_drops: Arc::new(AtomicU64::new(0)),
+            native_ingest_drops_disconnected: Arc::new(AtomicU64::new(0)),
             ingest_channel_depth: Arc::new(AtomicU64::new(0)),
             active_cidr_blocks: Arc::new(AtomicU64::new(0)),
             batches_total: Arc::new(AtomicU64::new(0)),

@@ -86,6 +86,18 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_native_ingest_drops_total",
+            self.native_ingest_drops.load(Ordering::Relaxed),
+            "Total observation events the native capture producer could not deliver downstream (channel full or closed).",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_ingest_drops_disconnected_total",
+            self.native_ingest_drops_disconnected.load(Ordering::Relaxed),
+            "Subset of native ingest drops caused by the downstream channel being closed rather than full.",
+            "counter"
+        ));
+        out.push_str(&emit!(
             "ramshield_ingest_channel_depth",
             self.ingest_channel_depth.load(Ordering::Relaxed),
             "Current buffered events in the bounded ingest queue.",

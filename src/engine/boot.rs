@@ -623,6 +623,7 @@ pub(crate) async fn boot_pipeline(engine: Arc<Engine>) -> std::io::Result<()> {
             cfg_snapshot.xdp.trusted_overlay_cidrs.clone(),
             event_tx.clone(),
             engine.shutdown.clone(),
+            metrics.clone(),
         )
     {
         return Err(std::io::Error::other(format!(

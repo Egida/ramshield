@@ -65,6 +65,25 @@ impl Metrics {
         self.events_shed.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// The native capture producer could not deliver an observation event
+    /// downstream: the channel was full (backpressure) or closed (the
+    /// detection pipeline is gone).
+    ///
+    /// The native path sends without blocking, so a drop is the intended
+    /// overload policy — but it is only acceptable if it is *visible*. This
+    /// counter is that visibility.
+    pub fn inc_native_ingest_drop(&self, n: u64) {
+        self.native_ingest_drops.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The native capture producer dropped an observation event because the
+    /// downstream channel was **closed**. This is the strictly more serious
+    /// half of `inc_native_ingest_drop`: the pipeline is gone, not busy.
+    pub fn inc_native_ingest_disconnect(&self, n: u64) {
+        self.native_ingest_drops_disconnected
+            .fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Patch A: total bloom capacity in bits (gauge). Written once at
     /// detection construction; `bloom_fp_ppm` is derived from it at render.
     pub fn set_bloom_bits(&self, bits: u64) {
