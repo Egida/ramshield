@@ -23,7 +23,12 @@
         conclusion=$(echo "$result" | head -1 | cut -d'|' -f2)
         if [ "$status" = "completed" ]; then
           echo "$wf_name -> $conclusion"
-          exit 0
+          # A completed run is not a successful run. Exit 0 here and the
+          # quality gate reports a red CI as a pass.
+          if [ "$conclusion" = "success" ]; then
+            exit 0
+          fi
+          exit 1
         fi
       fi
       sleep {{ ci_poll_interval_seconds }}

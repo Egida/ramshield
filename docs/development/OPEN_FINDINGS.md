@@ -41,6 +41,13 @@ are the ones used here.
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 30 of 62 claims fixed, 32 open: `ramshield-config` 1, `ramshield-storage` 8, `ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config and types READMEs are now pinned by tests | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
+| F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
+| F16 | The ansible quality gate reported a red CI run as a pass | P2 | **FIXED** — the role now compares the run's conclusion with `success` and exits 1 otherwise | no |
+| F17 | The dashboard's quarantine table had 5 headers and 6 cells, and its CSV export dropped the Time column | P2 | **FIXED** — the surplus cell is gone and the export takes all five columns | no |
+| F18 | `scripts/attack_nexus.py`'s `stop` command does not stop the flood | P3 | **OPEN** — the command sets a flag the flood thread never polls | no |
+| F19 | Two helper scripts read `config.prod.toml.example`, which does not exist on master | P3 | **OPEN** — one of them reads it and does not use the result | no |
+| F20 | `scripts/network_create.py`'s `dual` family produces IPv4 only | P3 | **OPEN** — the `dual` branch takes the IPv4 path | no |
+| F21 | `scripts/xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check | P3 | **OPEN** — the snapshot request is hardcoded to the default port | no |
 
 ---
 
@@ -561,6 +568,17 @@ is a decision for the owner, not a defect to be patched in the same pass:
 The current README documents the first option, which is what the code
 actually does. The choice of which option to *enforce* is the open part.
 
+**The client-side face of this, in the helper scripts.** Two of the
+repository's own scripts sign frames: `scripts/final_integration.py`
+signs with `sort_keys=True`, and `scripts/auth_e2e.py:43` does not. The
+second is not a live failure - the only payload it signs is
+`{"type": "get_status"}`, one key, so the client's bytes and the
+server's sorted bytes are the same bytes - but it would break the
+moment the script signs a multi-key frame. If the owner picks the
+sorted canonical form, that one line becomes `sort_keys=True`, and
+this finding can be closed as "the contract is documented and the
+clients conform".
+
 ---
 
 ## F11 — Crate README documentation drift
@@ -652,5 +670,176 @@ touches `block_state`.
 of `insert`, and the index update inside the lock. It is not proposed
 here because no live path reaches it, and a fix with no reachable path
 is a change without a failing test to write.
+
+---
+
+## F15 — the Kubernetes DaemonSet asks for a Bidirectional mount propagation it cannot have
+
+**Status:** OPEN (P1) — the manifest is rejected by the API server
+
+**What it is.** `deploy/k8s/daemonset.yaml:93-97` mounts the BPF
+filesystem with `mountPropagation: Bidirectional`, and the file has no
+`privileged: true` anywhere. The container instead drops every
+capability and adds back four (`NET_ADMIN`, `BPF`, `PERFMON`,
+`NET_RAW`), with `allowPrivilegeEscalation: false`.
+
+**Why it fails.** Kubernetes validates the propagation mode against the
+container's `privileged` field, and a bidirectional mount is allowed
+only in a privileged container. The object is rejected at
+`kubectl apply`, before any kubelet or runtime sees it. Adding
+`SYS_ADMIN` to the capability list does not help: the check is on
+`privileged`, not on the capabilities.
+
+**Why the repository does not catch it.** The only manifest check in
+the qualification document is `kubectl apply --dry-run=client -f
+deploy/k8s/`, and a client-side dry run does not run server-side
+validation. No workflow applies these manifests.
+
+**The tension the owner has to settle.** The mount's comment says the
+propagation is there so "BPF pins created by the container are visible
+to the host and other pods". Host-visible pins need a privileged
+container, and privileged undoes the capability minimisation the same
+file does deliberately. The two cannot both hold. The options are
+roughly: run the DaemonSet privileged and require the node to allow it;
+or keep the hardening and give up host-visible pins, which changes what
+the XDP deployment model can do.
+
+**Relation to I-012.** Backlog row I-012 is the capability review of
+this same manifest (`hostNetwork: true` at `daemonset.yaml:21`,
+`NET_ADMIN` at `:41`). This is a distinct, hard-blocking defect in the
+same file, not a duplicate.
+
+---
+
+## F16 — the ansible quality gate reported a red CI run as a pass
+
+**Status:** FIXED (P2) — the role now compares the run's conclusion
+
+**What it was.** `ansible/roles/quality/tasks/main.yml` polls each
+workflow for the pushed SHA and exited 0 as soon as a run was
+*completed*:
+
+    if [ "$status" = "completed" ]; then
+      echo "$wf_name -> $conclusion"
+      exit 0
+    fi
+
+The conclusion was read and echoed, never compared. `ci_failed` was
+then derived from the non-zero exit code, and the only non-zero exit was
+the poll timeout, so a failed workflow produced `rc 0`,
+`ci_failed: false`, and no abort. The failure triage was gated on
+`rc != 0` as well, so it never ran for a failed workflow either - only
+for a timeout.
+
+**What changed.** The block now exits 0 only when the conclusion is
+`success`, and exits 1 otherwise. A failed or cancelled workflow fails
+the gate and runs the triage.
+
+**The check.** `tests/ansible_quality_gate.rs` runs the role's own shell
+block against a stubbed `gh` that reports a given conclusion, and
+asserts the exit code: 0 for `success`, 1 for `failure` and for
+`cancelled`. Against the old role it failed all three.
+
+**Reachability.** The `quality` role is wired into the ansible
+playbooks, but nothing in the repository's CI runs ansible, so this was
+an operator-driven post-push gate, not a release gate. The sibling
+`ansible/playbook-quality-replay.yml` already had the correct check
+(`if [ "$status" != "success" ]`); the role did not.
+
+---
+
+## F17 — the dashboard's quarantine table had five headers and six cells
+
+**Status:** FIXED (P2) — the surplus cell is gone and the export takes every column
+
+**What it was.** `src/dashboard/static/index.html` declares five
+headers (`TARGET IP`, `DETECTION MECHANISM`, `SEVERITY`, `ACTIVE TIER`,
+`TIME LOGGED`) and `loadBlocks` gave every row six cells - the surplus
+was a trailing em dash. The CSV export declared five column names
+(`IP,Module,Severity,Tier,Time`) and sliced four cells out of every
+row, so every exported row silently lost its Time. The two placeholder
+rows disagreed with each other as well: the static one spanned five
+columns and the empty-state one spanned six.
+
+The mismatch came back on every rebuild: the feed is repainted every
+5 s, and every repaint built the rows the same way.
+
+**What changed.** The trailing cell is removed, the empty state spans
+five columns, and the export takes all five.
+
+**The check.** `the_quarantine_table_and_its_csv_export_agree_on_the_column_count`
+counts the table's headers, the cells the row builder produces, the
+columns the CSV declares, the CSV's slice bound and the placeholder
+spans, and asserts they are the same number. Against the old page it
+failed with six cells against five headers.
+
+---
+
+## F18 — `scripts/attack_nexus.py`'s `stop` command does not stop the flood
+
+**Status:** OPEN (P3) — a dev tool, not in CI
+
+**What it is.** The interactive `shell` subcommand's `stop` command sets
+the outer `StopFlag`, but the flood thread polls a different flag: the
+thread is started with a fresh `local_stop`, and `stop.clear()` clears
+the outer one. The `stop` command is therefore a no-op and the flood
+runs to its duration. `quit` has the same problem.
+
+The fix is to pass the outer flag to `run_flood` and drop the local
+one. It is not done here because the script has no test harness and the
+path is the interactive shell, which no workflow or Makefile target
+reaches.
+
+---
+
+## F19 — two helper scripts read a config example that does not exist
+
+**Status:** OPEN (P3) — a dev tool, not in CI
+
+**What it is.** `config.prod.toml.example` was renamed to
+`config.baseline.toml` and then deleted; it is not on master. Two
+scripts still read it:
+
+- `scripts/auth_e2e.py:74` reads it and never uses the result - the
+  config it writes is built from scratch a few lines later. The read is
+  dead code that happens to raise `FileNotFoundError` first.
+- `scripts/final_integration.py:78` reads it and does use it, and its
+  `.replace()` targets (`0.0.0.0:7890`, `0.0.0.0:9999`,
+  `/var/lib/ramshield/wal`) are not the strings the baseline file
+  contains (`127.0.0.1:7890`, `127.0.0.1:9999`, `/tmp/ramshield-wal`),
+  so the script fails whichever file it is pointed at.
+
+The first is a deletion: the dead read goes. The second needs the
+replacement targets corrected against the baseline file.
+
+---
+
+## F20 — `scripts/network_create.py`'s `dual` family produces IPv4 only
+
+**Status:** OPEN (P3) — a library API with no CLI path
+
+**What it is.** `build_plan` picks the IPv4 branch when
+`family != "v6"`, so `dual` is identical to `v4`: it emits no IPv6
+networks at all. The sibling generator `scripts/unique_network_generator.py`
+handles `dual` correctly, which is what makes this one an outlier.
+
+The CLI never asks for `dual` - `main()` always passes `v4` - and the
+existing test only exercises `v4`. A single `prefixlen` parameter also
+cannot express "a /24 and a /64", so `dual` has no coherent meaning in
+this signature.
+
+---
+
+## F21 — `scripts/xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check
+
+**Status:** OPEN (P3) — a local dev script, needs root and netns
+
+**What it is.** `--dashboard` is parsed and stored, and it is used for
+the counters, but the pre-flight snapshot request is hardcoded to
+`http://127.0.0.1:9999/api/snapshot`. With any other dashboard URL the
+pre-flight raises an uncaught `URLError` instead of printing the
+intended `FAIL: xdp_active=false`.
+
+The fix is one line: build the request from the parsed URL.
 
 ---

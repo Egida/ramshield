@@ -591,6 +591,123 @@ mod tests {
         );
     }
 
+    /// The quarantine table's headers, the cells each row gets, the CSV
+    /// export's columns and its slice bound must all agree.
+    ///
+    /// They did not: the table had 5 headers and 6 cells (the surplus was a
+    /// trailing em dash), and the CSV declared 5 column names but sliced 4
+    /// cells out of every row, so every exported row silently lost its
+    /// Time. The mismatch came back on every 5 s rebuild.
+    #[test]
+    fn the_quarantine_table_and_its_csv_export_agree_on_the_column_count() {
+        let page = include_str!("static/index.html");
+
+        // The header cells of the quarantine table (the page has more than
+        // one table, so scope to the quarantine one).
+        let table = page
+            .split("id=\"quarantineTable\"")
+            .nth(1)
+            .expect("the quarantine table must exist");
+        let head_section = &table[..table.find("</thead>").expect("the table must have a head")];
+        let head = head_section.matches("<th>").count();
+        assert_eq!(
+            head, 5,
+            "the quarantine table's header count changed: {head}"
+        );
+
+        // The cells each row gets: the value list loadBlocks builds.
+        let values = page
+            .split("for(const v of [")
+            .nth(1)
+            .expect("loadBlocks must build rows from a value list");
+        let values = &values[..values.find(']').expect("the value list must end")];
+        assert_eq!(
+            count_top_level_items(values),
+            head,
+            "the quarantine table builds a different number of cells than it has headers"
+        );
+
+        // The CSV export: the names it declares and the cells it takes.
+        let csv = page
+            .split("let csv=")
+            .nth(1)
+            .expect("exportCSV must declare a CSV header");
+        let csv = &csv[..csv.find(';').expect("the CSV header must end")];
+        let names = csv.trim_matches('\'').trim_matches('"');
+        assert_eq!(
+            names.split(',').count(),
+            head,
+            "the CSV export declares a different number of columns than the table has"
+        );
+
+        let export = page
+            .split("function exportCSV()")
+            .nth(1)
+            .expect("exportCSV must exist");
+        let slice = export
+            .split("slice(0,")
+            .nth(1)
+            .expect("exportCSV must slice the row's cells");
+        let bound: usize = slice
+            .split(')')
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or_else(|| panic!("the CSV slice bound is not a number: {slice}"));
+        assert_eq!(
+            bound, head,
+            "the CSV export takes {bound} cells of a {head}-column row"
+        );
+
+        // The placeholder rows must span the same number of columns.
+        for span in ["colspan=\"", "colSpan="] {
+            let mut rest = page;
+            while let Some(i) = rest.find(span) {
+                let after = &rest[i + span.len()..];
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    let n: usize = digits.parse().unwrap();
+                    assert_eq!(
+                        n, head,
+                        "a quarantine placeholder row spans {n} columns, the table has {head}"
+                    );
+                }
+                rest = &rest[i + span.len()..];
+            }
+        }
+    }
+
+    /// The number of items in a JavaScript array literal, ignoring the
+    /// commas that sit inside a nested call or a quoted string.
+    fn count_top_level_items(list: &str) -> usize {
+        let list = list.trim();
+        if list.is_empty() {
+            return 0;
+        }
+        let mut depth = 0usize;
+        let mut items = 1usize;
+        let mut in_str = false;
+        let mut quote = ' ';
+        for c in list.chars() {
+            if in_str {
+                if c == quote {
+                    in_str = false;
+                }
+                continue;
+            }
+            match c {
+                '\'' | '"' | '`' => {
+                    in_str = true;
+                    quote = c;
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => items += 1,
+                _ => {}
+            }
+        }
+        items
+    }
+
     fn test_app_state() -> AppState {
         use crate::metrics::Metrics;
         use crate::storage::Store;

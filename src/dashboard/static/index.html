@@ -480,8 +480,8 @@
   }
   async function loadBlocks(){
     const body=$('quarantineBody'); try { let r=await fetch('/api/blocks/active'); if(!r.ok)r=await fetch('/api/history/blocks'); if(!r.ok)throw Error('blocks '+r.status); const data=(await r.json()||[]).slice().reverse().slice(0,50); body.replaceChildren();
-      if(!data.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=6;cell.textContent='Zero active threat quarantines.';row.appendChild(cell);body.appendChild(row);return;}
-      for(const b of data){const row=document.createElement('tr');for(const v of [b.ip,b.module||'enforcement','CRITICAL','Tier 3 (XDP)',new Date(b.ts_ms).toLocaleTimeString(),'—']){const cell=document.createElement('td');cell.textContent=v;row.appendChild(cell)}body.appendChild(row)}
+      if(!data.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=5;cell.textContent='Zero active threat quarantines.';row.appendChild(cell);body.appendChild(row);return;}
+      for(const b of data){const row=document.createElement('tr');for(const v of [b.ip,b.module||'enforcement','CRITICAL','Tier 3 (XDP)',new Date(b.ts_ms).toLocaleTimeString()]){const cell=document.createElement('td');cell.textContent=v;row.appendChild(cell)}body.appendChild(row)}
       filterTable();
     } catch(e){console.error('quarantine feed:',e)}
   }
@@ -592,7 +592,7 @@
       return '"'+value.replace(/"/g,'""')+'"';
     };
     let csv='IP,Module,Severity,Tier,Time\n';
-    rows.forEach(r=>{const cells=r.querySelectorAll('td');if(cells.length>=4)csv+=Array.from(cells).slice(0,4).map(c=>csvSafe(c.textContent.trim())).join(',')+'\n';});
+    rows.forEach(r=>{const cells=r.querySelectorAll('td');if(cells.length>=5)csv+=Array.from(cells).slice(0,5).map(c=>csvSafe(c.textContent.trim())).join(',')+'\n';});
     const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='quarantine.csv';a.click();
   }
   refresh(); connectStream();
