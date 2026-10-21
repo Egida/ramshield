@@ -36,7 +36,7 @@ are the ones used here.
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED in PR #39** (`fix/f9-enforcement-lost-update`) — the store has two block-only mutators under one shard lock; not yet merged | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — the sweep is on `master` (`f900664`); the operator-facing claims are fixed, the rest are listed per claim in `docs/development/DOC_DRIFT_SWEEP.md` | no — per-file documentation edits |
+| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — 32 of 53 claims fixed (`ramshield-types`, `ramshield-forecasting`, `ramshield-xdp`, `ramshield-config`); 21 remain in `ramshield-storage` (8), `ramshield-metrics` (7), `ramshield-analytics` (6), listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 
 ---
