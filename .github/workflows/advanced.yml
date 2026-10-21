@@ -39,18 +39,10 @@ jobs:
       - run: cargo build --all-targets --verbose
       - run: cargo test --all-targets --verbose
 
-  test-multi:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --all-targets
-      - run: cargo test --all-targets
+  # ponytail: Linux only. RamShield is an eBPF/XDP ingress daemon, so a
+  # macOS or Windows build proves nothing about the product; the jobs only
+  # ever reported failures nobody was going to fix. Add a non-Linux runner
+  # back when the product supports it.
 
   audit:
     name: Security Audit

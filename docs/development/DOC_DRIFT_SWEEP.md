@@ -1,22 +1,31 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. 32 of the 53 claims are fixed; 21
-remain, in 3 crate READMEs (`ramshield-storage` 8, `ramshield-metrics` 7,
-`ramshield-analytics` 6). This is the result of a read-only
+**Status:** OPEN, partially worked. **62 claims: 17 fixed, 45 open.** The
+open ones are spread over six crate READMEs: `ramshield-types` 13,
+`ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8,
+`ramshield-analytics` 6, `ramshield-xdp` 2. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
-`bf01372` (origin/master = `bd417cd`).
+`bf01372` (origin/master was `bd417cd` at the time of the sweep).
 
-**Fixed since this file was written:** the `ramshield-types`,
-`ramshield-forecasting`, `ramshield-xdp` and `ramshield-config` READMEs.
-The config crate's eleven claims (F9 to F19) are corrected and, unlike the
-rest, the template is now pinned by a test:
+**Fixed since this file was written:** the `ramshield-config` README, all
+eleven of its claims (F9 to F19), and four of the five `ramshield-xdp`
+claims (F26, F27, F28, F30). The config template is also pinned by a test:
 `crates/ramshield-config/tests/readme_template.rs` loads the ```toml
 block straight out of the README through `Config::from_toml_file`, which
 parses and validates it. The old template failed that test - the phantom
-`[l7.rule]` section is a TOML parse error. The other three crates are
-corrected in prose only; a template test per crate is the natural next
-step, one crate at a time.
+`[l7.rule]` section is a TOML parse error.
+
+**An earlier version of this header was wrong, and said so.** It credited
+the whole `ramshield-types`, `ramshield-forecasting`, `ramshield-xdp` and
+`ramshield-config` READMEs as fixed, and counted 32 fixed / 21 open. A
+re-verification of every claim against `origin/master` found that only
+**17** were actually corrected: one of the seven types claims (F6) and one
+of the nine forecasting claims (F31). The other fifteen of those claims
+are still open, and they are listed below like any other. The lesson is
+the one this file keeps needing: a fixed README is not a fixed claim, and
+a count written by hand is a claim about the code that rots the moment
+the code moves.
 
 **Method.** Every claim was checked against the source by `git show`,
 `grep -n` / `grep -rn` for callers, and `cat -n` for exact lines. No
@@ -75,7 +84,7 @@ counts its own tests is not.
 
 # I-025 claim audit — RamShield
 
-Audited tree: `/home/m/.cache/rs-master`, branch `fix/i-013-synproxy-fixture-parity`, HEAD `bf01372` (origin/master = `bd417cd`). Read-only; no builds/tests run. Test counts below are static `#[test]` marker counts, not run results.
+Audited tree: `/home/m/.cache/rs-master`, branch `fix/i-013-synproxy-fixture-parity`, HEAD `bf01372` (origin/master was `bd417cd` at the time). Read-only; no builds/tests run. Test counts below are static `#[test]` marker counts, not run results.
 
 Method: `git show`/file reads on the audited tree, `grep -n`/`grep -rn` for callers, `cat -n` for exact lines. Every finding cites the command output I actually got.
 
@@ -143,56 +152,100 @@ Code: grep `BlockReason` in `crates/ramshield-forecasting/src` → no hits. Vari
 
 **F9 (MEDIUM)** `crates/ramshield-config/README.md:73-86` — template keys `window_seconds`, `batch_window_seconds`, `batch_threshold_rps`, `event_threshold_rps` do not exist. Code (`src/sections/detection.rs:4-92`): `rate_window_secs`, `batch_window_ms`, `subnet_batch_threshold`, `subnet_batch_min_events`; no event-threshold concept at all.
 
+**Status: FIXED.** The template's detection keys were `window_seconds`,
+`batch_window_seconds`, `batch_threshold_rps` and `event_threshold_rps`;
+none of them exists. The template now uses the real ones
+(`rate_window_secs`, `batch_window_ms`, `subnet_batch_threshold`,
+`subnet_batch_min_events`, `promote_min_events`, `pulse_window_secs`,
+`pulse_threshold_samples`) and the `l7_*` names the code reads.
+
 **F10 (MEDIUM)** `crates/ramshield-config/README.md:88-94`
 > `[l7.rule]` / `cost_weight`, `baseline_latency_us`, `rps_threshold`, `http2_min_streams`, `http2_reset_ratio_pct`, `block_ttl_secs`
 
-Code: `src/lib.rs:32-57` — no top-level `l7` section; L7 lives under `detection` (`detection.rs:77-92` `l7_*` scalars, `l7_rules: Vec<L7Rule>`), and `L7Rule` (`detection.rs:96-115`) has `route_hash, method, max_rps, max_latency_us, cost_weight, baseline_latency_us, max_effective_rps` — no `rps_threshold`/`http2_min_streams`/`http2_reset_ratio_pct`/`block_ttl_secs`, and `route_hash` is required (non-zero, `validate.rs:102-104`), so the template cannot load.
+Code: `src/lib.rs:32-57` — no top-level `l7` section; L7 lives under `detection` (`detection.rs:77-92` `l7_*` scalars, `l7_rules: Vec<L7Rule>`), and `L7Rule` (`detection.rs:96-115`) has `route_hash, method, max_rps, max_latency_us, cost_weight, baseline_latency_us, max_effective_rps` — no `rp
+
+s_threshold`/`http2_min_streams`/`http2_reset_ratio_pct`/`block_ttl_secs`, and `route_hash` is required (non-zero, `validate.rs:102-104`), so the template cannot load.
+
+**Status: FIXED.** `[l7.rule]` is not a section. L7 is `detection.l7_rules`, an array
+of tables, and `L7Rule` requires `route_hash`, `cost_weight` and
+`baseline_latency_us`. The template now shows the commented
+`[[detection.l7_rules]]` shape.
 
 **F11 (MEDIUM)** `crates/ramshield-config/README.md:117`
-> `durability = "hard"`
+> `durabil
+
+ity = "hard"`
 
 Code: `src/error.rs:73-80` — `Durability { None, Flush, Fsync, GroupCommit }`, serde default naming → valid tokens are `None|Flush|Fsync|GroupCommit`.
+
+**Status: FIXED.** `durability = "hard"` is not a value. The enum is
+`None | Flush | Fsync | GroupCommit`, and `GroupCommit` is the default.
 
 **F12 (MEDIUM)** `crates/ramshield-config/README.md:103` and `:122`
 > `[ipc] listen_addr` / `[dashboard] listen_addr`
 
 Code: `src/sections/ipc.rs:5` `tcp_addr`; `src/sections/dashboard.rs:9` `http_addr`.
 
+**Status: FIXED.** `[ipc] listen_addr` is `tcp_addr`, `[dashboard] listen_addr` is
+`http_addr`.
+
 **F13 (MEDIUM)** `crates/ramshield-config/README.md:126`
 > `[mesh] node_id = "default"`
 
-Code: `src/sections/security.rs:161` `node_id: u32` → string value is a parse error.
+Co
+
+de: `src/sections/security.rs:161` `node_id: u32` → string value is a parse error.
+
+**Status: FIXED.** `mesh.node_id` is a `u32`, not the string `"default"`.
 
 **F14 (MEDIUM)** `crates/ramshield-config/README.md:110-111`
 > `[forecasting]` / `enabled = true`
 
 Code: `src/sections/forecasting.rs:4-11` — every field (`ewma_alpha, hw_beta, hw_gamma, seasonality_period, anomaly_zscore, min_entropy`) lacks `#[serde(default)]`; a present-but-partial `[forecasting]` table fails to deserialize.
 
+**Status: FIXED.** `[forecasting]` has an `enabled` field, but none of its fields has
+a `serde(default)`, so all seven must be present once the section
+appears. The old template's two-line section would not have loaded
+at all.
+
 **F15 (MEDIUM)** `crates/ramshield-config/README.md:26`
 > `RAMSHIELD_L7_RULE__COST_WEIGHT=8.0`
 
 Code: `src/env.rs` env-var list has `RAMSHIELD_DETECTION__L7_*` only; no `RAMSHIELD_L7_RULE__*` handler exists.
 
-**F16 (MEDIUM)** `crates/ramshield-config/README.md:33-38` — validation list wrong. Code `src/validate.rs`: no event-threshold comparison (no such field), no XDP-interface-name length check, no "placeholder value" rejection (only `key_id:hex` shape/hex-charset/≥32-char/dup-id, `validate.rs:403-434`), and public dashboard bind requires `dashboard.tls_enabled=true` **assertion** + `admin_password_hash` (`validate.rs:366-380`) — not "HTTPS" enforcement; `exposure_warnings()` (`validate.rs:443-475`) states the stack has no TLS.
+**Status: FIXED.** `RAMSHIELD_L7_RULE__COST_WEIGHT` does not exist. The environment
+variable for an L7 setting is `RAMSHIELD_DETECTION__L7_ENABLED`.
+
+**F16 (MEDIUM)** `crates/ramshield-config/README.md:33-38` — validation list wrong. Code `src/valida
+
+te.rs`: no event-threshold comparison (no such field), no XDP-interface-name length check, no "placeholder value" rejection (only `key_id:hex` shape/hex-charset/≥32-char/dup-id, `validate.rs:403-434`), and public dashboard bind requires `dashboard.tls_enabled=true` **assertion** + `admin_password_hash` (`validate.rs:366-380`) — not "HTTPS" enforcement; `exposure_warnings()` (`validate.rs:443-475`) states the stack has no TLS.
+
+**Status: FIXED.** The validation list was wrong in every entry: there is no
+"batch thresholds > event thresholds" rule, no "XDP interface name
+length >= 2" rule and no placeholder-HMAC rule. The README now lists
+the checks `src/validate.rs` actually enforces.
 
 **F17 (MEDIUM)** `crates/ramshield-config/README.md:43-45` and `:175`
 > `let cfg = handle.get();` / `handle.set(new_config);` / `Config::load(".")`
 
 Code: `src/lib.rs:20` `pub type ConfigHandle = Arc<ArcSwap<Config>>;` — `ArcSwap` exposes `load`/`store`, not `get`/`set`; `src/lib.rs:74` `load(path)` reads a **file** (a directory path fails).
 
+**Status: FIXED.** `ConfigHandle` is an `Arc<ArcSwap<Config>>`, so it is `load()` and
+`store()`, not `get()` and `set()`; and `Config::load` takes the path
+of a file, not a directory.
+
 **F18 (MEDIUM)** `crates/ramshield-config/README.md:212`
 > "No internal workspace crate dependencies"
 
 Code: `crates/ramshield-config/Cargo.toml:8` → `ramshield-types = { path = "../ramshield-types" }`.
 
+**Status: FIXED.** The crate does depend on a workspace crate: `ramshield-types`, for
+`Durability` and `HttpMethod`.
+
 **F19 (MEDIUM)** `crates/ramshield-config/README.md:215`
 > "75 fuzz tests in `tests/fuzz.rs`"
 
 Code: `grep -c '#\[test\]' crates/ramshield-config/tests/fuzz.rs` → **4** (2 proptest + 2 unit).
-
-**Status: FIXED.** All eleven config claims (F9 to F19) are corrected in
-`crates/ramshield-config/README.md`, and the template is now guarded by a
-test instead of by prose.
 
 What changed, and against what:
 
@@ -239,6 +292,8 @@ passes, so the drift cannot come back unnoticed.
 
 ## Sub-claim 4 — analytics / Welford
 
+**Status: FIXED.** There are 4 property-based tests in `tests/fuzz.rs`, not 75.
+
 **F20 (MEDIUM)** `crates/ramshield-analytics/README.md:5` and `:30`
 > "replaces unbounded `HashSet<IpAddr>` detection" / "replace unbounded `HashSet<IpAddr>` in the detection pipeline"
 
@@ -282,8 +337,9 @@ Code: `crates/ramshield-xdp/build.rs:24-31,35-55,57-99` — `bpf-linker` + `carg
 (`ramshield-xdp-bpf/src/main.rs`, built with `aya-ebpf`), and that the
 build needs `bpf-linker` and the `bpfel-unknown-none` target — not
 `clang` and `llvm-strip`, and with no strip step. `build.rs` looks for
-`bpf-linker` on `PATH` and in `~/.local/bin`, and skips the BPF build
-with a warning when it finds neither.
+`bpf-linker` on `PATH` and in `~/.local/bin`; when it finds neither, the
+build **fails** - `build.rs` panics with the install step and writes no
+placeholder ELF.
 
 **F27 (MEDIUM)** `crates/ramshield-xdp/README.md:35`
 > "The enforcement crate also defines the BPF map types (`BlocklistKey`, `BlocklistValue`)"
@@ -447,3 +503,38 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 - Bench-filter names in `benches/hot_paths.rs` (README `store_insert`/`store_lookup`/`subnet_key`, `ip_network_pack`, `bounded_vec_deque`).
 - Whether `Config::load()` already applies env overrides (README API example applies them again).
 - Whether detection and forecasting share one enforcement channel (`src/engine/` channel wiring).
+
+**F55 (P1)** `crates/ramshield-types/README.md:155-161`
+> `pub enum Durability { NoSync, Fsync, Fdatasync }` and "Controls how `Wal::append()` syncs to disk. `NoSync` for benchmarking, `Fdatasync` for production, `Fsync` for financial environments."
+
+Code: `crates/ramshield-types/src/error.rs:73-80` — the enum is `None | Flush | Fsync | GroupCommit`, with `GroupCommit` the `#[default]`. `NoSync` and `Fdatasync` are not variants, so an operator who copies them into `wal.durability` gets a config parse error - and the config crate's README, which was corrected, now names the real tokens, so the two READMEs contradict each other.
+
+Replacement: `pub enum Durability { None, Flush, Fsync, GroupCommit }` and "Controls how `Wal::append()` syncs to disk. `None` for benchmarking, `Flush` for production, `Fsync` where every block must survive power loss, `GroupCommit` (the default) for group-committed `fsync`."
+
+**F56 (P2)** `crates/ramshield-types/README.md:131-140` — the `RsError` variant list.
+
+Code: `crates/ramshield-types/src/error.rs` — the real variants are `NotFound(String)`, `CapacityExceeded { limit_mb }`, `Serde(String)`, `Io(std::io::Error)`, `CorruptWal { offset }` and `RecordTooLarge { size, max }`.
+
+**F57 (P2)** `crates/ramshield-types/README.md:49-60` — the `EnforceCommand` field list.
+
+Code: `crates/ramshield-types/src/command.rs:23-39` — the real fields are `decision_id: Uuid`, `policy_version: u64`, `source: String`, `actor: String`, `timestamp_utc: i64`, `ttl_seconds: u64`, `reason: String`, `ip: IpAddr`, `cidr: Option<IpNetwork>`, `action: EnforceAction`, `evidence_source: EvidenceSource`. There is no `id` and no `source_ip`/`source_port`, and `reason` is a `String`.
+
+**F58 (P2)** `crates/ramshield-types/README.md:77-83` — the `EnforceResult` field list.
+
+Code: `crates/ramshield-types/src/command.rs:48-56` — the real fields are `decision_id: Uuid`, `committed: bool`, `applied: bool`, `wal_lsn: Option<u64>`, `xdp_applied: bool`, `error: Option<String>`.
+
+**F59 (P2)** `crates/ramshield-types/README.md:30-36` — the `ConnectionEvent` field list.
+
+Code: `crates/ramshield-types/src/events.rs:65-75` — the real fields are `ip: IpAddr`, `timestamp_ns: u64`, `bytes: u64`, `status_code: u16`, `proto_fingerprint: u32`, `l7: Option<L7Metadata>`.
+
+**F60 (P2)** `crates/ramshield-types/README.md:142-149` — the `EnforcementError` variant list.
+
+Code: `crates/ramshield-types/src/command.rs:58-69` — the real variants are `Wal(String)`, `Storage(String)`, `Xdp(String)`, `Duplicate(Uuid)` and `InvalidCommand(String)`. There is no `AlreadyProcessed` and no `Deduplicated`.
+
+**F61 (P3)** `crates/ramshield-types/README.md:121-124` — the `BoundedVecDeque` field list.
+
+Code: the real struct has a public `cap: usize` and a private `inner`.
+
+**F62 (P2)** `crates/ramshield-xdp/README.md:7` — the claim that the BPF build degrades gracefully.
+
+Code: `crates/ramshield-xdp/build.rs:26-31` — `build.rs` **panics** when `bpf-linker` is missing ("XDP BPF build failed: bpf-linker missing ... No placeholder ELF is written."). The README must not promise a soft skip the build does not do.

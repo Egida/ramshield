@@ -4,7 +4,9 @@ The durable task list for the issues that still need implementation. Every
 entry states the current status, the required fix, and the closure criterion,
 so a later pass can pick it up without re-deriving the intent.
 
-**Three numbering namespaces.** The **roadmap's** `F-01..F-08`
+**Linux only.** RamShield is an eBPF/XDP ingress daemon and targets Linux. The macOS and Windows CI jobs were removed, and with them the F13 finding that the workspace does not compile for Windows - it was a demand for support nobody asked for, not a defect.
+
+**Four numbering namespaces.** The **roadmap's** `F-01..F-08`
 (`/home/m/Downloads/ramshield-remediation-roadmap-v1.2.md`) and the **21
 October audit's** `F1..F8`
 (`/home/m/Downloads/ramshield_master_audit_2026-10-21.md`) are different
@@ -25,18 +27,18 @@ are the ones used here.
 
 | ID | Finding | Severity | Status | Owner decision needed |
 |---|---|---|---|---|
-| F5 | Unauthenticated local control plane (IPC + dashboard) | P1 on `e5caac1` | **CLOSED** — `b1a9e9e` | no |
+| F5 | Unauthenticated local control plane (IPC + dashboard), as of `e5caac1` | P1 | **CLOSED** — `b1a9e9e` | no |
 | F3 | Native ingest drops invisible | P2 | **CLOSED** — `60ce0f1` | no |
 | F4 | XDP LRU eviction residual not stated | P3 (doc) | **CLOSED** — `79f4eac` | no |
 | **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — `d1f4a81`, see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
-| **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | no — the three options are recorded below |
+| **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | yes — retain the representation, change it, or use a separate mechanism |
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
-| F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 | rule |
+| F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
-| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED in PR #39** (`fix/f9-enforcement-lost-update`) — the store has two block-only mutators under one shard lock; not yet merged | no — the fix shape is mechanical, but it touches the block write path |
+| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — the fix is on `fix/f9-enforcement-lost-update-v2` (PR #43): the store has two block-only mutators under one shard lock, each touching only `block_state`. PR #39 was closed unmerged. Not on master yet | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — 32 of 53 claims fixed (`ramshield-types`, `ramshield-forecasting`, `ramshield-xdp`, `ramshield-config`); 21 remain in `ramshield-storage` (8), `ramshield-metrics` (7), `ramshield-analytics` (6), listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
+| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 17 of 62 claims fixed, 45 open: `ramshield-types` 13, `ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 
 ---
@@ -119,11 +121,7 @@ has passing C/Rust regression tests plus independent review.
 - **Do not count draft PR `#32` as resolved** merely because its title
   describes the intended fix. It is a draft, and its own description says it
   has not been locally compiled or tested in that orchestration pass.
-- The shape of the tri-state result is a **published C ABI change**. It needs
-  an owner compatibility decision before the ABI shape is committed — this is
-  the one place where the review flagged a decision that is genuinely the
-  owner's to make, not a mechanical choice.
-- The Rust implementation in `crates/ramshield-cgnat/src/shm.rs` is a separate
+- - The Rust implementation in `crates/ramshield-cgnat/src/shm.rs` is a separate
   implementation and was **not** verified by the review. Inspect it
   independently; do not assume the defect is present or absent there.
 - The `shm-abi` gate in the local 14-gate runner and the C ABI/stress checks
@@ -256,6 +254,67 @@ the configured subsystem is functioning.
 
 ---
 
+## F3 — Native ingest drops were invisible
+
+**Status:** CLOSED — `60ce0f1`, "the native capture path must not lose
+observation events silently".
+
+**The defect.** The native capture path sends without blocking, so a
+saturated or closed channel drops the event rather than stalling the
+capture thread - the correct overload policy for a real-time ingest path.
+But the result was discarded (`let _ = tx.try_send(ev);`), so no counter
+moved. A repo-wide search showed `Metrics::inc_shed` was never called
+anywhere, so the pre-existing `ramshield_events_shed_total` was
+permanently 0 as well. Under a flood - the exact condition the design is
+built for - the operator could not tell that observation events were
+being lost.
+
+**The fix.** Producer-side drop counters, and the
+`ramshield_native_ingest_drops_total` metric wired to them. The report
+is `docs/development/NATIVE_INGEST_DROPS_FIXES.md`; the review is
+`docs/development/NATIVE_INGEST_DROPS_REVIEW.md`.
+
+## F4 — The XDP LRU eviction residual was not stated
+
+**Status:** CLOSED — `79f4eac`, "verify the 21 Oct master audit, and state
+the LRU eviction residual".
+
+**The defect.** The 21 October audit's finding F4 is an accepted design
+trade-off: the XDP dataplane evicts by LRU under memory pressure. The
+only actionable residue was wording - the behaviour was real and correct,
+but nothing in the repository said so, so a reader of the code could
+reasonably conclude the opposite.
+
+**The fix.** The behaviour is stated where the eviction happens and in the
+documentation that describes the dataplane. The review is
+`docs/development/MASTER_AUDIT_2026_10_21_REVIEW.md`.
+
+## F5 — The local control plane was unauthenticated
+
+**Status:** CLOSED — `b1a9e9e`, "the control plane requires a verified
+principal for mutations".
+
+**The defect.** The IPC was unauthenticated by default, and the exposure
+was a *write*, not a read. With the default configuration
+(`ipc.auth_keys` empty, `ipc.require_auth` false), `parse_frame` accepted
+a frame carrying no auth envelope and returned `principal = None`;
+`process_request` then skipped the role table entirely and the actor fell
+back to a hard-coded "admin". A local process could therefore issue
+`unblock_ip` and remove an active mitigation from a customer under
+attack. The behavioural proof, taken before the fix, is the server's own
+answer:
+
+```
+{"type":"ok","message":"unblock queued for 203.0.113.7"}
+```
+
+The bind defaults to `127.0.0.1:7890` and `validate()` refuses a public
+bind without HMAC keys, so the surface was loopback-only - but loopback
+is not a boundary between mutually untrusted local processes.
+
+**The fix.** A mutation requires a verified principal with a role. The
+report is `docs/development/MASTER_SCAN_FIXES.md`.
+
 ## F6 — `BACKLOG.md` is not a reliable master release ledger
 
 **Status:** CLOSED (P2, documentation) — the owner lifted the standing fence
@@ -270,8 +329,9 @@ master that the file never mentioned. It also found that the fence's
 designated successor file, `docs/development/AUDIT_FINDINGS_BACKLOG.md`,
 did not exist on master at all — it existed only on the parked mesh branch.
 
-**What was done:** the audit-branch material moved verbatim into the new
-`docs/development/AUDIT_FINDINGS_BACKLOG.md` (verified byte-identical);
+**What was done:** the audit-branch material moved into the new
+`docs/development/AUDIT_FINDINGS_BACKLOG.md` under a new history header (the
+status tables stayed in `BACKLOG.md`, so the two files are not byte-identical);
 `BACKLOG.md` was re-pointed at `master` and the assessed SHA; all 33 rows
 were re-stamped — 4 as `CLOSED (commit)`, 3 as `PASS (exact SHA)` on the
 current SHA with the evidence named, the rest as `PASS (historical)` or
@@ -281,26 +341,24 @@ bound to a SHA with the note that it has never been satisfied on any
 single SHA.
 
 **One review claim was corrected before it was written down.** The review
-stated that the parked branch `f75abb5` "contains no
+stated that the parked branch `feature/mesh-f01-hmac-edge-secrets` (unpublished) "contains no
 `crates/ramshield-mesh` source change". That is wrong: the branch carries
 625 changed lines in `crates/ramshield-mesh/src/transport.rs` plus test
 changes. The conclusion the reviewer drew — that none of it is on master —
 is correct, because a diff against master shows the branch is behind
 master. The prose in `BACKLOG.md` states the accurate version.
 
-The checked-in header still describes `audit-branch` as the target branch and
-cites three superseded SHAs. PASS rows are pinned to a SHA that is no longer
-master, so the file is useful as historical task context but unsafe as the
-sole answer to "what is proven on current master?".
+**The report's original finding, for the record:** the checked-in header
+described `audit-branch` as the target branch and cited three superseded
+SHAs, and PASS rows were pinned to a SHA that was no longer master, so the
+file was useful as historical task context but unsafe as the sole answer to
+"what is proven on current master?".
 
-**Required fix:** re-point the header at `master` and the current exact SHA;
-split the historical `audit-branch` notes into a clearly labelled appendix;
-re-stamp every current PASS row with its exact SHA and workflow URLs.
-
-**Not started:** a standing rule fences this file — it must not be
-overwritten, and `docs/development/AUDIT_FINDINGS_BACKLOG.md` is the separate
-home for new work. This entry needs that fence lifted before it can be
-actioned.
+**Required fix — done:** re-point the header at `master` and the current
+exact SHA; split the historical `audit-branch` notes into a clearly labelled
+appendix; re-stamp every current PASS row with its exact SHA and workflow
+URLs. The standing fence was lifted by the owner on 2026-10-21, and
+`docs/development/AUDIT_FINDINGS_BACKLOG.md` is now the home for new work.
 
 ---
 
@@ -331,7 +389,7 @@ quality and recovery behaviour; and repeated runs with raw output. Keep
 sub-20ns microbenchmark language out of public claims unless a reproducible
 benchmark supports it on the actual implementation and target machine.
 
-**Not started:** the audit's claim that PR `#34` is a draft describing 50 MB
+**Open question, now checkable:** the audit's claim that PR `#34` is a draft describing 50 MB
 as a target was **UNVERIFIED** by the review (a remote-only artifact). The
 reviewer did not contradict it but did not confirm it.
 
@@ -339,8 +397,9 @@ reviewer did not contradict it but did not confirm it.
 
 ## F9 — Enforcement's block path is a lost update against detection
 
-**Status:** OPEN (P1) — found while re-verifying backlog row I-011, and
-**not** what that row describes. No code change has been made.
+**Status:** OPEN (P1) — the fix is on `fix/f9-enforcement-lost-update-v2`
+(PR #43), not on master. Found while re-verifying backlog row I-011, and
+**not** what that row describes.
 
 **Where it came from.** Backlog row I-011 asks whether "cardinality-driven
 LRU eviction" can erase an attacker's CUSUM/pulse-wave history. Its premise
@@ -383,14 +442,12 @@ contract already says the mutation must not touch `block_state`
 It must also not resurrect a *clean* record for an IP that is still
 blocked, which is what the expired-record default does today.
 
-**Required test.** A test that races a detection `update_ip` against the
-block path and asserts the stat fields are not rolled back. It must fail on
-the current code.
-
-**Not started, and not a quick fix.** This touches the block write path and
-its XDP projection ordering, so it is a medium-risk change, not a bounded
-one-file fix. It is recorded here rather than patched in the same pass as
-the I-013/I-020/I-024 closures.
+**Required test — met.** A test that races a detection `update_ip` against
+the block path and asserts the stat fields are not rolled back. Five tests
+in the storage crate pin it, including the property test
+(`a_block_never_makes_the_detection_counters_go_backwards`), which was
+proven load-bearing: reimplementing `block_ip` as the old `get()` +
+`insert()` makes it fail.
 
 **A second, related observation** (policy, not a defect): an IP refused by
 the RAM budget is dropped from detection entirely
@@ -443,12 +500,30 @@ serialisation of the frame without its `auth` object. `docs/IPC.md:125`
 happens to do this (`json.dumps(req, separators=(',',':'), sort_keys=True)`),
 which is why the repo's own example works — and why the bug went unnoticed.
 
-**Why nothing caught it.** No test in the tree signs a multi-key frame
-through the server. `src/ipc/server/tests/mod.rs` uses a single-key payload
-(`{"type":"get_status"}`), where sort order cannot differ, so the test
-passes either way and pins nothing.
+**Why nothing caught it, at the time.** Before `f900664` no test in the tree
+signed a multi-key frame through the server. `src/ipc/server/tests/mod.rs`
+used a single-key payload (`{"type":"get_status"}`), where sort order
+cannot differ, so the test passed either way and pinned nothing.
 `crates/ramshield-protocol/tests/replay.rs` calls `auth::verify` directly,
 bypassing the server's re-serialisation entirely.
+
+**What catches it now.** `src/ipc/server/tests/mod.rs` carries
+`verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes`, which
+signs a multi-key frame and asserts a client-order signature is rejected.
+
+**The client-side face.** `scripts/auth_e2e.py:43` signs with
+`json.dumps(body, separators=(",", ":"), ensure_ascii=False)`, which keeps
+the dict's insertion order, while the server re-serialises a sorted map. The
+script only ever signs a one-key payload, so it does not fail today - but any
+second key in a different order would. `scripts/final_integration.py:37`
+already passes `sort_keys=True`, so the two runners disagree with each other
+today.
+
+That is the concrete cost of the decision: if the owner picks "keep the
+server's sorted canonicalisation", the fix is one argument in
+`scripts/auth_e2e.py` and the contract is documented. If the owner picks
+`preserve_order`, the server changes instead. Until then this finding stays
+open - it is one decision, not two.
 
 **What was done about it.** The README now states the real rule
 (`crates/ramshield-protocol/README.md`), a guard test
@@ -476,9 +551,36 @@ actually does. The choice of which option to *enforce* is the open part.
 
 ---
 
+## F11 — Crate README documentation drift
+
+**Status:** OPEN — 17 of the 62 claims are fixed; 45 remain.
+
+**What this is.** The I-025 sweep read every claim in the crate READMEs
+against the source and listed the ones that were false. The per-claim
+list is `docs/development/DOC_DRIFT_SWEEP.md`, which names each claim,
+the quoted README line, the code that says otherwise, and the fix.
+
+**What is fixed.** All eleven `ramshield-config` claims, and four of the
+five `ramshield-xdp` ones. The config crate's eleven are pinned by a test
+rather than by prose: `crates/ramshield-config/tests/readme_template.rs`
+extracts the ```toml block out of the README and loads it through
+`Config::from_toml_file`, which parses and validates. The old template
+failed that test. One `ramshield-types` claim and one `ramshield-forecasting`
+claim are fixed too; the rest of those two READMEs are not.
+
+**What remains.** 45 claims in six READMEs: `ramshield-types` (13),
+`ramshield-storage` (8), `ramshield-metrics` (8), `ramshield-forecasting` (8),
+`ramshield-analytics` (6) and `ramshield-xdp` (2).
+
+**Closure criterion.** Every claim in the sweep is either marked fixed, or
+the README says what the code says.
+
 ## F12 — two compiled binaries are tracked in the repository
 
-**Severity:** MEDIUM (hygiene, not a runtime defect)
+**Status:** CLOSED — removed in `e668995`, merged to master via `f900664`;
+both names are in `.gitignore`.
+
+**Severity:** P2 (hygiene, not a runtime defect)
 
 `validate_mesh_fix` and `verify_boot_fix` are ELF executables of about
 4.4 MB each, committed at the root of the repository in `415f75f`
@@ -495,39 +597,7 @@ found them.
 longer skips binary files (`git grep -I` skipped them, so a path could
 hide in one); the check reports a binary hit as "Binary file ... matches".
 
-**What is still open.** `master` still carries both files until this is
-merged. Removing them from `master` is the owner's call, like every other
-change to that branch.
+**What is still open.** Nothing. `git ls-tree -r origin/master` lists
+neither name, and `.gitignore` carries both.
 
 ---
-
-## F13 — the workspace does not compile on Windows
-
-**Severity:** MEDIUM (build portability, not a runtime defect)
-
-`OpenOptions::mode` is a Unix-only API. It is used unguarded in
-`src/engine/checkpoint.rs:66`, `crates/ramshield-cgnat/src/shm.rs:133`
-and `crates/ramwal/src/wal.rs:542`, so the crate fails to compile for a
-Windows target:
-
-```
-error[E0599]: no method named `mode` found for mutable reference
-              `&mut std::fs::OpenOptions` in the current scope
-```
-
-`.github/workflows/advanced.yml` runs a `windows-latest` job, so that job
-is red on every branch that has run it — including master. The macOS job
-passes, because `mode` exists there.
-
-**What was done about it.** Nothing in the code: the finding is recorded
-here. The branch that carries it does not touch those files, so the
-Windows job fails on it exactly as it fails on master.
-
-**What is still open.** The fix is not a one-liner in the general case.
-`mode(0o600)` is how the state files and the shared-memory file are
-restricted to their owner, and Windows has no equivalent mode bit: the
-options are (a) a `#[cfg(unix)]` guard with a documented Windows
-alternative, (b) `set_permissions` after the file is created, or (c)
-dropping the Windows job and saying so. Which one is right is the
-owner's call, because it changes what the permissions mean on a platform
-the project may not intend to support.

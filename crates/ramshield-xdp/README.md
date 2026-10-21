@@ -4,7 +4,7 @@
 
 This crate is a build artifact container. It compiles the BPF program (Rust, in `ramshield-xdp-bpf/src/main.rs`, built with `aya-ebpf`) into an ELF binary at build time, then exports it as a static byte slice. The actual loading, attaching to a network interface, and map management happens in `ramshield-enforcement::xdp::AyaXdpApplier`.
 
-This separation exists because BPF compilation needs `bpf-linker` and the `bpfel-unknown-none` target at build time — tools that aren't always available on the target machine. `build.rs` looks for `bpf-linker` on `PATH` and then in `~/.local/bin`; if it finds neither, it warns and skips the BPF build rather than failing the workspace. The `xdp` feature flag controls whether this crate is included.
+This separation exists because BPF compilation needs `bpf-linker` and the `bpfel-unknown-none` target at build time — tools that aren't always available on the target machine. `build.rs` looks for `bpf-linker` on `PATH` and then in `~/.local/bin`; if it finds neither, the build **fails**: `build.rs` panics with the install step, and no placeholder ELF is written. The `xdp` feature flag controls whether this crate is included.
 
 ## What it does
 
