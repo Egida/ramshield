@@ -389,4 +389,3 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 - Bench-filter names in `benches/hot_paths.rs` (README `store_insert`/`store_lookup`/`subnet_key`, `ip_network_pack`, `bounded_vec_deque`).
 - Whether `Config::load()` already applies env overrides (README API example applies them again).
 - Whether detection and forecasting share one enforcement channel (`src/engine/` channel wiring).
-
