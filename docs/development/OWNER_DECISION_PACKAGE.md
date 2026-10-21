@@ -1043,10 +1043,11 @@ not: it failed on the file types it happened to list.
 ### Branch state — `fix/i-013-synproxy-fixture-parity`
 
 **Base:** `bd417cd` (= `origin/master`, unchanged by this work).
-**Head:** the tip of this branch — **20 commits** as of this section, none
-pushed. The branch has **no upstream**, so `git push` cannot reach
-`master` by accident. (`git log --oneline origin/master..HEAD` is the
-authoritative list; the count here is as of this commit.)
+**Head:** the tip of this branch, none pushed. The branch has **no
+upstream**, so `git push` cannot reach `master` by accident. The
+authoritative list and count are `git log --oneline origin/master..HEAD`
+and `git rev-list --count origin/master..HEAD` — no number is written
+here, because a written count goes stale on the next commit.
 
 **Gates on the head SHA** (the local runner applies all of them, with no
 pipe on any gate command, and records each exit code separately):
@@ -1077,8 +1078,16 @@ comments, tests, or gate scripts. The Rust production paths are untouched
 except for comments.
 
 **Findings recorded, not fixed:** F9 (the enforcement lost update), F10
-(the key-sorted MAC input — a wire-contract decision), F11 (54 crate-README
-claims, 2 fixed).
+(the key-sorted MAC input — a wire-contract decision), F11 (the crate-README
+claims; `docs/development/DOC_DRIFT_SWEEP.md` lists every claim and marks
+each one that has been fixed, so read that file rather than a count here).
+
+**Fixed on this branch since the sweep was recorded:** F12 (two stray
+compiled binaries tracked at the repository root, removed and gitignored),
+and the operator-facing README claims in the sweep — the `BlockReason`
+variants and wire tokens, the forecasting hypothesis map, the
+`Forecaster::run()` loop and its data source, and the xdp README's build
+prerequisites, phantom `BlocklistValue` type and drop path.
 
 **Not pushed, not merged, and `origin/master` untouched at `bd417cd`.**
 Pushing needs an explicit branch refspec from the owner.
