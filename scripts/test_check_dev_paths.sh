@@ -45,6 +45,23 @@ fi
 grep -Fq 'systemd/user/bad.service' "$tmp/unit.log" || fail 'offending unit not named'
 echo 'PASS: developer path in a unit rejected'
 
+# A developer home path in a file type the old hand-written pathspec list
+# missed is rejected. The old list named .sh, .service, .rs, .toml, .yml
+# and .yaml by hand, and matched 'scripts/*' - so it never looked at a
+# .py, .html, .nft, .mjs or .c file outside scripts/. These probes are at
+# the root and under .github/, which is where the old list had its hole.
+for spec in bad.py bad.html bad.nft bad.mjs bad.c .github/scripts/bad.py; do
+  mkdir -p "$(dirname "$repo/$spec")"
+  commit_file "$spec" 'DIR=/home/m/someone/project'
+  if (cd "$repo" && bash "$checker" "$repo") >"$tmp/ext.log" 2>&1; then
+    fail "developer path in $spec was accepted"
+  fi
+  grep -Fq "$spec" "$tmp/ext.log" || fail "offending file $spec not named"
+  git -C "$repo" rm -q "$spec"
+  git -C "$repo" commit -qm "remove $spec"
+done
+echo 'PASS: developer path rejected in every file type'
+
 # The systemd specifier form is portable and must be accepted. This runs in
 # a clean repo: the files that were rejected above are still tracked there.
 clean="$tmp/clean"

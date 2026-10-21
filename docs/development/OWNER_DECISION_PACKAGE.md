@@ -841,6 +841,32 @@ out of six under the same load, and with the timeout at 10s the file
 passed eight times out of eight. The read timeout is now 10s in both tests
 that wait for a frame; the behaviour under test is unchanged.
 
+### The dev-path checker had a hand-written pathspec list, and it was incomplete
+
+**Found by:** an independent review of the I-022 change, not by the author.
+
+`scripts/check_dev_paths.sh` scanned tracked files for a developer
+`/home/<user>/` path, but it selected the files to scan with a
+hand-written list: `systemd/*`, `deploy/*`, `scripts/*`, `*.rs`, `*.toml`,
+`*.yml`, `*.yaml`, `*.sh`, `*.service`, `*.timer`. Everything else was
+invisible to it — the 51 `.py` files outside `scripts/`, plus `.html`,
+`.nft`, `.mjs`, `.c` and `.h`. A developer path in any of those is exactly
+as broken as one in a unit file.
+
+A pathspec list that has to be kept in step with the tree is a list that
+will fall behind the tree, so the checker now scans every tracked file
+except documentation. The tree is clean under the wider scan: 0 hits
+across all tracked non-`.md` files.
+
+The contract test now proves the coverage, with probes at the repository
+root and under `.github/` — the places the old list had its hole. Against
+the old pathspec list the new test fails (`FAIL: offending file bad.py not
+named`); against the new one it passes.
+
+This also corrects an overclaim in the I-022 commit message, which said
+the gate "fails the build on any tracked `/home/<user>/` path". It did
+not: it failed on the file types it happened to list.
+
 ### Preserve state, verified after the last push
 
 | Item | State |
