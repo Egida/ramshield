@@ -154,10 +154,14 @@ fn production() {
         self.assertNotIn(production_line, test_lines)
 
     def test_char_literal_brace_does_not_shift_the_block(self):
+        # '{' and not '}': with '}' the old filter merely ends the block one
+        # line later, so both assertions still hold and the test proves
+        # nothing. With '{' the old filter extends the block past its end and
+        # the production line is hidden - this is the case that fails it.
         source = """#[cfg(test)]
 mod tests {
     fn t() {
-        let c = '}';
+        let c = '{';
         c.unwrap();
     }
 }
@@ -174,6 +178,61 @@ fn production() {
         test_line = next(i for i, line in enumerate(lines, 1) if "c.unwrap" in line)
         production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
         self.assertIn(test_line, test_lines)
+        self.assertNotIn(production_line, test_lines)
+
+    def test_nested_block_comment_does_not_leak_a_brace(self):
+        """Rust nests block comments. Stopping at the first */ leaves a
+        spurious { in the code, which extends the test block past its end
+        and hides real production code.
+
+        The comment has to be INSIDE the test module for that: the filter
+        counts depth from the brace that opens the module, so a stray brace
+        before the module does not extend it.
+        """
+        source = """#[cfg(test)]
+mod tests {
+    /* /* } */ { */
+    fn t() {
+        raw.unwrap();
+    }
+}
+
+fn production() {
+    value.unwrap();
+}
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        test_line = next(i for i, line in enumerate(lines, 1) if "raw.unwrap" in line)
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
+        self.assertIn(test_line, test_lines)
+        self.assertNotIn(production_line, test_lines)
+
+    def test_cfg_attribute_inside_a_string_is_not_an_attribute(self):
+        """`#[cfg(test)]` in a string literal is text, not an attribute.
+        Treating it as one makes the block it appears to open swallow the
+        production code that follows it.
+
+        The string has to end without a `;` for this to bite: the filter
+        skips a cfg attribute whose block is a declaration rather than a
+        block, and it finds that semicolon in the raw text.
+        """
+        source = """fn helper() -> &'static str {
+    "#[cfg(test)] {"
+}
+fn production() {
+    value.unwrap();
+}
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "sample.rs"
+            path.write_text(source)
+            test_lines = FILTER.find_test_lines(str(path))
+        lines = source.splitlines()
+        production_line = next(i for i, line in enumerate(lines, 1) if "value.unwrap" in line)
         self.assertNotIn(production_line, test_lines)
 
 

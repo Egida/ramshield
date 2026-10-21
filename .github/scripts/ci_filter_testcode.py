@@ -17,15 +17,17 @@ from collections import defaultdict
 
 
 def strip_literals(content: str) -> str:
-    """Blank out string and char literal contents, preserving every byte offset.
+    """Blank out string and char literal contents, preserving every character.
 
     Brace depth must be counted over code, not over text. A `{` or `}` inside
     a string literal is not a block delimiter: reading one as one ends a
     cfg(test) block early (later test code is then reported as production
     code) or extends it past its end (real production code is then hidden).
     Both directions are wrong, so the literal contents are replaced with
-    spaces. Length and line breaks are preserved, so offsets and line numbers
-    still refer to the original file.
+    spaces. Character count and line breaks are preserved, so offsets and
+    line numbers still refer to the original file. (Character count, not
+    byte count: a multi-byte character becomes one space, so the byte
+    offsets shift. Only line numbers are consumed downstream.)
     """
     out = list(content)
     i = 0
@@ -40,9 +42,22 @@ def strip_literals(content: str) -> str:
                 out[k] = " "
             i = j
         elif ch == "/" and i + 1 < n and content[i + 1] == "*":
-            # Block comment: ends at the matching */.
-            j = content.find("*/", i + 2)
-            j = n if j == -1 else j + 2
+            # Block comment: ends at the matching */. Rust NESTS block
+            # comments, so `/* /* } */ { */` is one comment, not two. Stopping
+            # at the first */ leaves ` { */` as code, and that spurious {
+            # extends a cfg(test) block past its end - hiding real production
+            # code from the gate. So count the nesting depth.
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if content.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif content.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
             for k in range(i, j):
                 if out[k] != "\n":
                     out[k] = " "
@@ -121,9 +136,13 @@ def find_test_lines(src_path: str) -> set[int]:
 
     test_lines: set[int] = set()
     # Match both #[cfg(test)] and forms such as #[cfg(all(test, target_os = "linux"))].
+    # Match over `code`, not `content`: a `#[cfg(test)]` inside a string
+    # literal or a comment is not an attribute, and treating it as one
+    # makes the block it appears to open swallow the production code that
+    # follows.
     cfg_positions = [
         m.start()
-        for m in re.finditer(r"#\[cfg\([^]]*\btest\b[^]]*\)\]", content)
+        for m in re.finditer(r"#\[cfg\([^]]*\btest\b[^]]*\)\]", code)
     ]
 
     for pos in cfg_positions:

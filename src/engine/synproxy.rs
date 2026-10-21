@@ -371,7 +371,13 @@ mod tests {
         (
             interface,
             SynproxyConfig {
-                enabled: section["enabled"].as_bool().unwrap_or(false),
+                // Every field here panics on a missing or malformed value
+                // rather than defaulting: a default here would quietly
+                // compare the fixture against a config the daemon would
+                // never install.
+                enabled: section["enabled"].as_bool().unwrap_or_else(|| {
+                    panic!("{path} [synproxy].enabled is missing or not a boolean")
+                }),
                 ports,
                 mss: get_u16("mss"),
                 wscale: u8::try_from(section["wscale"].as_integer().unwrap_or_else(|| {

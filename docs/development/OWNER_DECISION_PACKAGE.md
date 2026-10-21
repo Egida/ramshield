@@ -944,6 +944,69 @@ only: no production behaviour depends on them, and the fixes are
 per-file, per-claim edits. They are the natural next bounded pass, one
 crate at a time.
 
+### The filter fix I shipped had two P1 holes of its own
+
+**Found by:** an independent review of `705d098` with adversarial inputs.
+
+The `lint-no-unwrap` filter rewrite (blank literals and comments before
+counting braces) was correct on the tree it shipped on, and it removed 65
+false positives. It also introduced two new ways to **hide** a production
+`.unwrap()`, both verified end to end against the shipped filter:
+
+- **Nested block comments.** Rust nests them, and the scanner stopped at
+  the *first* `*/`. So `/* /* } */ { */` left a spurious `{` in the code,
+  which extended the `#[cfg(test)]` block past its end and swallowed the
+  production code after it. The pre-rewrite filter reported that line; the
+  rewrite hid it — a regression, not a pre-existing bug.
+- **The `#[cfg(test)]` pattern matched raw text.** It was matched against
+  the original file, not the stripped code, so a `#[cfg(test)]` inside a
+  string literal counted as an attribute. The block it appeared to open
+  then swallowed the production code that followed.
+
+Both are fixed: the comment scanner now counts nesting depth, and the
+`cfg` pattern is matched against the stripped code. Two regression tests
+were added for them.
+
+**The first attempt at those tests did not work, and that is worth
+recording.** The tests as first written passed against the buggy filter —
+they were not load-bearing. The reproductions need the exact shapes:
+
+- the nested comment has to be **inside** the test module, because the
+  filter counts depth from the brace that opens the module, so a stray
+  brace before the module does not extend it;
+- the string holding `#[cfg(test)]` has to end **without a `;`**, because
+  the filter skips a `cfg` attribute whose block is a declaration, and it
+  finds that semicolon in the raw text.
+
+With those shapes, both tests fail against the buggy filter and pass
+against the fixed one. A test that passes against the broken code proves
+nothing, which is the same discipline the rest of this branch follows.
+
+The reviewer also found a third test that was **not** load-bearing: the
+char-literal test used `'}'`, and with the old filter the spurious `}`
+merely ended the block one line later, so both of its assertions still
+held. It now uses `'{'`, and it fails against the old filter.
+
+**What the reviewer found no defect in:** the new filter introduces no
+false negative on the current tree (an independent indentation-based
+oracle agrees: 404 raw hits, 0 production violations, 0 hidden by the new
+filter), the baseline drift is detected for all 11 knobs it tried, the
+`u16::try_from` change fails loudly and is unreachable in production, and
+the offset/line-number preservation holds.
+
+**The nft job would have gone red on a runner, for the wrong reason.**
+`nft -c` evaluates the ruleset against the running kernel, so it needs the
+`nft_synproxy` module — and GitHub's runner images ship no kernel modules
+(runner-images#10134: "we are not able to install any kernel modules on
+our images"). The job now tries to load the module and, if it is not
+available, says so and skips instead of failing for a reason that has
+nothing to do with the fixture.
+
+Two smaller things fixed with it: the filter's docstring claimed byte
+offsets are preserved when only character count is, and the baseline
+helper defaulted `enabled` to `false` while every sibling field panics on
+a bad value.
+
 ### The dev-path checker had a hand-written pathspec list, and it was incomplete
 
 **Found by:** an independent review of the I-022 change, not by the author.
