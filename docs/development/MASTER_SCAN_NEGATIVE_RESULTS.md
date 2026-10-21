@@ -268,6 +268,44 @@ would have required changing the existing `default_config_validates`
 assertion, and that test encodes the decision. The existing test was left
 untouched.
 
+### 7f. The store's memory bound under extreme unique-IP traffic — sound
+
+A flood of distinct source IPs is the obvious way to make a per-IP state map
+run out of memory, so the store's bound was checked directly.
+
+**It is bounded, atomically, and it fails closed.**
+
+- `crates/ramshield-storage/src/store/write.rs:108-129` — the fresh-insert
+  path (`dashmap::Entry::Vacant`) reserves capacity **before** the entry
+  exists, with a CAS loop so two threads cannot both observe "fits" and both
+  insert. When the reservation would exceed the limit the insert is
+  **rejected** with `RsError::CapacityExceeded` and a `warn!` is logged
+  (*"store insert rejected: capacity exceeded"*). The tracking stops; it
+  does not grow.
+- The limit comes from `engine.ram_limit_mb`
+  (`crates/ramshield-config/src/sections/engine.rs:16`), default **512 MB**.
+- `crates/ramshield-storage/src/store/write.rs:35-58` — the update path
+  (`dashmap::Entry::Occupied`) deliberately does **not** re-check the limit;
+  the comment states that *"the limit only gates net-new growth"*. The
+  over-shoot that permits is bounded: the dominant per-IP value,
+  `IpRecord` (`crates/ramshield-storage/src/record.rs:129`), is a pure-value
+  struct with **zero heap side-allocation** — `heap_bytes()` returns 0 for
+  it (`record.rs:117`) and the comment records that returning
+  `size_of::<IpRecord>()` there previously double-counted ~136 B per blocked
+  IP and starved the budget to half its real size. So an IP entry's size is
+  fixed, and an update cannot grow it.
+- `crates/ramshield-storage/src/store/capacity.rs:58-66` — `evict_expired`
+  returns 0 immediately when nothing carries a TTL, which is the production
+  case (store inserts pass no TTL; block TTLs live in the enforcement actor).
+  That is why the bound is enforced at insert time rather than by sweeping.
+
+**No change made.** The RAM-side map of blocked IPs is hard-bounded by
+configuration, and exceeding the bound fails closed with a warning rather
+than growing the process — which is the property the extreme-traffic
+requirement asks for.
+
+---
+
 ### 7e. The triage's "recommended next fixes" — two accepted, three rejected
 
 The triage ended with six recommendations. Checked against the source:
