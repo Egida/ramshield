@@ -2556,7 +2556,7 @@ mod frame_tests {
             let receiver_state = Arc::new(AworsetBlocklist::new(2));
             let ip = IpAddr::V6(Ipv6Addr::from(0xfeedbeefu128));
             sender_state.record_ban(ip, 60_000, 2);
-            let (sender, receiver, sender_addr, receiver_addr) =
+            let (sender, receiver, _sender_addr, receiver_addr) =
                 bind_pair(sender_state.clone(), receiver_state.clone()).await;
             sender
                 .request_full_sync(receiver_addr, 17, sender_state.export_snapshot())
