@@ -275,13 +275,20 @@ gates green on each, all four GitHub workflows green on each.
 The authoritative, durable record is GitHub CI — every pushed SHA below ran
 all four workflows, all green.
 
-**How to read this table.** A commit cannot contain the CI result of its own
-push, because the result does not exist until the commit is pushed. So each
-SHA's four run IDs are recorded by its *successor* commit. The consequence is
-that the newest SHA on `master` is always absent from this table by exactly
-one row: its runs are read from GitHub Actions directly
-(`gh run list --branch master`). Every SHA from `2868250` onward is recorded
-here, and none is missing except that trailing row.
+**How to read this table.** Two things keep the newest entries out of it,
+and both are properties of GitHub Actions rather than of this document:
+
+- A commit cannot contain the CI result of its own push, because the result
+  does not exist until the commit is pushed. So each SHA's four run IDs are
+  recorded by a *later* commit.
+- A push that carries several commits triggers **one** run set, on the branch
+  head. The intermediate commits of that push have no run of their own, and
+  are marked † below; they are covered by the head's runs.
+
+The newest SHA on `master` is therefore absent from this table, and its runs
+are read from GitHub Actions directly (`gh run list --branch master`). Every
+SHA from `2868250` onward is recorded here, and the only gaps are that
+trailing entry and the † rows.
 
 | SHA | CI | Review Pipeline | lint-no-unwrap | Subnet Stress Pin |
 |---|---|---|---|---|
@@ -300,17 +307,24 @@ here, and none is missing except that trailing row.
 | `6efa8f9` | `39549061946` | `39549061814` | `39549061576` | `39549062048` |
 | `60ce0f1` | `39552618200` | `39552618088` | `39552618184` | `39552618107` |
 | `26c3ab6` | `39554107784` | `39554107721` | `39554107885` | `39554107749` |
+| `066ef7f` | `39555576543` | `39555576533` | `39555576496` | `39555576497` |
+| `a6a61f5` † | — | — | — | — |
+| `29dd601` | `39558822703` | `39558822887` | `39558822634` | `39558822885` |
+| `d18535b` | `39560831028` | `39560830957` | `39560830944` | `39560830954` |
 | `54ee1b7` † | — | — | — | — |
 
-† `b1a9e9e` and `79f4eac` were pushed in **one** push, and `54ee1b7` was
-pushed on its own — but like `b1a9e9e` it is covered by the four green runs
-on the branch head that contains it (`79f4eac` for `b1a9e9e`, `6efa8f9` for
-`54ee1b7`).
+† Three SHAs have no run of their own, because each was pushed together
+with the SHA after it and Actions therefore ran once, on the branch head:
 
-`b1a9e9e` and `79f4eac` were pushed in **one** push (`e5caac1..79f4eac`),
-so GitHub Actions ran once, on the branch head `79f4eac`, which contains
-`b1a9e9e` as its parent. `b1a9e9e` therefore has no run of its own; the four
-green runs on `79f4eac` cover it.
+- `b1a9e9e` was pushed with `79f4eac` (`e5caac1..79f4eac`); the four green
+  runs on `79f4eac` cover it.
+- `54ee1b7` was pushed on its own, but the runs that its push triggered are
+  attributed to the branch head that contained it at the time — `6efa8f9`.
+- `a6a61f5` was pushed with `29dd601` (`066ef7f..29dd601`); the four green
+  runs on `29dd601` cover it.
+
+In each case the commit is a parent of the SHA whose runs cover it, and the
+covered tree is the same or a documentation-only superset of it.
 
 The local 14-gate runner (fmt, check core/all-features, clippy core/all,
 build core/all, test core/full/mesh/all-features, release build, lint-no-unwrap,
@@ -348,14 +362,17 @@ is how each row was attributed.
 | 23 | 10-21 08:04 | `trail2_gates.log` | `26c3ab6` | 14/14 | 1849/0/42 | green |
 | 24 | 10-21 08:19 | `trail3_gates.log` | `066ef7f` | 14/14 | 1849/0/42 | green |
 | 25 | 10-21 08:36 | `ledger_gates.log` | the ledger commit | 14/14 | 1849/0/42 | green |
+| 26 | 10-21 08:50 | `open_gates.log` | `a6a61f5`, `29dd601` | 14/14 | 1849/0/42 | green |
+| 27 | 10-21 09:12 | `queue_gates.log` | `d18535b` | 14/14 | 1852/0/42 | green |
 
-**25 runs, 21 green, 4 failed.** The four failures are named and explained
+**27 runs, 23 green, 4 failed.** The four failures are named and explained
 below. Nothing was hidden and no failure was retried into a passing log
 without the failed log being kept and named.
 
-As with the CI table above, the newest run on disk is always one row ahead of
-this table: the run taken for the commit that adds the final row cannot be
-in the row it gates. Its log name is in that commit's message.
+As with the CI table above, the newest run on disk is not yet in this table:
+the run taken for the commit that adds the final row cannot be in the row it
+gates. The table is updated when the next documentation commit lands, and
+the run it is missing is named in that commit's message.
 
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
