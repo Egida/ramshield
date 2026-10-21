@@ -35,11 +35,12 @@ are the ones used here.
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
-| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — the fix is on `fix/f9-enforcement-lost-update-v2` (PR #43): the store has two block-only mutators under one shard lock, each touching only `block_state`. PR #39 was closed unmerged. Not on master yet | no — the fix shape is mechanical, but it touches the block write path |
+| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 17 of 62 claims fixed, 45 open: `ramshield-types` 13, `ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
+| F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
 
 ---
 
@@ -397,9 +398,8 @@ reviewer did not contradict it but did not confirm it.
 
 ## F9 — Enforcement's block path is a lost update against detection
 
-**Status:** OPEN (P1) — the fix is on `fix/f9-enforcement-lost-update-v2`
-(PR #43), not on master. Found while re-verifying backlog row I-011, and
-**not** what that row describes.
+**Status:** FIXED (P1) — merged as `682435a` (PR #43). Found while
+re-verifying backlog row I-011, and **not** what that row describes.
 
 **Where it came from.** Backlog row I-011 asks whether "cardinality-driven
 LRU eviction" can erase an attacker's CUSUM/pulse-wave history. Its premise
@@ -443,11 +443,23 @@ It must also not resurrect a *clean* record for an IP that is still
 blocked, which is what the expired-record default does today.
 
 **Required test — met.** A test that races a detection `update_ip` against
-the block path and asserts the stat fields are not rolled back. Five tests
+the block path and asserts the stat fields are not rolled back. Six tests
 in the storage crate pin it, including the property test
 (`a_block_never_makes_the_detection_counters_go_backwards`), which was
 proven load-bearing: reimplementing `block_ip` as the old `get()` +
 `insert()` makes it fail.
+
+**A defect in the first version of the fix, found by independent review and
+corrected before it landed.** `block_ip`'s vacant branch published the
+record with `insert`, which releases the shard lock, and updated the
+blocked index afterwards. A concurrent unblock could land in that window
+and decrement a counter that was still zero - a `u64` underflow - leaving
+the index holding a key whose record was clean. The vacant branch now uses
+`insert_entry`, which keeps the lock, and updates the index inside it. The
+test that pins it
+(`the_blocked_index_is_updated_under_the_same_lock_as_the_record`) fails in
+186 of 200 rounds against the old code, 121 of them on the very first
+round; with the fix it passes every round.
 
 **A second, related observation** (policy, not a defect): an IP refused by
 the RAM budget is dropped from detection entirely
@@ -599,5 +611,40 @@ hide in one); the check reports a binary hit as "Binary file ... matches".
 
 **What is still open.** Nothing. `git ls-tree -r origin/master` lists
 neither name, and `.gitignore` carries both.
+
+---
+
+## F14 — the store's `insert()` updates the blocked index after releasing the shard lock
+
+**Status:** OPEN (P2, latent) — not reachable concurrently today
+
+**What it is.** The same shape as the defect F9 just fixed, one function
+over. `Store::insert` publishes a record with `v.insert(...)`, which
+releases the shard lock, and only then updates the blocked index:
+
+    crates/ramshield-storage/src/store/write.rs:130  v.insert(new_entry);
+    crates/ramshield-storage/src/store/write.rs:131  if new_blocked {
+    crates/ramshield-storage/src/store/write.rs:132      self.blocked_count.fetch_add(1, Ordering::Relaxed);
+    crates/ramshield-storage/src/store/write.rs:133      self.blocked_set.insert(key, ());
+    crates/ramshield-storage/src/store/write.rs:134  }
+
+A concurrent unblock landing in that window would decrement a counter
+that is still zero, and leave the index holding a key whose record was
+clean — the exact failure F9's fix removed from `block_ip`.
+
+**Why it is not live.** The only callers that can insert a *blocked*
+record are the startup recovery paths: the WAL replay
+(`crates/ramshield-enforcement/src/replay.rs:186`, called from
+`src/engine/boot.rs:470-483`) and the checkpoint restore
+(`src/engine/checkpoint.rs:259`). Both run before the enforcement actor
+serves traffic, so no unblock can be in flight. The live detection path
+does not insert: it mutates in place with `update_ip`
+(`crates/ramshield-detection/src/merge.rs:31`), which by contract never
+touches `block_state`.
+
+**What would close it.** The same change F9 made: `insert_entry` instead
+of `insert`, and the index update inside the lock. It is not proposed
+here because no live path reaches it, and a fix with no reachable path
+is a change without a failing test to write.
 
 ---
