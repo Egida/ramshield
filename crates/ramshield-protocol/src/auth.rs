@@ -149,6 +149,38 @@ mod tests {
         assert!(verify(&keys, "k1", now, &sig, payload, &ReplayStore::default()).is_ok());
     }
 
+    /// I-024: the MAC input layout is a wire protocol, so pin it byte for
+    /// byte. The digest below was computed independently of this crate
+    /// (HMAC-SHA256 over `ts_ms` ++ "." ++ key_id ++ payload), not by calling
+    /// `sign` - a test that recomputes the value with the same code it is
+    /// testing proves nothing.
+    ///
+    /// The README documented `"{ts_ms}:{payload}"`, a different separator and
+    /// no key_id, so an implementer following it produced signatures this
+    /// crate rejects.
+    #[test]
+    fn golden_vector_pins_the_mac_input_layout() {
+        const KEY: &[u8] = b"secret-key";
+        const KEY_ID: &str = "k1";
+        const TS_MS: u64 = 1_700_000_000_000;
+        const PAYLOAD: &[u8] = br#"{"type":"check_ip","ip":"1.2.3.4"}"#;
+        const EXPECTED: &str = "3bba49ffd4684df1846e0a7af7568d43805e25daffebb33f22f911cc0a8cad8a";
+
+        let sig = sign(KEY, KEY_ID, TS_MS, PAYLOAD).expect("test key non-empty");
+        assert_eq!(
+            sig, EXPECTED,
+            "the MAC input layout changed: ts_ms ++ \".\" ++ key_id ++ payload"
+        );
+
+        // The layout is not incidental: binding key_id means two key_ids
+        // holding identical key bytes must not produce the same signature.
+        let other = sign(KEY, "k2", TS_MS, PAYLOAD).expect("test key non-empty");
+        assert_ne!(
+            sig, other,
+            "key_id must be bound into the MAC input, or a frame signed under one key id is valid under another"
+        );
+    }
+
     /// P1: a malformed signature must be REJECTED, never panic.
     ///
     /// `auth.sig` is client-supplied and is decoded before any credential is

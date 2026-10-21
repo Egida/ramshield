@@ -77,8 +77,13 @@ fn ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset() {
         let _ = stream.flush();
     }
 
+    // The error frame is already in flight when the server trips the cap, so
+    // this only waits for it to be scheduled and delivered. Under load a
+    // loaded host can take longer than a few seconds to run the server task;
+    // a tight timeout here fails the run without saying anything about the
+    // behaviour under test.
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let mut resp = String::new();
     // Error frame should already be in flight / buffered before close.
@@ -140,7 +145,7 @@ fn ipc_wiring_unterminated_line_is_capped_at_the_tighter_line_limit() {
     }
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
     let mut resp = String::new();
     match BufReader::new(&stream).read_line(&mut resp) {

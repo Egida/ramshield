@@ -5,12 +5,18 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/m/vehicle_of_rationalism/ramshield/beta/rs-local-backlog-dispatcher
-Environment=PATH=/home/m/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The dispatcher resolves its own repository from the script path
+# (.github/scripts/backlog_dispatcher.py -> the checkout two levels up), so
+# the only thing that has to be configured is where that script lives.
+# Create ~/.config/ramshield-backlog-dispatcher.env containing:
+#   RS_DISPATCHER_SCRIPT=/path/to/ramshield/.github/scripts/backlog_dispatcher.py
+EnvironmentFile=-%h/.config/ramshield-backlog-dispatcher.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=GH_PROMPT_DISABLED=1
 Environment=RAMSHIELD_DISPATCHER_ENABLE_AFTER_PR=26
 UMask=0077
-ExecStart=/usr/bin/python3 /home/m/vehicle_of_rationalism/ramshield/beta/rs-local-backlog-dispatcher/.github/scripts/backlog_dispatcher.py
+ExecStartPre=/bin/sh -c 'test -n "$$RS_DISPATCHER_SCRIPT" || { echo "RS_DISPATCHER_SCRIPT is not set - write it to ~/.config/ramshield-backlog-dispatcher.env" >&2; exit 1; }'
+ExecStart=/usr/bin/python3 ${RS_DISPATCHER_SCRIPT}
 TimeoutStartSec=2h
 
 [Install]

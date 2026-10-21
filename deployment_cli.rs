@@ -95,8 +95,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn create_deployment_config() -> Result<DeploymentConfig, Box<dyn Error>> {
-    // In a real implementation, this would read from config files, environment variables, or user input
-    let local_path = PathBuf::from("/home/m/vehicle_of_rationalism/ramshield/beta/rs-local-backlog-dispatcher");
+    // The checkout to deploy. Defaults to the current working directory;
+    // override with RAMSHIELD_DEPLOY_LOCAL_PATH.
+    let local_path = std::env::var_os("RAMSHIELD_DEPLOY_LOCAL_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let config = DeploymentConfig {
         remote_repo: "https://github.com/grep999/ramshield".to_string(),
         local_path,

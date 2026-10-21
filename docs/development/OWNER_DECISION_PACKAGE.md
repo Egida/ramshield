@@ -600,6 +600,14 @@ the run taken for the commit that adds the final row cannot be in the row it
 gates. The table is updated when the next documentation commit lands, and
 the run it is missing is named in that commit's message.
 
+**The run ids and the gate logs in this document are not reproducible from
+the repository.** They were read from the GitHub Actions API and from gate
+logs on the machine that ran them; neither the run logs nor the log files
+are committed here. A reader can re-derive a run id from a SHA with
+`gh run list --commit <sha>`, but cannot verify a past run from this tree
+alone. Treat the table as a record of what was observed, not as in-tree
+evidence.
+
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
 byte-identical to what was committed apart from the review report added in the
@@ -611,6 +619,510 @@ before its commit, with no source change in between, and the committed
 tree's own direct evidence is the four green CI workflows on that SHA. The
 "Commit it gated" column names the commit that followed the run, not a tree
 that was already committed when the run happened.
+
+### I-013 and I-020 — closed on `fix/i-013-synproxy-fixture-parity`
+
+Two backlog rows were closed in one pass, each on its own commit, both on
+branch `fix/i-013-synproxy-fixture-parity` (base `bd417cd`, i.e. current
+`origin/master`). Neither commit is pushed and neither is on `master`.
+
+| Row | Commit | What changed |
+|---|---|---|
+| I-013 SYNPROXY fixture parity | `72981e1` | `tests/fixtures/synproxy.nft` + 2 tests in `src/engine/synproxy.rs` |
+| I-020 dashboard quarantine search | `9978268` | `src/dashboard/static/index.html` + 1 test in `src/dashboard/mod.rs` |
+
+**I-013.** The fixture declared only `tcp dport { 22, 443 }` while
+`SynproxyConfig::default()` and `config.baseline.toml` both configure
+`[22, 53, 80, 443]`. The fixture is the file the `nft -c -f
+tests/fixtures/synproxy.nft` gate checks, so the gate was proving syntax
+for a ruleset production never loads. The daemon's installed ruleset is
+unchanged — it already used `[22, 53, 80, 443]`; only the checked-in
+fixture was wrong.
+
+The fixture is now the generator's own output, and `nft_fixture_is_the_rendered_ruleset`
+compares it against `render_ruleset()` for the shipped baseline config, so
+every knob is pinned — ports, mss, wscale, connection limits, rate limits —
+not just the field the row named. A hand-maintained copy of generated output
+is what drifted; the test removes the duplication rather than policing one
+field of it. `baseline_config_ports_match_the_code_default` keeps the
+shipped baseline config on the same port set as the code default.
+
+(The first version of this test rendered from the code default, so only the
+ports were pinned; `40f3d28` changed it to render from the baseline, after
+an independent review showed that baseline drift on any other knob went
+undetected.)
+
+Production code is untouched: `git diff -U0 src/engine/synproxy.rs` is a
+single hunk, `@@ -262,0 +263,89 @@ mod tests {`, entirely inside the
+existing `#[cfg(test)] mod tests`. The fixture's table is
+`ramshield_synproxy_fixture`, distinct from the live
+`ramshield_synproxy` table, and `nft -c` only checks — it applies nothing.
+
+**I-020.** The Active Quarantine Feed shipped a search box that did
+nothing: `#tableSearch` had no listener and `filterTable()` was defined
+but never called. Two things the row does not name decided the fix. The
+feed repaints every 5s — `refresh()` → `loadBlocks()` rebuilds the rows
+with `body.replaceChildren()`, destroying the display styles the filter
+set — so binding the input alone yields a filter that visibly reverts to
+"show all" within one refresh interval; the filter is now re-applied
+after the rebuild. And the placeholder promised "Filter by IP, CIDR, or
+module" while the rows carry `BlockRecord.ip`, a single `IpAddr` rendered
+as a string, never a CIDR: a query like `10.0.0.0/8` matches nothing.
+Verified against the shipped `filterTable()` — IP and module filter
+correctly, a CIDR query matches zero rows — so the placeholder now says
+what the filter does.
+
+**Gates, on the exact resulting SHAs, no pipe on any command:**
+
+| Gate | `72981e1` | `9978268` |
+|---|---|---|
+| `cargo fmt --all -- --check` | 0 | 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 | 0 |
+| `cargo test --workspace --all-features` | 0 | 0 |
+| `nft -c -f tests/fixtures/synproxy.nft` | 0 | 0 |
+
+These are local runs on the exact SHAs. The run logs are not committed to
+the tree, so this table is a claim about a run, not a piece of evidence
+in the repository: re-run the commands above on those SHAs to reproduce
+it. The CI run ids quoted elsewhere in this document are the only
+in-tree-independent evidence, and they are for `master` commits, not for
+this branch.
+
+**The negative controls, because a green gate that cannot fail is not
+evidence.** The nft gate fails on a deliberately broken copy of the
+fixture: `dport { 22, 99999 }` → exit 1 ("Service out of range"), closing
+brace removed → exit 1 ("syntax error, unexpected end of file"). The
+I-013 test fails on a fixture whose *unrelated* knob was changed
+(`ct count over 128` → `64`): "tests/fixtures/synproxy.nft has drifted
+from the ruleset the daemon installs". The I-020 test was seen red twice,
+once per half: reverting the binding fails it with "the search input must
+call filterTable on input", and removing only the re-apply line fails it
+with "loadBlocks must re-apply the filter after it rebuilds the rows".
+
+**Two claims from the read-only row reviews were wrong and were not
+acted on.** One review stated the filter "already covers IP, CIDR and
+module" because block rows carry a CIDR string in the IP cell; `BlockRecord.ip`
+is an `IpAddr` string, and a CIDR query matches zero rows, which was
+measured before the placeholder was changed. Another review recommended
+adding `oninput` alone; the 5s rebuild would have undone it, which is why
+the re-apply is there.
+
+**Not covered.** DOM-level behaviour of the dashboard filter: the repo has
+no JS test harness in CI and adding one is a new dependency. The DOM
+behaviour was checked by hand with a Node DOM shim against the shipped
+`filterTable()`, but nothing in CI asserts it.
+
+The nft fixture gate was also manual-only at the time of writing: no
+workflow ran `nft -c -f tests/fixtures/synproxy.nft` and `nft` is not
+installed on the CI runner image. It is no longer manual-only — `40f3d28`
+added the check to `ci.yml` and `3254345` gave it a dedicated `nft-fixture`
+job that installs nftables first.
+
+### I-024 — the protocol README documented a signing string the code never used
+
+**Commit:** `8727e05`, on branch `fix/i-013-synproxy-fixture-parity` (base
+`bd417cd`). Not pushed, not on master.
+
+`crates/ramshield-protocol/README.md` said `sign()` computes
+`HMAC-SHA256(key, "{ts_ms}:{payload}")` and quoted a 30-second skew
+window. The implementation signs `ts_ms` ++ `"."` ++ `key_id` ++ `payload`
+(`crates/ramshield-protocol/src/auth.rs:34-39`) and allows
+`MAX_CLOCK_SKEW_MS = 10_000` ms (`auth.rs:24`). Three errors: the
+separator, the missing `key_id`, and a skew figure three times the code's.
+The last one is not cosmetic — the IPC server derives the replay store's
+TTL from that constant (`src/ipc/server.rs:198-207`), so a reader who
+trusted the README would size the replay window wrong.
+
+The README was rewritten from the implementation, not from any proposed
+format: the real `sign`/`verify` signatures, the MAC input byte layout and
+why `key_id` is inside it, the fact that the payload is the compact
+serialization of the frame with the `auth` object removed
+(`src/ipc/server/auth.rs:114-117`), the real skew window, and the real
+replay semantics — the nonce is the verifier's own HMAC digest, not a
+client-supplied random value (`replay_store.rs:1-7`), saturation rejects
+rather than evicts, and the server runs a 65s TTL against the 10s skew.
+
+**Two tests keep it true, both seen red.** `golden_vector_pins_the_mac_input_layout`
+asserts an exact digest for a fixed key, key_id, timestamp and payload; the
+expected value was computed independently of the crate (HMAC-SHA256 over
+`ts_ms` ++ `"."` ++ `key_id` ++ `payload`), so the test pins the wire format
+instead of re-deriving it with the code under test. Mutating the separator
+in `sign` — a field the backlog row never named — fails it.
+`crates/ramshield-protocol/tests/readme_protocol.rs` reads the README and
+checks its stated facts against the code's own `MAX_CLOCK_SKEW_MS`;
+reverting the README to the old signing string fails it.
+
+**Gates on that exact SHA:** `cargo fmt --all -- --check` 0, `cargo clippy
+--workspace --all-targets --all-features -- -D warnings` 0, `cargo test
+--workspace --all-features` 0, `nft -c -f tests/fixtures/synproxy.nft` 0.
+No production behaviour changed — the only non-test change is the README.
+
+The golden vector was also recomputed outside the repository, in Python with
+`hmac`/`hashlib`, from the documented layout
+`decimal ts_ms || "." || key_id || raw payload`: it reproduces
+`3bba49ff…cad8a` exactly. The separator is load-bearing — `.`, `:`, `|` and
+the empty string give four different digests.
+
+### F9 — enforcement's block path is a lost update against detection
+
+**Status:** OPEN (P1), recorded in `docs/development/OPEN_FINDINGS.md`. No
+code change was made for it.
+
+It was found while re-verifying backlog row I-011, and it is not what that
+row describes. I-011 asks whether cardinality-driven LRU eviction can erase
+an attacker's history; **there is no LRU eviction** —
+`crates/ramshield-storage/src/store/capacity.rs:23-51` evicts on TTL only,
+production inserts carry no TTL, and under RAM pressure the store refuses
+net-new keys rather than evicting live ones. The row's stated mechanism does
+not exist.
+
+The real defect is in the same area: the enforcement block path is a
+read-modify-write across two lock acquisitions
+(`crates/ramshield-enforcement/src/service/enforce.rs:244-283` does `get()`
+-> mutate -> `insert()`), `store.get()` returns `None` for an expired
+record (`crates/ramshield-storage/src/store/access.rs:4-10`) so the default
+`IpRecord` **erases the detection history**, and a concurrent detection
+flush in that window has its `cusum_s`/`sample_count`/pulse counters
+**rolled back** by the stale `insert()`. This is the mirror image of the P0
+fixed in `write.rs:156-173`: that fix made `update_ip` mutate in place so it
+cannot clobber `block_state`; the same window still lets enforcement clobber
+the stat fields. If a block lands concurrently with a flush, the
+attacker's accumulated evidence is rewound and
+`CUSUM_WARMUP_SAMPLES = 6` may never be reached, so the attack is never
+detected.
+
+It is recorded rather than patched in the same pass as the I-013/I-020/I-024
+closures: the fix touches the block write path and its XDP projection
+ordering, and it needs a block-only single-shard-lock mutator that does not
+exist yet. The required test — a race between a detection `update_ip` and
+the block path, asserting the stat fields are not rolled back — must fail on
+the current code first.
+
+### The lint-no-unwrap filter counted braces inside string literals
+
+**Commit:** `705d098`, on branch `fix/i-013-synproxy-fixture-parity`. The
+branch would have failed the `lint-no-unwrap` workflow with **65
+violations**, every one of them a false positive.
+
+**Root cause.** `.github/scripts/ci_filter_testcode.py` finds the end of a
+`#[cfg(test)]` block by counting brace depth over the raw file text. A
+brace inside a string literal is not a block delimiter, and both directions
+of that mistake are wrong:
+
+- A `}` in a string ends the block early, so every test line after it is
+  reported as a production violation. The I-020 test contains
+  `load_blocks.find("\n  }")` (`src/dashboard/mod.rs:587`), so the block
+  ended there and the 65 lines after it were all flagged.
+- A `{` in a string extends the block past its end, so a **real**
+  production `.unwrap()` after the test module is hidden from the gate.
+  Reproduced on this tree before the fix: a test module containing
+  `let marker = "{";` classified a later production `.unwrap()` as test
+  code.
+
+**Fix.** The filter now blanks string literals, raw strings, char literals
+and comments before counting depth, preserving byte offsets and line
+numbers so everything still refers to the original file. A lifetime (`'a`)
+is not mistaken for a char literal.
+
+**Evidence.** The gate's own command reports **0** violations on this tree,
+down from 65. Four regression tests were added to
+`.github/scripts/filter_test/test_filter.py`; three of the four fail
+against the old filter and all four pass against the new one, and the four
+pre-existing filter tests still pass. A production `.unwrap()` is still
+reported.
+
+### The SYNPROXY fixture was only pinned on the ports
+
+**Commit:** `40f3d28`. The I-013 test rendered the ruleset from the **code
+default**, so only the ports were pinned. The daemon installs the ruleset
+the loaded config gives it, and the shipped config is
+`config.baseline.toml`, so any other knob drifting in the baseline — mss,
+wscale, a connection limit, a rate limit, `[xdp].interface` — left the
+fixture describing a ruleset the daemon never installs, undetected. The
+test now renders from the baseline; mutating baseline `mss 1460` → `1300`
+and `[xdp].interface` `eth0` → `ens5` makes it fail, where the old test
+passed. The baseline port list was also read with `as u16`, which
+truncates — a baseline port of 65558 compared equal to 22 and passed; it
+now uses `u16::try_from`.
+
+**Also in that commit:** the nft fixture was never syntax-checked in CI.
+No workflow installed nftables, so `nft -c -f tests/fixtures/synproxy.nft`
+ran only from two local scripts that no workflow calls. `ci.yml` now
+installs nftables and runs the check with `sudo` (`nft -c` needs the
+netlink cache, which needs CAP_NET_ADMIN). The Rust test is the stronger
+check for parity, but it checks no nft syntax at all.
+
+### An IPC test timed out under host load, not a code change
+
+**Commit:** `908a83c`. `ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset`
+failed with "read failed before any frame arrived". It asserts that a 413
+error frame is sent instead of a bare RST, so a timeout says nothing about
+that behaviour.
+
+**It was not caused by the change.** The same prebuilt binary, run five
+times on a host at load average 14, failed twice and passed three times.
+A copy of the test with the read timeout raised to 30s passed six times
+out of six under the same load, and with the timeout at 10s the file
+passed eight times out of eight. The read timeout is now 10s in both tests
+that wait for a frame; the behaviour under test is unchanged.
+
+### The protocol README documented the wrong signing rule, and no test caught it
+
+**Found by:** an independent review of the I-024 change, not by the author.
+
+The I-024 work corrected the README's MAC *layout* and skew window, but
+left a sentence that was wrong in a way that matters to an implementer:
+"a client must sign exactly the bytes of the frame minus its `auth`
+object".
+
+The server never MACs the client's bytes. `verify_frame_auth`
+(`src/ipc/server/auth.rs:94-115`) parses the frame into a
+`serde_json::Value`, removes `auth`, and re-serialises the rest. `serde_json`
+is built without `preserve_order`, so that re-serialisation is key-sorted —
+the server never sees the client's key order. A client that signs its own
+byte order produces a different MAC and is rejected.
+
+Verified here rather than assumed: a probe re-serialising
+`{"zebra":1,"apple":2}` produced `{"apple":2,"zebra":1}`.
+
+Nothing caught it because no test signs a multi-key frame through the
+server. The server test uses a single-key payload, where sort order cannot
+differ, so it passes either way and pins nothing; the protocol crate's test
+calls `auth::verify` directly, bypassing the server's re-serialisation.
+
+**Done:** the README states the real rule, a guard test fails if it drifts
+back, and `verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes`
+exercises a multi-key frame end to end. The server behaviour itself is
+unchanged — that is a wire-contract decision, recorded as **F10** in
+`docs/development/OPEN_FINDINGS.md` with the three options.
+
+### The other findings from that review, and what was done
+
+| Finding | Action |
+|---|---|
+| `src/README.md` prose said forecasting is not in the pipeline; the diagram two dozen lines above still showed `Forecaster::new()` and a `forecast` arm in the `tokio::select!` | Diagram fixed; the guard now fails if either string reappears (proven red by re-adding the diagram line) |
+| `src/ipc/server.rs` had a second, stale comment block: "256 entries × 35s TTL", "30s clock-skew", "TTL now 2*MAX_CLOCK_SKEW + 5s slack" — every number wrong, and it contradicted the two comments the same commit had fixed | Replaced with a comment that says what the code does |
+| `crates/ramshield-protocol/README.md` said the 65s TTL is "2 × skew + 5s slack", which is 25s | Stated as "several times the 10-second skew window" |
+| `crates/ramshield-forecasting/README.md` said "`Forecaster::tick()` runs every 10 seconds" — there is no `tick()` method, and the interval is 1s | Corrected |
+| `docs/development/BACKLOG_VALIDATION_AGAINEST_MASTER.md` still listed I-020, I-022 and I-024 as open | Rows updated to "FIXED ON BRANCH, NOT ON MASTER" |
+| `OWNER_DECISION_PACKAGE.md` said the nft gate was "still manual-only", false since the CI job was added | Corrected |
+| `BACKLOG.md` cited rustc error lines 57/424/431; the real locations are `57:38`, `419:27`, `426:52` | Corrected |
+| The review proposed reverting the `deployment_cli.rs` change, because that file is in no build target and does not compile | **Not reverted.** The file is tracked and contains a developer path, so reverting makes the dev-path gate fail on it. The change stands and the file's status is recorded in `BACKLOG.md` |
+| The review reported the `ExecStartPre` guard's `$$` escape as accidental — "the shell collapses it to a PID" | **Refuted by measurement.** On systemd 255, `$$` inside a quoted `sh -c` argument reaches the shell as a literal `$`, so `$RS_DISPATCHER_SCRIPT` expands normally: a probe with the variable unset printed `GATE_FIRED_var_is_empty`, and one printing `$$` directly printed `PID=$`, not a PID number |
+| The review reported the CI run ids and gate tables as unverifiable from the tree | Caveat added: the ids and logs are not committed, so the table is a record of what was observed, not in-tree evidence |
+
+**One incident during this pass, recorded because it nearly cost work.** A
+`git stash` intended to set aside one file popped a *pre-existing* stash
+from another branch and conflicted two mesh files. No data was lost: the
+stash count was unchanged at 24, the popped stash entry was kept by git,
+and the branch had never touched those files. The conflict markers were
+discarded by restoring the two files to HEAD, and the tree was re-verified
+clean and building. The lesson: `git stash pop` in a worktree that carries
+other people's stashes is a trap — `git stash push -- <pathspec>` must be
+checked against `git stash list` before the pop.
+
+### The I-025 documentation sweep found 54 wrong claims, and two of them were dangerous
+
+A read-only sweep of backlog row I-025 ("dependency/documentation drift")
+checked the crate READMEs against the source and found **54 defects across
+8 READMEs**. The full list, with the claim as written and what the code
+actually says, is in `docs/development/DOC_DRIFT_SWEEP.md` (F11 in
+`docs/development/OPEN_FINDINGS.md`).
+
+Two were fixed in the same pass, because both are wrong in the direction
+that changes an operator's decisions:
+
+- **`crates/ramshield-types/README.md`** listed four `BlockReason`
+  variants and two wire tokens — `rate_limit`, `pulse_wave` — that **no
+  code emits** (`grep` for them finds only READMEs). The real enum has
+  eight variants with eight tokens, and `from_reason_str` never accepted
+  the two invented ones.
+- **`crates/ramshield-forecasting/README.md`** had the hypothesis index
+  map inverted. The code is `Normal=0, VolumetricDoS=1, SlowRampDoS=2,
+  FlashCrowd=3`; the README claimed H1 was FlashCrowd and H3 Volumetric.
+  The daemon blocks on H1 (volumetric) and H2 (slow ramp) and
+  deliberately does **not** block on H3 (flash crowd, treated as
+  legitimate traffic). An operator reading the README would have
+  concluded that volumetric floods are not blocked and flash crowds are —
+  the exact opposite.
+
+The other 52 are recorded and unfixed. They are documentation defects
+only: no production behaviour depends on them, and the fixes are
+per-file, per-claim edits. They are the natural next bounded pass, one
+crate at a time.
+
+### The filter fix I shipped had two P1 holes of its own
+
+**Found by:** an independent review of `705d098` with adversarial inputs.
+
+The `lint-no-unwrap` filter rewrite (blank literals and comments before
+counting braces) was correct on the tree it shipped on, and it removed 65
+false positives. It also introduced two new ways to **hide** a production
+`.unwrap()`, both verified end to end against the shipped filter:
+
+- **Nested block comments.** Rust nests them, and the scanner stopped at
+  the *first* `*/`. So `/* /* } */ { */` left a spurious `{` in the code,
+  which extended the `#[cfg(test)]` block past its end and swallowed the
+  production code after it. The pre-rewrite filter reported that line; the
+  rewrite hid it — a regression, not a pre-existing bug.
+- **The `#[cfg(test)]` pattern matched raw text.** It was matched against
+  the original file, not the stripped code, so a `#[cfg(test)]` inside a
+  string literal counted as an attribute. The block it appeared to open
+  then swallowed the production code that followed.
+
+Both are fixed: the comment scanner now counts nesting depth, and the
+`cfg` pattern is matched against the stripped code. Two regression tests
+were added for them.
+
+**The first attempt at those tests did not work, and that is worth
+recording.** The tests as first written passed against the buggy filter —
+they were not load-bearing. The reproductions need the exact shapes:
+
+- the nested comment has to be **inside** the test module, because the
+  filter counts depth from the brace that opens the module, so a stray
+  brace before the module does not extend it;
+- the string holding `#[cfg(test)]` has to end **without a `;`**, because
+  the filter skips a `cfg` attribute whose block is a declaration, and it
+  finds that semicolon in the raw text.
+
+With those shapes, both tests fail against the buggy filter and pass
+against the fixed one. A test that passes against the broken code proves
+nothing, which is the same discipline the rest of this branch follows.
+
+The reviewer also found a third test that was **not** load-bearing: the
+char-literal test used `'}'`, and with the old filter the spurious `}`
+merely ended the block one line later, so both of its assertions still
+held. It now uses `'{'`, and it fails against the old filter.
+
+**What the reviewer found no defect in:** the new filter introduces no
+false negative on the current tree (an independent indentation-based
+oracle agrees: 404 raw hits, 0 production violations, 0 hidden by the new
+filter), the baseline drift is detected for all 11 knobs it tried, the
+`u16::try_from` change fails loudly and is unreachable in production, and
+the offset/line-number preservation holds.
+
+**The nft job would have gone red on a runner, for the wrong reason.**
+`nft -c` evaluates the ruleset against the running kernel, so it needs the
+`nft_synproxy` module — and GitHub's runner images ship no kernel modules
+(runner-images#10134: "we are not able to install any kernel modules on
+our images"). The job now tries to load the module and, if it is not
+available, says so and skips instead of failing for a reason that has
+nothing to do with the fixture.
+
+Two smaller things fixed with it: the filter's docstring claimed byte
+offsets are preserved when only character count is, and the baseline
+helper defaulted `enabled` to `false` while every sibling field panics on
+a bad value.
+
+### The dev-path checker had a hand-written pathspec list, and it was incomplete
+
+**Found by:** an independent review of the I-022 change, not by the author.
+
+`scripts/check_dev_paths.sh` scanned tracked files for a developer
+`/home/<user>/` path, but it selected the files to scan with a
+hand-written list: `systemd/*`, `deploy/*`, `scripts/*`, `*.rs`, `*.toml`,
+`*.yml`, `*.yaml`, `*.sh`, `*.service`, `*.timer`. Everything else was
+invisible to it — the 51 `.py` files outside `scripts/`, plus `.html`,
+`.nft`, `.mjs`, `.c` and `.h`. A developer path in any of those is exactly
+as broken as one in a unit file.
+
+A pathspec list that has to be kept in step with the tree is a list that
+will fall behind the tree, so the checker now scans every tracked file
+except documentation. The tree is clean under the wider scan: 0 hits
+across all tracked non-`.md` files.
+
+The contract test now proves the coverage, with probes at the repository
+root and under `.github/` — the places the old list had its hole. Against
+the old pathspec list the new test fails (`FAIL: offending file bad.py not
+named`); against the new one it passes.
+
+This also corrects an overclaim in the I-022 commit message, which said
+the gate "fails the build on any tracked `/home/<user>/` path". It did
+not: it failed on the file types it happened to list.
+
+### Branch state — `fix/i-013-synproxy-fixture-parity`
+
+**Base:** `bd417cd` (= `origin/master`, unchanged by this work).
+**Head:** the tip of this branch, none pushed. The branch has **no
+upstream**, so `git push` cannot reach `master` by accident. The
+authoritative list and count are `git log --oneline origin/master..HEAD`
+and `git rev-list --count origin/master..HEAD` — no number is written
+here, because a written count goes stale on the next commit.
+
+**Gates on the head SHA** (the local runner applies all of them, with no
+pipe on any gate command, and records each exit code separately):
+`cargo fmt --all -- --check` 0, `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` 0, `cargo test --workspace --all-features`
+0, the `lint-no-unwrap` filter and its regression suite 0, `actionlint` on
+the workflow files 0, `scripts/check_dev_paths.sh` 0, its contract test 0,
+`nft -c -f tests/fixtures/synproxy.nft` 0. The runner's logs are in the
+operator's scratch directory as `gate_run<N>.log`.
+
+| What | Commits |
+|---|---|
+| I-013 SYNPROXY fixture parity, then strengthened to pin the whole baseline config | `72981e1`, `40f3d28` |
+| I-020 dashboard quarantine search | `9978268` |
+| I-022 systemd portability + the dev-path gate | `b08c431`, `bf01372`, `1506887` |
+| I-024 protocol README, golden vector, and the key-sorted signing rule | `8727e05`, `f230c67` |
+| The `lint-no-unwrap` filter counted braces inside string literals | `705d098` |
+| nft fixture checked in CI, in its own job | `3254345` |
+| Comment and doc corrections (replay store, daemon pipeline, forecasting, types, xdp) | `b4d4337`, `a4c7f28`, `f230c67` |
+| A load-sensitive read timeout in an IPC test | `908a83c` |
+| Ledger updates | `3c98b63`, `6340824`, `4055034`, `5882941` |
+
+**Production behaviour changed on this branch, in full:** two lines of
+JavaScript in `src/dashboard/static/index.html` (the search listener and
+the re-apply after the 5-second rebuild), the systemd unit's path
+handling, and the CI workflow files. Everything else is documentation,
+comments, tests, or gate scripts. The Rust production paths are untouched
+except for comments.
+
+**Findings recorded, not fixed:** F9 (the enforcement lost update), F10
+(the key-sorted MAC input — a wire-contract decision), F11 (the crate-README
+claims; `docs/development/DOC_DRIFT_SWEEP.md` lists every claim and marks
+each one that has been fixed, so read that file rather than a count here).
+
+**Fixed on this branch since the sweep was recorded:** F12 (two stray
+compiled binaries tracked at the repository root, removed and gitignored),
+and the operator-facing README claims in the sweep — the `BlockReason`
+variants and wire tokens, the forecasting hypothesis map, the
+`Forecaster::run()` loop and its data source, and the xdp README's build
+prerequisites, phantom `BlocklistValue` type and drop path.
+
+**Not pushed, not merged, and `origin/master` untouched at `bd417cd`.**
+Pushing needs an explicit branch refspec from the owner.
+
+### Coordination with the other review channel, and the P2 it found
+
+An independent reviewer now runs hourly against `master` and posts findings
+to the repository's agent handoff issue (Issue #31). Its first review, of
+`bd417cd`, found one bounded P2: `BACKLOG.md` labelled `2adc966` as the
+assessed SHA **and** as equal to `origin/master`, when `bd417cd` was
+master's HEAD.
+
+**Confirmed and fixed here.** `2adc966` is the direct parent of `bd417cd`
+(`git log --oneline 2adc966..bd417cd` shows only `bd417cd`, which rebuilt
+the backlog's tables without changing code), so the evidence in the header
+belonged to the parent while the file lived on the child. The header now
+names both, and distinguishes them:
+
+- **CI on `2adc966`:** CI 39587482510 · Review Pipeline 39587482567 ·
+  lint-no-unwrap 39587482557 · Subnet Stress Pin 39587482512 — all success.
+- **CI on `bd417cd`:** CI 39589296986 · Review Pipeline 39589297074 ·
+  lint-no-unwrap 39589297157 · Subnet Stress Pin 39589297129 · Agent Flow
+  Contract 39617102370 — all success.
+
+Both sets of run ids were re-read from the GitHub Actions API for this
+commit, not copied from the file.
+
+**Why it matters for the next push.** That reviewer only sees `master`.
+This branch is not on `master`, so nothing in it has been reviewed by that
+channel, and its findings and mine will not meet until the branch is
+merged. Two things follow: the branch's own review record
+(`docs/development/OWNER_DECISION_PACKAGE.md`) is the only place its
+evidence lives until then, and any finding the other channel raises on
+`master` after this point is worth checking against this branch before
+being worked twice.
 
 ### Preserve state, verified after the last push
 

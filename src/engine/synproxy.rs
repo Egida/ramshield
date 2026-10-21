@@ -260,6 +260,172 @@ pub fn install(_cfg: &SynproxyConfig, _interface: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::SynproxyConfig;
+
+    /// I-013: the checked-in nft fixture must be the ruleset the daemon
+    /// installs, otherwise `nft -c -f tests/fixtures/synproxy.nft` proves
+    /// syntax for a ruleset production never loads (ports 53 and 80 were
+    /// missing from the fixture).
+    ///
+    /// The fixture is the generator's output verbatim, except for the table
+    /// name and the leading comment. Comparing the whole ruleset - not just
+    /// the ports - also pins mss, wscale, the connection limits and the rate
+    /// limits, so no knob can drift out of the file that the nft gate checks.
+    #[test]
+    fn nft_fixture_is_the_rendered_ruleset() {
+        // The fixture is only consumed by the nft gate, which is Linux-only,
+        // and the generator it is compared against is Linux-only too.
+        #[cfg(target_os = "linux")]
+        {
+            let fixture = std::fs::read_to_string(format!(
+                "{}/tests/fixtures/synproxy.nft",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .expect("read synproxy.nft fixture");
+
+            // Render from the SHIPPED BASELINE, not from the code default.
+            // The daemon installs the ruleset the baseline configures, so the
+            // baseline is what the fixture has to match. Rendering from the
+            // code default instead would let the baseline drift on any knob
+            // other than the ports and reopen exactly the defect this test
+            // exists to close.
+            let (interface, cfg) = super::tests::baseline_synproxy_config();
+            let ports = cfg
+                .ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rendered = super::render_ruleset(
+                &interface,
+                &ports,
+                cfg.mss,
+                cfg.wscale,
+                cfg.max_connections_per_source,
+                cfg.max_connections_total,
+                cfg.new_connections_per_second,
+                cfg.new_connection_burst,
+                cfg.new_connections_total_per_second,
+                cfg.new_connection_total_burst,
+            );
+
+            // The fixture uses its own table name and a comment header; the
+            // rules below must be identical to what the daemon installs.
+            let body: String = fixture
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let body = body.replace("ramshield_synproxy_fixture", "ramshield_synproxy");
+
+            assert_eq!(
+                body.trim(),
+                rendered.trim(),
+                "tests/fixtures/synproxy.nft has drifted from the ruleset the daemon installs"
+            );
+        }
+    }
+
+    /// Read the shipped baseline config's [synproxy] section and the XDP
+    /// interface the daemon installs on. Returns (interface, config).
+    ///
+    /// The daemon renders the SYNPROXY ruleset from the loaded config, so the
+    /// baseline file is the only thing that says what the fixture must be.
+    fn baseline_synproxy_config() -> (String, SynproxyConfig) {
+        let path = format!("{}/config.baseline.toml", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let value: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let section = &value["synproxy"];
+        let get_u16 = |key: &str| -> u16 {
+            let raw = section[key]
+                .as_integer()
+                .unwrap_or_else(|| panic!("{path} [synproxy].{key} is missing or not an integer"));
+            u16::try_from(raw)
+                .unwrap_or_else(|_| panic!("{path} [synproxy].{key} = {raw} does not fit in u16"))
+        };
+        let get_u32 = |key: &str| -> u32 {
+            let raw = section[key]
+                .as_integer()
+                .unwrap_or_else(|| panic!("{path} [synproxy].{key} is missing or not an integer"));
+            u32::try_from(raw)
+                .unwrap_or_else(|_| panic!("{path} [synproxy].{key} = {raw} does not fit in u32"))
+        };
+        let ports: Vec<u16> = section["ports"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} has no [synproxy].ports array"))
+            .iter()
+            .map(|v| {
+                let raw = v
+                    .as_integer()
+                    .unwrap_or_else(|| panic!("{path} [synproxy].ports holds a non-integer"));
+                u16::try_from(raw).unwrap_or_else(|_| {
+                    panic!("{path} [synproxy].ports holds {raw}, not a TCP port")
+                })
+            })
+            .collect();
+        let interface = value["xdp"]["interface"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{path} has no [xdp].interface string"))
+            .to_string();
+        (
+            interface,
+            SynproxyConfig {
+                // Every field here panics on a missing or malformed value
+                // rather than defaulting: a default here would quietly
+                // compare the fixture against a config the daemon would
+                // never install.
+                enabled: section["enabled"].as_bool().unwrap_or_else(|| {
+                    panic!("{path} [synproxy].enabled is missing or not a boolean")
+                }),
+                ports,
+                mss: get_u16("mss"),
+                wscale: u8::try_from(section["wscale"].as_integer().unwrap_or_else(|| {
+                    panic!("{path} [synproxy].wscale is missing or not an integer")
+                }))
+                .unwrap_or_else(|_| panic!("{path} [synproxy].wscale does not fit in u8")),
+                max_connections_per_source: get_u32("max_connections_per_source"),
+                max_connections_total: get_u32("max_connections_total"),
+                new_connections_per_second: get_u32("new_connections_per_second"),
+                new_connection_burst: get_u32("new_connection_burst"),
+                new_connections_total_per_second: get_u32("new_connections_total_per_second"),
+                new_connection_total_burst: get_u32("new_connection_total_burst"),
+            },
+        )
+    }
+
+    /// I-013: the shipped baseline config must configure the same ports as
+    /// the code default the generator renders from.
+    #[test]
+    fn baseline_config_ports_match_the_code_default() {
+        let path = format!("{}/config.baseline.toml", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let value: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        let ports: Vec<u16> = value["synproxy"]["ports"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} has no [synproxy].ports array"))
+            .iter()
+            .map(|v| {
+                let raw = v
+                    .as_integer()
+                    .unwrap_or_else(|| panic!("{path} [synproxy].ports holds a non-integer"));
+                u16::try_from(raw).unwrap_or_else(|_| {
+                    panic!("{path} [synproxy].ports holds {raw}, which is not a TCP port")
+                })
+            })
+            .collect();
+        assert_eq!(
+            ports,
+            SynproxyConfig::default().ports,
+            "{path} [synproxy].ports diverges from the code default"
+        );
+        assert!(
+            ports.contains(&80),
+            "port 80 must stay covered by the SYNPROXY ruleset, got {ports:?}"
+        );
+    }
+
     #[test]
     fn rendered_ruleset_uses_kernel_supported_connlimit_forms() {
         #[cfg(target_os = "linux")]

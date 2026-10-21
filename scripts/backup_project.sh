@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/home/m/vehicle_of_rationalism/ramshield/beta/rs"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKUP_DIR="$PROJECT_DIR/backups"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKUP_NAME="ramshield_backup_${TIMESTAMP}"

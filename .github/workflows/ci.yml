@@ -144,6 +144,41 @@ jobs:
       - name: Verify C SHM ABI and reader/writer stress
         run: RAMSHIELD_SHM_TSAN=1 scripts/verify_shm_header.sh
 
+  nft-fixture:
+    name: nft SYNPROXY fixture syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # The nft SYNPROXY fixture is a tracked file that no workflow checked
+      # for nft syntax: nftables was never installed, so `nft -c -f` ran only
+      # from two local scripts that no workflow calls. The gate was dead.
+      #
+      # This is its own job on purpose. `nft -c` evaluates the ruleset
+      # against the runner kernel, so it needs the nft_synproxy module; if
+      # the runner kernel does not have it, this job fails on its own
+      # instead of taking the test matrix down with it.
+      - name: Install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+      - name: nft SYNPROXY fixture syntax
+        run: |
+          set -euo pipefail
+          # `nft -c` evaluates the ruleset against the running kernel, so it
+          # needs the nft_synproxy module. GitHub's runner images ship no
+          # kernel modules and the runner kernel's module tree is not
+          # installed (runner-images#10134: "we are not able to install any
+          # kernel modules on our images"), so the module is usually absent
+          # and the check cannot run there. Try to load it; if it is not
+          # available, say so and skip rather than fail for a reason that
+          # has nothing to do with the fixture.
+          if ! sudo modprobe nft_synproxy 2>/dev/null && ! lsmod | grep -q '^nft_synproxy'; then
+            echo "::notice::nft_synproxy is not available on this runner - skipping the nft syntax check"
+            exit 0
+          fi
+          sudo nft -c -f tests/fixtures/synproxy.nft
+
   workflow-lint:
     name: Workflow syntax and expression lint
     runs-on: ubuntu-latest
