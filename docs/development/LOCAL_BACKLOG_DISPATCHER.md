@@ -6,6 +6,28 @@ Each run uses an isolated git worktree. The dispatcher validates the resulting d
 
 The user service has a release guard: it does not launch a worker until the dispatcher implementation PR configured in `RAMSHIELD_DISPATCHER_ENABLE_AFTER_PR` is merged. Keep the local worktree and this checkout available after merging so the timer can continue to run. A powered-off or disconnected machine cannot dispatch; systemd catches up after boot.
 
+## Install
+
+The unit does not hard-code a checkout path. Point it at the checkout to work
+from by writing one file:
+
+```sh
+mkdir -p ~/.config
+printf 'RS_DISPATCHER_SCRIPT=%s/.github/scripts/backlog_dispatcher.py\n' \
+  /path/to/ramshield > ~/.config/ramshield-backlog-dispatcher.env
+install -Dm644 systemd/user/ramshield-backlog-dispatcher.service \
+  ~/.config/systemd/user/ramshield-backlog-dispatcher.service
+install -Dm644 systemd/user/ramshield-backlog-dispatcher.timer \
+  ~/.config/systemd/user/ramshield-backlog-dispatcher.timer
+systemctl --user daemon-reload
+systemctl --user enable --now ramshield-backlog-dispatcher.timer
+```
+
+The dispatcher resolves its own repository from the script path, so the
+script location is the only thing that has to be configured. If
+`RS_DISPATCHER_SCRIPT` is unset, the unit fails with that message rather
+than starting in the wrong directory.
+
 ## Operate
 
 ```sh

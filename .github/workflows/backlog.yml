@@ -51,6 +51,10 @@ jobs:
           set -euo pipefail
           bash scripts/test_backlog_gate_guard.sh
           bash scripts/test_backlog_diff_check.sh
+          bash scripts/test_check_dev_paths.sh
+
+      - name: No developer-specific absolute paths
+        run: bash scripts/check_dev_paths.sh
 
       - name: Record SHAs
         id: meta
