@@ -402,6 +402,22 @@ one *lower* per reserved-key decision than before, not unchanged.
 reserved key is not only the /0 case (`0.0.0.32/32` also hashes to 0). The
 three options and their consequences are in `docs/development/OPEN_FINDINGS.md`.
 
+**One workflow is red, and it is not this code.** The scheduled *Mesh
+Acceptance Watch* run `39571107161` failed at 08:40 on 2026-10-21. It did
+not test master: `.github/workflows/mesh-acceptance-watch.yml:66` resolves
+the candidate as
+`github.event_name == 'schedule' && 'audit-branch' || github.sha`, so a
+scheduled run checks out **audit-branch** and tests the parked mesh work
+(the failures are `PeerEpoch`, `Aworset` and `tombstone_acks` unresolved
+in `crates/ramshield-mesh/src/transport.rs`). The workflow's own history
+shows it red on master and audit-branch every day since 2026-10-12 was the
+last green. It is pre-existing and belongs to the parked mesh work.
+
+Master was verified against that workflow's own commands:
+`cargo test --locked -p ramshield-mesh --all-targets` on the tree of
+`0018b11` passes 73/73 locally. The four push-triggered workflows on both
+`d1f4a81` and `0018b11` are green.
+
 **27 runs, 23 green, 4 failed.** The four failures are named and explained
 below. Nothing was hidden and no failure was retried into a passing log
 without the failed log being kept and named.
