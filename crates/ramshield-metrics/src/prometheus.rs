@@ -104,6 +104,12 @@ impl Metrics {
             "gauge"
         ));
         out.push_str(&emit!(
+            "ramshield_ingest_channel_depth_peak",
+            self.ingest_channel_depth_peak.load(Ordering::Relaxed),
+            "High-water mark of the bounded ingest queue since process start.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
             "ramshield_active_cidr_blocks",
             self.active_cidr_blocks.load(Ordering::Relaxed),
             "Active IPv4/IPv6 CIDR prefixes applied to the kernel LPM trie (userspace mirror).",

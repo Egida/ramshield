@@ -94,3 +94,24 @@ fn native_ingest_drop_counters_are_exported() {
         "the disconnect counter must be broken out:\n{rendered}"
     );
 }
+
+#[test]
+fn ingest_channel_depth_peak_is_monotonic_and_exported() {
+    let m = Metrics::new();
+    m.set_channel_depth(10);
+    m.set_channel_depth(25);
+    // A later, lower reading must not lower the high-water mark.
+    m.set_channel_depth(3);
+    assert_eq!(m.ingest_channel_depth.load(Ordering::Relaxed), 3);
+    assert_eq!(m.ingest_channel_depth_peak.load(Ordering::Relaxed), 25);
+
+    let rendered = m.render_prometheus();
+    assert!(
+        rendered.contains("ramshield_ingest_channel_depth 3"),
+        "the current depth must be exported:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_ingest_channel_depth_peak 25"),
+        "the high-water mark must be exported:\n{rendered}"
+    );
+}

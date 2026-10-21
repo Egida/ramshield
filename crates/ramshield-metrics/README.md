@@ -122,6 +122,18 @@ logged once per daemon (every subsequent event is rejected too, so a log per
 event would be a flood) and is broken out so an operator can tell the two
 apart.
 
+Queue pressure comes in two gauges:
+
+| Metric | Meaning |
+|---|---|
+| `ramshield_ingest_channel_depth` | Current buffered events in the bounded ingest queue. |
+| `ramshield_ingest_channel_depth_peak` | High-water mark since process start. |
+
+The instantaneous depth says how full the queue is right now; the peak says
+how close it has ever come to saturation. Read together with the drop
+counter, the peak distinguishes "the queue is genuinely too small for this
+load" from "a brief spike", which the instantaneous value alone cannot.
+
 These count **channel rejections only**. A packet that never becomes an
 observation event — a non-IP frame, a trusted-overlay skip, or one refused by
 the per-second admission budget — is not counted, because no event was built

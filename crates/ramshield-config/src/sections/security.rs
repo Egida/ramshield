@@ -52,6 +52,13 @@ pub struct NativeIngestConfig {
     pub interface: String,
     /// Maximum telemetry events emitted per second. SYN packets are always
     /// admitted until this cap is reached; ordinary packets are sampled.
+    ///
+    /// **This is an admission cap, not a delivery guarantee.** It bounds how
+    /// many packets may *become* observation events per second. It says
+    /// nothing about whether an admitted event reaches the detection
+    /// pipeline: the downstream queue is bounded, and a saturated queue drops
+    /// the event rather than blocking the capture thread. The loss is
+    /// reported by `ramshield_native_ingest_drops_total`.
     #[serde(default = "default_native_ingest_max_events_per_sec")]
     pub max_events_per_sec: u64,
 }

@@ -114,9 +114,17 @@ impl Metrics {
 
     /// Gauge: bounded ingest-queue occupancy. Written by the engine snapshot
     /// path (dashboard refresh + SSE), same source value on both writers.
+    ///
+    /// This is also where the high-water mark is maintained: the gauge is the
+    /// only place the depth is observed, so tracking the peak here means the
+    /// peak cannot drift out of step with the value it summarises.
     pub fn set_channel_depth(&self, depth: usize) {
-        self.ingest_channel_depth
-            .store(depth as u64, Ordering::Relaxed);
+        let depth = depth as u64;
+        self.ingest_channel_depth.store(depth, Ordering::Relaxed);
+        // fetch_max only ever raises the value, so the peak is monotonic
+        // without a compare-and-swap loop and without a lock.
+        self.ingest_channel_depth_peak
+            .fetch_max(depth, Ordering::Relaxed);
     }
 
     /// Gauge: userspace mirror of active CIDR LPM blocks. Written by the

@@ -140,6 +140,13 @@ window_ms = 100
 [native_ingest]
 enabled = false
 interface = "eth0"
+# An ADMISSION CAP, not a delivery guarantee. It bounds how many packets may
+# become observation events per second. It does not promise that an admitted
+# event reaches the detection pipeline: the downstream queue is bounded and a
+# saturated queue drops the event rather than blocking the capture thread.
+# The loss is reported by `ramshield_native_ingest_drops_total`, and the
+# queue pressure by `ramshield_ingest_channel_depth` and its high-water mark
+# `ramshield_ingest_channel_depth_peak`.
 max_events_per_sec = 10000
 
 [synproxy]

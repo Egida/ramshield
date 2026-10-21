@@ -70,6 +70,14 @@ pub struct Metrics {
     /// Instantaneous bounded ingest-queue occupancy (gauge; written by the
     /// engine snapshot path — see Engine::dashboard_snapshot / get_module_stats).
     pub ingest_channel_depth: Arc<AtomicU64>,
+    /// High-water mark of `ingest_channel_depth` since process start (gauge).
+    ///
+    /// The instantaneous depth says how full the queue is right now; the peak
+    /// says how close it has ever come to saturation, which is what tells an
+    /// operator whether the drops reported by `native_ingest_drops` are a
+    /// symptom of a queue that is genuinely too small rather than a brief
+    /// spike. It only ever rises.
+    pub ingest_channel_depth_peak: Arc<AtomicU64>,
     /// Userspace mirror of active CIDR LPM blocks (gauge; written by the
     /// enforcement tick). Kernel BLOCKCIDR maps are authoritative; mirror
     /// exists for cheap telemetry without per-tick map iteration.
@@ -218,6 +226,7 @@ impl Metrics {
             native_ingest_drops: Arc::new(AtomicU64::new(0)),
             native_ingest_drops_disconnected: Arc::new(AtomicU64::new(0)),
             ingest_channel_depth: Arc::new(AtomicU64::new(0)),
+            ingest_channel_depth_peak: Arc::new(AtomicU64::new(0)),
             active_cidr_blocks: Arc::new(AtomicU64::new(0)),
             batches_total: Arc::new(AtomicU64::new(0)),
             promotions_total: Arc::new(AtomicU64::new(0)),

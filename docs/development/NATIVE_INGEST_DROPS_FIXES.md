@@ -77,7 +77,33 @@ channel at the same moment. The counter also makes the one-shot property
 The counter is shared by every worker, so the daemon logs the condition once
 overall.
 
-### 2.4 The scope is stated precisely
+### 2.4 Queue pressure is visible, not just the loss
+
+A drop counter says *that* events were lost. It does not say whether the
+queue was genuinely too small for the load or whether a brief spike caught it
+out. Two gauges now answer that:
+
+- `ramshield_ingest_channel_depth` — the current occupancy, which already
+  existed and is written by the engine snapshot path;
+- `ramshield_ingest_channel_depth_peak` — the high-water mark since process
+  start, added here.
+
+The peak is maintained in `set_channel_depth`, which is the only place the
+depth is observed, so the peak cannot drift out of step with the value it
+summarises. It only ever rises (`fetch_max`), so it needs no lock and no
+compare-and-swap loop.
+
+### 2.5 The event-rate cap is documented as what it is
+
+`native_ingest.max_events_per_sec` is an **admission cap, not a delivery
+guarantee**. It bounds how many packets may *become* observation events per
+second; it says nothing about whether an admitted event reaches the
+detection pipeline, because the downstream queue is bounded and a saturated
+queue drops the event rather than blocking the capture thread. The config
+field's own doc comment, the config crate README and the metrics crate README
+now say so, and point at the drop counter and the queue-pressure gauges.
+
+### 2.6 The scope is stated precisely
 
 The counter covers **channel rejections only**. A packet that never becomes
 an event — a non-IP frame, a trusted-overlay skip, or one refused by the
@@ -199,3 +225,4 @@ batch:
 | g(i) — no test asserts the Prometheus export contains the new metrics | Added: `native_ingest_drop_counters_are_exported` |
 | g(ii) — no test asserts the success path leaves the counters at 0 | Added: `native_ingest_does_not_count_a_delivered_event_as_a_drop` |
 | g(iii) — no multi-threaded test exercises the compare-exchange under contention | Added: `native_ingest_emits_the_disconnect_error_once_under_contention` (8 threads × 100 events) |
+| the review's F3 action also asked to "export counters **and queue pressure**" and to "document that `max_events_per_sec` is not a delivery guarantee" | Added in the follow-up commit: `ramshield_ingest_channel_depth_peak` (high-water mark, monotonic, maintained in the one place the depth is observed) and the admission-cap wording in the config field, the config README and the metrics README |
