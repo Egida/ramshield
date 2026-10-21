@@ -12,18 +12,48 @@ use ramwal::testkit::{HEADER_SIZE, RecordHeader, encode_payload};
 use ramwal::{Error, Wal};
 
 fn make_dir() -> String {
+    make_dir_at(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    )
+}
+
+/// A unique directory name.
+///
+/// The counter is what makes it unique. A timestamp alone is not enough:
+/// a CI runner's clock can be coarse enough that two tests in the same
+/// process read the same nanosecond, and then they share a directory and
+/// clobber each other's fixtures. That is not hypothetical - it made
+/// `fault_injection_shrinking_file` fail on CI with another test's
+/// payload in the recovered records.
+fn make_dir_at(ts: u128) -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = std::env::var("TMPDIR").unwrap_or("/tmp".to_string());
-    let uid = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}/ramwal-test-{:020}", tmp, uid)
+    format!("{tmp}/ramwal-test-{ts:020}-{seq:04}")
 }
 
 fn test_dir() -> String {
     let d = make_dir();
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Two directories made in the same nanosecond must still differ.
+///
+/// A CI runner's clock can be coarse enough that two tests in the same
+/// process read the same nanosecond. When they did, the tests shared a
+/// directory and clobbered each other's fixtures, and
+/// `fault_injection_shrinking_file` failed with another test's payload
+/// in the recovered records.
+#[test]
+fn two_dirs_made_in_the_same_nanosecond_still_differ() {
+    let ts = 1_700_000_000_000_000_000u128;
+    let a = make_dir_at(ts);
+    let b = make_dir_at(ts);
+    assert_ne!(a, b, "two test directories collided");
 }
 
 fn write_segment(dir: &str, seg_idx: u64, records: &[(&[u8], u64)]) -> u64 {
