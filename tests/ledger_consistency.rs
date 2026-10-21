@@ -400,14 +400,33 @@ fn extract_count(text: &str, marker: &str) -> Option<usize> {
 }
 
 #[test]
-fn every_sha_cited_in_a_ledger_is_on_master() {
-    // The ledgers cite the commits that did the work. A SHA that names a
-    // side branch, or a typo, is the same class of error as a wrong
-    // status: it points the reader at something that does not exist.
+fn every_sha_cited_in_a_ledger_names_a_commit() {
+    // The ledgers cite the commits that did the work. A typo, or a commit
+    // that was never made, is the same class of error as a wrong status: it
+    // points the reader at something that does not exist.
+    //
+    // A SHALLOW checkout cannot answer this: the objects for the older
+    // commits are simply not there, and the cited SHAs reach 788 commits
+    // back. So the check says what it could not verify and does not claim
+    // a pass it did not earn. A full clone - every developer's machine -
+    // enforces it completely.
     let Some(git) = git_available() else {
-        eprintln!("SKIP: git is not available, the SHA check did not run");
+        eprintln!("NOT RUN: git is not available, the SHA check did not run");
         return;
     };
+    if is_shallow(&git) {
+        let mut cited = 0usize;
+        for rel in ledgers() {
+            for line in read(rel).lines() {
+                cited += shas_in(line).len();
+            }
+        }
+        eprintln!(
+            "NOT RUN: the checkout is shallow, so none of the {cited} cited SHAs \
+             could be checked for existence. A full clone enforces this check."
+        );
+        return;
+    }
     let mut problems: Vec<String> = Vec::new();
     for rel in ledgers() {
         let text = read(rel);
@@ -465,6 +484,18 @@ fn shas_in(line: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn is_shallow(git: &Path) -> bool {
+    let Ok(out) = std::process::Command::new(git)
+        .arg("-C")
+        .arg(repo_root())
+        .args(["rev-parse", "--is-shallow-repository"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).trim() == "true"
 }
 
 fn git_available() -> Option<PathBuf> {

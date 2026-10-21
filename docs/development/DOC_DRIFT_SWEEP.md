@@ -538,4 +538,3 @@ Code: the real struct has a public `cap: usize` and a private `inner`.
 **F62 (P2)** `crates/ramshield-xdp/README.md:7` — the claim that the BPF build degrades gracefully.
 
 Code: `crates/ramshield-xdp/build.rs:26-31` — `build.rs` **panics** when `bpf-linker` is missing ("XDP BPF build failed: bpf-linker missing ... No placeholder ELF is written."). The README must not promise a soft skip the build does not do.
-
