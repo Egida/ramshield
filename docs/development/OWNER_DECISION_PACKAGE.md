@@ -482,6 +482,64 @@ plus test changes. The conclusion the reviewer drew — that none of it is on
 master — holds, because the diff against master shows the branch is behind
 master. The prose in `BACKLOG.md` states the accurate version.
 
+**Follow-up on the same pass.** The owner asked that the backlog carry
+**pending tasks only**. The 19 completed rows were moved to a "Completed
+rows" section at the end of the file, keeping their full status text, so
+the tables above answer only one question. P0 and P1 now have no pending
+row at all, which is stated in place rather than left as an empty table.
+
+**A second accuracy correction, found by the owner asking for the findings
+to be double-checked.** The delta review had noted that the bool-wrapper
+list was incomplete: the pre-fix reader matched `client_hash == hash` with
+`hash == 0`, so `ramshield_shm_read(table, 0, ...)` returned `true` for a
+rule stored under the reserved key. The current reader rejects that key
+with `INVALID`, so the wrapper returns `false` — a **second** observable
+change, not the one the shipped prose claimed. Proven by a direct probe of
+the pre-fix header against the current one:
+
+```
+PRE-F1 (d1f4a81^): ramshield_shm_read(table, 0, ...) -> TRUE
+CURRENT (master):  ramshield_shm_read(table, 0, ...) -> false
+```
+
+`docs/development/CGNAT_SHM_LOOKUP_FIXES.md` §2.4, the header's wrapper
+comment and the crate README's release note now state both differences.
+
+**A flaky test was found and fixed on the way.** The 14-gate run for this
+commit failed once: `test-full` exited 101 on
+`detection::tests::merge_local_holds_the_merge_lock_for_the_whole_drain`,
+with "the merge lock was acquired 5663 times during a single drain" against
+a bound of 1,000. The same test passed in `test-core` and
+`test-all-features` in the same run, and passed 5/5 in isolation. The load
+average was 5.00 on 4 vCPUs.
+
+**The production behaviour was never wrong**: `merge_local` takes the merge
+lock once for the whole drain. The test's *measurement* was wrong twice
+over:
+
+- `drain_started` was set BEFORE the drain thread took the lock, so a
+  competitor that hot-spun could win the lock thousands of times in that
+  pre-drain window. On an oversubscribed box the drain thread lost its
+  slice and the competitor monopolised it. The test measured its own
+  scheduling.
+- Once the drain held the lock, a competitor blocked on it could not see
+  the lock being freed and re-taken within nanoseconds, so it could not
+  detect a regression to per-IP locking either. Verified: with a
+  per-10-IP release simulated, the old competitor still reported a count
+  under the bound.
+
+The test now uses a `try_lock` probe that counts the moments the lock is
+FREE after it has first been observed as HELD. That is the property under
+test — how often did the drain give the lock up during the drain — and
+the pre-drain window is excluded by construction.
+
+**Non-vacuity re-proved**: with a per-10-IP lock release simulated, the
+new probe reports **39,118** free windows against the bound of 1,000 and
+fails. The fixed test passes 4/4 in isolation and 4/4 under a deliberate
+CPU load of 3.92–5.01 on 4 vCPUs — the condition that broke the old
+version. Production code was restored after every simulation; the diff
+touches the test only.
+
 **One workflow is red, and it is not this code.** The scheduled *Mesh
 Acceptance Watch* run `39571107161` failed at 08:40 on 2026-10-21. It did
 not test master: `.github/workflows/mesh-acceptance-watch.yml:66` resolves

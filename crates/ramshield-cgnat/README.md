@@ -42,10 +42,15 @@ RamshieldShmLookup r = ramshield_shm_read_ex(table, hash, now_ms, &snap);
 ### Release note
 
 The bool wrapper's signature and its "true only on a match" behaviour are
-unchanged. One error case differs from the previous release, in the old
-code's favour: an invalid prefix (0, or above 32) is no longer looked up
-as the reserved key 0, so it can no longer find a rule stored under that
-key.
+unchanged. Two error cases differ from the previous release, both in the
+old code's favour:
+
+- an invalid prefix (0, or above 32) is no longer looked up as the
+  reserved key 0, so it can no longer find a rule stored under that key;
+  and
+- a lookup for the reserved key 0 itself no longer finds a rule. The old
+  reader matched `client_hash == hash` with `hash == 0`, so it could report
+  a rule stored under the reserved key.
 
 The whole probe window is scanned, exactly as before. The old comment said
 "empty terminates the probe", which did not describe the code: its `break`

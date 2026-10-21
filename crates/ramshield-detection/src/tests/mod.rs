@@ -1475,29 +1475,57 @@ fn merge_local_holds_the_merge_lock_for_the_whole_drain() {
 
     let drain_started = Arc::new(AtomicBool::new(false));
     let drain_done = Arc::new(AtomicBool::new(false));
-    let acquisitions_during_drain = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // The competing thread: hammer the merge lock and count how often it
-    // gets in while the drain is running.
-    let competitor = {
+    // The probe: how often does the merge lock become AVAILABLE while the
+    // drain is running?
+    //
+    // The earlier design used a competitor thread that blocked on the lock
+    // and counted how often it got in. That measured the wrong thing twice
+    // over:
+    //
+    //   - Before the drain thread has taken the lock at all, the
+    //     competitor could take it as fast as it liked. On an
+    //     oversubscribed box the drain thread lost its slice in that
+    //     window and the competitor won the lock thousands of times: the
+    //     test failed with 5,663 acquisitions against a bound of 1,000,
+    //     having measured its own scheduling rather than the merge path.
+    //   - Once the drain holds the lock, a competitor blocked on it cannot
+    //     see the lock being freed and re-taken within nanoseconds, so it
+    //     could not detect a regression to per-IP locking either. The
+    //     count it produced against such a regression was below the bound.
+    //
+    // A try_lock probe measures the property directly. The lock is either
+    // HELD (the drain has it) or FREE. Counting the free moments AFTER the
+    // lock has first been observed as held is exactly the question under
+    // test: how often did the drain give the lock up during the drain?
+    // The pre-drain window is excluded, because until the drain has taken
+    // the lock the probe is looking at a free lock and `held_seen` is
+    // still false.
+    let free_windows_during_drain = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let probe = {
         let eng = Arc::clone(&eng);
         let drain_started = Arc::clone(&drain_started);
         let drain_done = Arc::clone(&drain_done);
-        let acquisitions = Arc::clone(&acquisitions_during_drain);
+        let free_windows = Arc::clone(&free_windows_during_drain);
         std::thread::spawn(move || {
+            let mut held_seen = false;
             while !drain_done.load(Ordering::Relaxed) {
-                if drain_started.load(Ordering::Relaxed) {
-                    let guard = eng
-                        .pre_aggs_merge_lock
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if drain_started.load(Ordering::Relaxed) && !drain_done.load(Ordering::Relaxed)
-                    {
-                        acquisitions.fetch_add(1, Ordering::Relaxed);
-                    }
-                    drop(guard);
-                } else {
+                if !drain_started.load(Ordering::Relaxed) {
                     std::hint::spin_loop();
+                    continue;
+                }
+                match eng.pre_aggs_merge_lock.try_lock() {
+                    Ok(guard) => {
+                        if held_seen {
+                            free_windows.fetch_add(1, Ordering::Relaxed);
+                        }
+                        drop(guard);
+                    }
+                    Err(_) => {
+                        // The drain is holding the lock. From here on, a
+                        // free moment is the drain giving it up.
+                        held_seen = true;
+                    }
                 }
             }
         })
@@ -1521,22 +1549,21 @@ fn merge_local_holds_the_merge_lock_for_the_whole_drain() {
     eng.merge_local(&mut local);
     drain_done.store(true, Ordering::Relaxed);
 
-    competitor.join().expect("competitor thread");
+    probe.join().expect("probe thread");
 
-    // The count is not expected to be exactly zero: the competitor can win
-    // the lock in the instant BEFORE the drain starts or in the instant AFTER
-    // it ends, and the flag check happens after the acquisition. Those
-    // boundary races are a handful of acquisitions.
+    // The count is not expected to be exactly zero: the probe can catch the
+    // lock in the instant AFTER the drain releases it and before the flag
+    // is set. That is a couple of moments.
     //
-    // The old per-IP lock produced 12.5 MILLION acquisitions for this same
-    // drain (~65 per IP). The bound below leaves three orders of magnitude
-    // of headroom over the boundary races while staying far below the old
-    // behaviour, so the assertion cannot flake.
+    // The old per-IP lock released and re-taken the lock for every one of
+    // the 200,000 IPs in this drain, so the probe would see the lock free
+    // thousands of times. The bound below leaves three orders of magnitude
+    // of headroom over the boundary moments while staying far below that.
     const BOUNDARY_RACE_ALLOWANCE: u64 = 1_000;
-    let acquisitions = acquisitions_during_drain.load(Ordering::Relaxed);
+    let free_windows = free_windows_during_drain.load(Ordering::Relaxed);
     assert!(
-        acquisitions < BOUNDARY_RACE_ALLOWANCE,
-        "the merge lock was acquired {acquisitions} times during a single drain; \
+        free_windows < BOUNDARY_RACE_ALLOWANCE,
+        "the merge lock became free {free_windows} times during a single drain; \
          it must be held for the whole drain (old per-IP lock: ~12.5M)"
     );
 }

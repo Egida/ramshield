@@ -150,11 +150,29 @@ compiles it in; the new functions are additive. An out-of-repo proxy that
 wants the new semantics calls the `_ex` functions; one that does not is
 unaffected.
 
-**One** observable behaviour of the bool wrapper changes, and it is a case
-the old code got wrong: **an invalid prefix can no longer find a rule.**
-The old wrapper looked an out-of-range prefix up as the reserved key 0, so
-it could return `true` for a rule stored under that key. It now returns
-`false`.
+**Two** observable behaviours of the bool wrapper change, and both are cases
+the old code got wrong:
+
+1. **An invalid prefix can no longer find a rule.** The old wrapper looked
+   an out-of-range prefix up as the reserved key 0, so it could return
+   `true` for a rule stored under that key. It now returns `false`.
+2. **A lookup for the reserved key 0 can no longer find a rule.** The old
+   reader matched `client_hash == hash` with `hash == 0`, so
+   `ramshield_shm_read(table, 0, ...)` returned `true` for a rule stored
+   under the reserved key. The reader now rejects that key with `INVALID`,
+   so the bool wrapper returns `false`.
+
+The second difference was found by a direct probe of the pre-fix header
+against the current one:
+
+```
+PRE-F1 (d1f4a81^): ramshield_shm_read(table, 0, ...) -> TRUE
+CURRENT (master):  ramshield_shm_read(table, 0, ...) -> false
+```
+
+The contract test pins the new behaviour
+(`the bool wrapper must not find a rule under the reserved key`); the
+probe only establishes that the old behaviour differed.
 
 Two earlier drafts of this report got this wrong in opposite directions.
 The first claimed the wrapper was behaviour-identical in every case; the

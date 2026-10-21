@@ -234,10 +234,15 @@ ramshield_shm_read_ex(const RamshieldShmRuleEntry *table,
  * Compatibility wrapper. A lookup that could not be completed coherently is
  * still reported as "not found", as it always was.
  *
- * The observable behaviour is unchanged with one exception, and it is a
- * case the old code got wrong: an invalid prefix (0, or above 32) is no
- * longer looked up as the reserved key 0, so it can no longer find a rule
- * stored under that key.
+ * The observable behaviour changes in two cases, and both are cases the
+ * old code got wrong:
+ *
+ *   - an invalid prefix (0, or above 32) is no longer looked up as the
+ *     reserved key 0, so it can no longer find a rule stored under that
+ *     key; and
+ *   - a lookup for the reserved key 0 itself no longer finds a rule. The
+ *     old reader matched client_hash == hash with hash == 0, so it could
+ *     report a rule stored under the reserved key.
  *
  * The whole probe window is scanned, exactly as before this change. The
  * previous comment here said "empty terminates the probe", which did not
