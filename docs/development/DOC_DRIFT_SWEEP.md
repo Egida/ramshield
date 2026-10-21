@@ -1,9 +1,22 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. This is the result of a read-only
+**Status:** OPEN, partially worked. 32 of the 53 claims are fixed; 21
+remain, in 3 crate READMEs (`ramshield-storage` 8, `ramshield-metrics` 7,
+`ramshield-analytics` 6). This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master = `bd417cd`).
+
+**Fixed since this file was written:** the `ramshield-types`,
+`ramshield-forecasting`, `ramshield-xdp` and `ramshield-config` READMEs.
+The config crate's eleven claims (F9 to F19) are corrected and, unlike the
+rest, the template is now pinned by a test:
+`crates/ramshield-config/tests/readme_template.rs` loads the ```toml
+block straight out of the README through `Config::from_toml_file`, which
+parses and validates it. The old template failed that test - the phantom
+`[l7.rule]` section is a TOML parse error. The other three crates are
+corrected in prose only; a template test per crate is the natural next
+step, one crate at a time.
 
 **Method.** Every claim was checked against the source by `git show`,
 `grep -n` / `grep -rn` for callers, and `cat -n` for exact lines. No
@@ -176,6 +189,51 @@ Code: `crates/ramshield-config/Cargo.toml:8` → `ramshield-types = { path = "..
 > "75 fuzz tests in `tests/fuzz.rs`"
 
 Code: `grep -c '#\[test\]' crates/ramshield-config/tests/fuzz.rs` → **4** (2 proptest + 2 unit).
+
+**Status: FIXED.** All eleven config claims (F9 to F19) are corrected in
+`crates/ramshield-config/README.md`, and the template is now guarded by a
+test instead of by prose.
+
+What changed, and against what:
+
+- **F9** — the template's detection keys were `window_seconds`,
+  `batch_window_seconds`, `batch_threshold_rps` and `event_threshold_rps`;
+  none of them exists. The template now uses the real ones
+  (`rate_window_secs`, `batch_window_ms`, `subnet_batch_threshold`,
+  `subnet_batch_min_events`, `promote_min_events`, `pulse_window_secs`,
+  `pulse_threshold_samples`) and the `l7_*` names the code reads.
+- **F10** — `[l7.rule]` is not a section. L7 is `detection.l7_rules`, an
+  array of tables, and `L7Rule` requires `route_hash`, `cost_weight` and
+  `baseline_latency_us`. The template now shows the commented
+  `[[detection.l7_rules]]` shape.
+- **F11** — `durability = "hard"` is not a value. The enum is
+  `None | Flush | Fsync | GroupCommit`, and `GroupCommit` is the default.
+- **F12** — `[ipc] listen_addr` is `tcp_addr`, `[dashboard] listen_addr`
+  is `http_addr`.
+- **F13** — `mesh.node_id` is a `u32`, not the string `"default"`.
+- **F14** — `[forecasting]` has an `enabled` field, but none of its
+  fields has a `serde(default)`, so all seven must be present once the
+  section appears. The old template's two-line section would not have
+  loaded at all.
+- **F15** — `RAMSHIELD_L7_RULE__COST_WEIGHT` does not exist. The
+  environment variable for an L7 setting is
+  `RAMSHIELD_DETECTION__L7_ENABLED`.
+- **F16** — the validation list was wrong in every entry: there is no
+  "batch thresholds > event thresholds" rule, no "XDP interface name
+  length >= 2" rule and no placeholder-HMAC rule. The README now lists
+  the checks `src/validate.rs` actually makes.
+- **F17** — `ConfigHandle` is an `Arc<ArcSwap<Config>>`, so it is
+  `load()` and `store()`, not `get()` and `set()`; and `Config::load`
+  takes the path of a file, not a directory.
+- **F18** — the crate does depend on a workspace crate:
+  `ramshield-types`, for `Durability` and `HttpMethod`.
+- **F19** — 4 property-based tests, not 75.
+
+`crates/ramshield-config/tests/readme_template.rs` extracts the ```toml
+block from the README and loads it through `Config::from_toml_file`,
+which parses and validates. The old template fails it - the phantom
+`[l7.rule]` section is a TOML parse error - and the corrected one
+passes, so the drift cannot come back unnoticed.
 
 ---
 
