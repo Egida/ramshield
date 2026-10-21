@@ -283,6 +283,18 @@ all four workflows, all green:
 | `079cbae` | `39514032029` | `39514031980` | `39514031996` | `39514032004` |
 | `009ab24` | `39515415664` | `39515415636` | `39515415565` | `39515415594` |
 | `760f6ba` | `39523215976` | `39523216091` | `39523216078` | `39523215939` |
+| `253aa42` | `39525438086` | `39525438161` | `39525438057` | `39525438109` |
+| `0a65f64` | `39526689270` | `39526689298` | `39526689337` | `39526689278` |
+| `017103a` | `39527791815` | `39527791886` | `39527791805` | `39527791788` |
+| `e5caac1` | `39528948722` | `39528948698` | `39528948863` | `39528948780` |
+| `b1a9e9e` † | — | — | — | — |
+| `79f4eac` | `39548303921` | `39548303936` | `39548303910` | `39548303966` |
+| `6efa8f9` | `39549061946` | `39549061814` | `39549061576` | `39549062048` |
+
+† `b1a9e9e` and `79f4eac` were pushed in **one** push (`e5caac1..79f4eac`),
+so GitHub Actions ran once, on the branch head `79f4eac`, which contains
+`b1a9e9e` as its parent. `b1a9e9e` therefore has no run of its own; the four
+green runs on `79f4eac` cover it.
 
 The local 14-gate runner (fmt, check core/all-features, clippy core/all,
 build core/all, test core/full/mesh/all-features, release build, lint-no-unwrap,
@@ -296,6 +308,9 @@ SHM ABI) produced, per batch:
 | documentation accuracy | `doc_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
 | owner decision package | `pkg_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
 | panic-claim correction | `panicfix_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
+| control-plane posture (Decision 1) | `posture_gates.log`, `final_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
+| owner decisions A and C | `dec_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
+| verification trail update | `trail_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
 
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
@@ -310,7 +325,7 @@ tree.
 |---|---|
 | Stashes | 24 |
 | `refs/backup/pre-merge` | `1ebfc2ca0095d25c5d782bf0d577d62f10574b0b` |
-| Tracked `.bak`/`.orig` | 3, untouched |
+| Tracked `.bak`/`.orig` | 3, **deleted** in `6efa8f9` after their content was proven to be in git history (Decision 3, option A) |
 | Main worktree (`.../beta/rs`) | `feature/mesh-f01-hmac-edge-secrets` at `f75abb5`, 11 pre-existing untracked files, unmodified |
 | Audit-branch worktree | `fix/audit-branch-aworset-restore` at `3301b9d`, unpushed |
 | Master worktree (`.../rs-local-backlog-dispatcher`) | local `master` at `d369d27`, clean |
