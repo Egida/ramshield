@@ -1011,6 +1011,38 @@ claims, 2 fixed).
 **Not pushed, not merged, and `origin/master` untouched at `bd417cd`.**
 Pushing needs an explicit branch refspec from the owner.
 
+### Coordination with the other review channel, and the P2 it found
+
+An independent reviewer now runs hourly against `master` and posts findings
+to the repository's agent handoff issue (Issue #31). Its first review, of
+`bd417cd`, found one bounded P2: `BACKLOG.md` labelled `2adc966` as the
+assessed SHA **and** as equal to `origin/master`, when `bd417cd` was
+master's HEAD.
+
+**Confirmed and fixed here.** `2adc966` is the direct parent of `bd417cd`
+(`git log --oneline 2adc966..bd417cd` shows only `bd417cd`, which rebuilt
+the backlog's tables without changing code), so the evidence in the header
+belonged to the parent while the file lived on the child. The header now
+names both, and distinguishes them:
+
+- **CI on `2adc966`:** CI 39587482510 · Review Pipeline 39587482567 ·
+  lint-no-unwrap 39587482557 · Subnet Stress Pin 39587482512 — all success.
+- **CI on `bd417cd`:** CI 39589296986 · Review Pipeline 39589297074 ·
+  lint-no-unwrap 39589297157 · Subnet Stress Pin 39589297129 · Agent Flow
+  Contract 39617102370 — all success.
+
+Both sets of run ids were re-read from the GitHub Actions API for this
+commit, not copied from the file.
+
+**Why it matters for the next push.** That reviewer only sees `master`.
+This branch is not on `master`, so nothing in it has been reviewed by that
+channel, and its findings and mine will not meet until the branch is
+merged. Two things follow: the branch's own review record
+(`docs/development/OWNER_DECISION_PACKAGE.md`) is the only place its
+evidence lives until then, and any finding the other channel raises on
+`master` after this point is worth checking against this branch before
+being worked twice.
+
 ### Preserve state, verified after the last push
 
 | Item | State |
