@@ -20,9 +20,13 @@ cd "$root"
 # $HOME itself is not a defect: it is how a path becomes per-user.
 pattern='/home/[a-zA-Z0-9._-]+/'
 
+# The checker and its own contract test contain example paths on purpose:
+# they are the fixtures the test feeds the checker. They are excluded, or
+# the gate would fail on itself.
 hits=$(git grep -nIE "$pattern" -- \
   'systemd/*' 'deploy/*' 'scripts/*' '*.rs' '*.toml' '*.yml' '*.yaml' \
-  '*.sh' '*.service' '*.timer' 2>/dev/null || true)
+  '*.sh' '*.service' '*.timer' \
+  ':!scripts/check_dev_paths.sh' ':!scripts/test_check_dev_paths.sh' 2>/dev/null || true)
 
 if [[ -n "$hits" ]]; then
   echo "ERROR: developer-specific absolute path(s) found in tracked files:" >&2
