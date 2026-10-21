@@ -259,10 +259,17 @@ fn verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes() {
     // Signing the client's own byte order instead is a different MAC input
     // and must be rejected. This is the failure a client hits if it signs
     // the frame as it sent it.
+    //
+    // The frame carries the client's own order on the wire AND the
+    // signature over that same order. That is what makes the assertion
+    // mean something: a server that MACed the client's bytes would accept
+    // this frame, and a server that sorts before MACing rejects it. With
+    // the wire order sorted, both implementations reject it and the
+    // assertion cannot tell them apart.
     let store3 = ReplayStore::new(64, Duration::from_secs(65));
     let sig_unsorted = auth::sign(key, "k1", now, shuffled).expect("sign");
     let frame_wrong = format!(
-        "{{\"auth\":{{\"key_id\":\"k1\",\"ts_ms\":{},\"sig\":\"{}\"}},\"ip\":\"1.2.3.4\",\"type\":\"check_ip\"}}\n",
+        "{{\"auth\":{{\"key_id\":\"k1\",\"ts_ms\":{},\"sig\":\"{}\"}},\"type\":\"check_ip\",\"ip\":\"1.2.3.4\"}}\n",
         now, sig_unsorted
     );
     assert!(

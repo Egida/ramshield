@@ -1,18 +1,27 @@
 # ramshield-forecasting
 
 ```text
-Store.get_batch_history() ──→ Forecaster::tick()
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ↓               ↓               ↓
-              HoltWinters     CUSUM          Bayesian
-              (seasonality)   (slow ramp)    (hypothesis)
-                    │               │               │
-                    └───────┬───────┘───────────────┘
+store.traffic ──→ Forecaster::run()  (1 Hz)
+  events_last_second        │
+  unique_ips_window         │
+  drain_threat_sample()     │
                             ↓
-                    Anomaly z-score ──→ EnforceCommand
-                    + entropy
+                    ┌───────┼───────┐
+                    ↓       ↓       ↓
+              HoltWinters  CUSUM  Bayesian
+              (seasonality)(slow   (hypothesis)
+                            ramp)
+                    │       │       │
+                    └───┬───┘───────┘
+                        ↓
+                Anomaly z-score ──→ EnforceCommand
+                + entropy
 ```
+
+**The daemon does not run this crate.** `Forecaster` is exported from
+`ramshield`'s lib, but the boot pipeline never constructs one, so
+nothing in the running daemon produces an `EnforceCommand` from a
+forecast. The diagram below is the crate's own loop, not the daemon's.
 
 ## Why it exists
 
@@ -22,7 +31,7 @@ The detection crate catches obvious attacks — high rate, many IPs, status code
 
 ### Tick Cycle
 
-The forecaster's run loop ticks every second (`tokio::time::interval(Duration::from_secs(1))` in `forecaster.rs`). Each tick pulls the last 120 batch records from `Store::get_batch_history()` — a ring buffer of recent detection flushes — and feeds them to three independent models.
+The forecaster's run loop ticks every second (`tokio::time::interval(Duration::from_secs(1))` in `forecaster.rs`); each tick calls `tick_hw`, which reads the traffic counters the storage layer already keeps — `store.traffic.events_last_second`, `store.traffic.unique_ips_window` and `drain_threat_sample()` — and feeds them to three independent models. The forecaster has no `tick()` method and reads no batch history: the loop is `run()`, and the data is the live traffic counters.
 
 ### Holt-Winters Triple Exponential Smoothing
 
@@ -71,8 +80,8 @@ Classifies the current traffic state into one of four hypotheses:
 ```rust
 pub enum Hypothesis {
     Normal,       // H0: baseline traffic
-    Volumetric,   // H1: fast flood
-    SlowRamp,     // H2: coordinated slow ramp attack
+    VolumetricDoS, // H1: fast flood
+    SlowRampDoS,   // H2: coordinated slow ramp attack
     FlashCrowd,   // H3: legitimate spike (product launch, viral link)
 }
 ```
@@ -102,7 +111,7 @@ When a hypothesis exceeds the confidence threshold, `Forecaster` sends an `Enfor
 
 ## Dependencies
 
-**Reads from:** `ramshield-storage` (`Store::get_batch_history()`), `ramshield-config` (`ForecastingConfig`).
+**Reads from:** `ramshield-storage` (`Store::traffic` — `events_last_second`, `unique_ips_window`, `drain_threat_sample()`), `ramshield-config` (`ForecastingConfig`).
 
 **Written to:** `ramshield-enforcement` (sends `EnforceCommand` via channel), `ramshield-metrics` (forecast values, z-scores, hypothesis posteriors).
 

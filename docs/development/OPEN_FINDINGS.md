@@ -472,3 +472,28 @@ is a decision for the owner, not a defect to be patched in the same pass:
 
 The current README documents the first option, which is what the code
 actually does. The choice of which option to *enforce* is the open part.
+
+---
+
+## F12 — two compiled binaries are tracked in the repository
+
+**Severity:** MEDIUM (hygiene, not a runtime defect)
+
+`validate_mesh_fix` and `verify_boot_fix` are ELF executables of about
+4.4 MB each, committed at the root of the repository in `415f75f`
+("docs: update README files and add code health backlog"). Nothing in
+the tree references either of them, and no build target produces them at
+the root: they are build output that was committed by accident.
+
+They also carry the builder's home directory in their debug info
+(`/home/m/.rustup/toolchains/...`), which is how the dev-path check
+found them.
+
+**What was done about it.** Both files are removed and both names are in
+`.gitignore`, so a rebuild cannot put them back. The dev-path check no
+longer skips binary files (`git grep -I` skipped them, so a path could
+hide in one); the check reports a binary hit as "Binary file ... matches".
+
+**What is still open.** `master` still carries both files until this is
+merged. Removing them from `master` is the owner's call, like every other
+change to that branch.

@@ -226,6 +226,8 @@ Code: `crates/ramshield-xdp/src/lib.rs` has **19** unit tests (v4/v6 key layout,
 
 Code: `src/forecaster.rs:76` `interval(Duration::from_secs(1))` — **1 Hz**; `src/lib.rs:129` "tick_hw (1 Hz)"; `src/validate.rs:7` "Forecaster ticks at 1 Hz". Method is `tick_hw` (`forecaster.rs:84`), no `tick()`. `get_batch_history` exists only in `crates/ramshield-metrics/src/history.rs:84` and `src/engine/mod.rs:316` — not on `Store`, and the forecaster reads `store.traffic.events_last_second` / `unique_ips_window` (`forecaster.rs:85-87`). Diagram `README.md:4` repeats the wrong source.
 
+**Status: FIXED.** The README now names `Forecaster::run()` (the public loop, which calls the crate-private `tick_hw`), the diagram starts at `store.traffic`, the tick-cycle paragraph names the counters the code reads, and the "Reads from" line names `Store::traffic` instead of `Store::get_batch_history()`. The quote above is the text that was wrong.
+
 **F32 (MEDIUM)** `crates/ramshield-forecasting/README.md:44` and `:110`
 > `period: usize,  // default: 120 ticks = 20 minutes` / "The Holt-Winters update is O(period) where period defaults to 120"
 

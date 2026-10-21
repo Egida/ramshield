@@ -147,8 +147,10 @@ re-serialization sorts the keys, so the bytes the server signs are the
 sorted ones — not yours. A client that signs its own byte order produces
 a different MAC and is rejected.
 
-Sign the sorted form: `json.dumps(obj, separators=(',', ':'), sort_keys=True)`
-in Python, or `serde_json::to_vec` of a `BTreeMap` in Rust. This is what
+Sign the sorted form: `json.dumps(obj, separators=(',', ':'), sort_keys=True, ensure_ascii=False)`
+in Python, or `serde_json::to_vec` of a `BTreeMap` in Rust. `ensure_ascii=False`
+is required: `serde_json` writes non-ASCII as UTF-8, and the escaped form
+Python produces by default is different bytes. This is what
 `docs/IPC.md` shows.
 
 `verify()` recomputes the MAC, checks it matches, and rejects a timestamp
@@ -212,7 +214,7 @@ echo '{"version":1,"body":{"Request":{"Connection":{"ip":"10.0.0.1","status":200
 
 ## Dependencies
 
-**Reads from:** `ramshield-types` (`IpAddr`, `IpNetwork`, `BlockReason`), `hmac`, `sha2`, `hex` (HMAC computation), `dashmap` (replay store).
+**Reads from:** `ramshield-types` (`IpAddr`, `IpNetwork`, `BlockReason`), `hmac`, `sha2`, `hex` (HMAC computation), `ahash` (the replay store's `AHashMap`).
 
 **Written by:** `ramshield-ipc` (parses messages, sends responses), `ramshield-dashboard` (IPC stats endpoint).
 

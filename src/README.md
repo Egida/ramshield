@@ -18,7 +18,7 @@ main()
   │     │     ├── DetectionEngine::new()
   │     │     ├── DetectionEngine::spawn_workers()
   │     │     ├── IpcServer::bind()  ──→ TCP :7890
-  │     │     └── tokio::select! { IPC, detection, enforcement }
+  │     │     └── tokio::select! { enforcement actor, IPC server, shutdown }
   │     │
   │     └── graceful shutdown on SIGTERM/SIGINT
   │
