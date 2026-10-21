@@ -1041,12 +1041,14 @@ pushed. The branch has **no upstream**, so `git push` cannot reach
 `master` by accident. (`git log --oneline origin/master..HEAD` is the
 authoritative list; the count here is as of this commit.)
 
-**Gates on the head SHA**: `cargo fmt --all -- --check` 0, `cargo clippy
---workspace --all-targets --all-features -- -D warnings` 0, `cargo test
---workspace --all-features` 0, the `lint-no-unwrap` filter 0,
-`scripts/check_dev_paths.sh` 0, its contract test 0, `nft -c -f
-tests/fixtures/synproxy.nft` 0. The gate log for the run that covered
-this commit is `gate_run27.log` in the operator's scratch directory.
+**Gates on the head SHA** (the local runner applies all of them, with no
+pipe on any gate command, and records each exit code separately):
+`cargo fmt --all -- --check` 0, `cargo clippy --workspace --all-targets
+--all-features -- -D warnings` 0, `cargo test --workspace --all-features`
+0, the `lint-no-unwrap` filter and its regression suite 0, `actionlint` on
+the workflow files 0, `scripts/check_dev_paths.sh` 0, its contract test 0,
+`nft -c -f tests/fixtures/synproxy.nft` 0. The runner's logs are in the
+operator's scratch directory as `gate_run<N>.log`.
 
 | What | Commits |
 |---|---|
