@@ -4,6 +4,8 @@ The durable task list for the issues that still need implementation. Every
 entry states the current status, the required fix, and the closure criterion,
 so a later pass can pick it up without re-deriving the intent.
 
+**Linux only.** RamShield is an eBPF/XDP ingress daemon and targets Linux. The macOS and Windows CI jobs were removed, and with them the F13 finding that the workspace does not compile for Windows - it was a demand for support nobody asked for, not a defect.
+
 **Four numbering namespaces.** The **roadmap's** `F-01..F-08`
 (`/home/m/Downloads/ramshield-remediation-roadmap-v1.2.md`) and the **21
 October audit's** `F1..F8`
@@ -38,7 +40,6 @@ are the ones used here.
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 17 of 62 claims fixed, 45 open: `ramshield-types` 13, `ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
-| **F13** | **The workspace does not compile on Windows** | **P2** | **OPEN** — `OpenOptions::mode` is a Unix-only API, used unguarded at `src/engine/checkpoint.rs:66` and `crates/ramwal/tests/recovery_test.rs:35,169,197`, so the `windows-latest` job of `advanced.yml` is red on every pull-request run | no — but the fix touches two files, so it wants its own pass |
 
 ---
 
@@ -601,36 +602,3 @@ neither name, and `.gitignore` carries both.
 
 ---
 
-## F13 — the workspace does not compile on Windows
-
-**Status:** OPEN (P2, build portability, not a runtime defect)
-
-**Severity:** P2 (build portability, not a runtime defect)
-
-`OpenOptions::mode` is a Unix-only API. It is used unguarded in
-`src/engine/checkpoint.rs:66` and in `crates/ramwal/tests/recovery_test.rs:35,169,197`,
-so the crate fails to compile for a Windows target:
-
-```
-error[E0599]: no method named `mode` found for mutable reference
-              `&mut std::fs::OpenOptions` in the current scope
-```
-
-`.github/workflows/advanced.yml` runs a `windows-latest` job, so that job is
-red on every **pull-request** run of the workflow. The workflow triggers on
-`push` to `feature/ramshield-advanced` and on `pull_request` to `main` or
-`master` — a push to `master` never runs it, so master's own SHA has no
-advanced run at all. The macOS job passes, because `mode` exists there.
-
-**What was done about it.** Nothing in the code: the finding is recorded
-here. The branch that carries it does not touch those files, so the
-Windows job fails on it exactly as it fails on every other PR branch.
-
-**What is still open.** The fix is not a one-liner in the general case.
-`mode(0o600)` is how the state files and the shared-memory file are
-restricted to their owner, and Windows has no equivalent mode bit: the
-options are (a) a `#[cfg(unix)]` guard with a documented Windows
-alternative, (b) `set_permissions` after the file is created, or (c)
-dropping the Windows job and saying so. Which one is right is the
-owner's call, because it changes what the permissions mean on a platform
-the project may not intend to support.
