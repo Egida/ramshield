@@ -562,6 +562,35 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    /// I-020: the quarantine search input must be wired to the filter, and
+    /// the filter must survive the feed's periodic rebuild. The feed
+    /// repaints every 5s via `loadBlocks()`, which replaces the rows, so a
+    /// filter that is not re-applied there silently reverts to "show all".
+    #[test]
+    fn quarantine_search_is_wired_and_survives_the_feed_rebuild() {
+        let page = include_str!("static/index.html");
+
+        let input = page
+            .split("<input")
+            .find(|chunk| chunk.contains("id=\"tableSearch\""))
+            .expect("#tableSearch input must exist");
+        let input = &input[..input.find('>').expect("input tag must end")];
+        assert!(
+            input.contains("oninput=\"filterTable()\""),
+            "the search input must call filterTable on input: {input}"
+        );
+
+        let load_blocks = page
+            .split("async function loadBlocks()")
+            .nth(1)
+            .expect("loadBlocks must exist");
+        let load_blocks = &load_blocks[..load_blocks.find("\n  }").expect("loadBlocks must end")];
+        assert!(
+            load_blocks.contains("filterTable()"),
+            "loadBlocks must re-apply the filter after it rebuilds the rows, or the filter reverts every refresh"
+        );
+    }
+
     fn test_app_state() -> AppState {
         use crate::metrics::Metrics;
         use crate::storage::Store;

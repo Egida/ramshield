@@ -316,7 +316,7 @@
       <div class="panel-header">
         <div class="panel-title">Active Quarantine Feed</div>
         <div class="table-toolbar">
-          <input type="text" class="search-input" id="tableSearch" placeholder="Filter by IP, CIDR, or module...">
+          <input type="text" class="search-input" id="tableSearch" oninput="filterTable()" placeholder="Filter by IP or module...">
           <button class="btn btn-outline" onclick="exportCSV()">Export CSV</button>
         </div>
       </div>
@@ -482,6 +482,7 @@
     const body=$('quarantineBody'); try { let r=await fetch('/api/blocks/active'); if(!r.ok)r=await fetch('/api/history/blocks'); if(!r.ok)throw Error('blocks '+r.status); const data=(await r.json()||[]).slice().reverse().slice(0,50); body.replaceChildren();
       if(!data.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=6;cell.textContent='Zero active threat quarantines.';row.appendChild(cell);body.appendChild(row);return;}
       for(const b of data){const row=document.createElement('tr');for(const v of [b.ip,b.module||'enforcement','CRITICAL','Tier 3 (XDP)',new Date(b.ts_ms).toLocaleTimeString(),'—']){const cell=document.createElement('td');cell.textContent=v;row.appendChild(cell)}body.appendChild(row)}
+      filterTable();
     } catch(e){console.error('quarantine feed:',e)}
   }
   async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const [snap,mods,subs]=await Promise.all(['/api/snapshot','/api/status/modules','/api/traffic/subnets'].map(u=>fetch(u).then(r=>{if(!r.ok)throw Error(u+' '+r.status);return r.json()})));latestSubnets=subs||[];renderTelemetry(snap,mods,latestSubnets);await loadBlocks()}catch(e){$('cluster-status').className='badge-status degraded';$('cluster-status-text').textContent='DISCONNECTED';console.error('dashboard refresh:',e)}finally{refreshInFlight=false}}
