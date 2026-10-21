@@ -316,25 +316,58 @@ The local 14-gate runner (fmt, check core/all-features, clippy core/all,
 build core/all, test core/full/mesh/all-features, release build, lint-no-unwrap,
 SHM ABI) produced, per batch:
 
-| Batch | Gate log | Gates | Aggregate |
-|---|---|---|---|
-| first fix batch | `scan_gates.log` | 14/14 | 1799 passed / 0 failed / 42 ignored |
-| performance + durability | `perf3_gates.log` | 14/14 | 1810 passed / 0 failed / 42 ignored |
-| WAL retention | `d1_gates.log`, `d1b_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
-| documentation accuracy | `doc_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
-| owner decision package | `pkg_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
-| panic-claim correction | `panicfix_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
-| control-plane posture (Decision 1) | `posture_gates.log`, `final_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
-| owner decisions A and C | `dec_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
-| verification trail update | `trail_gates.log` | 14/14 | 1831 passed / 0 failed / 42 ignored |
-| native ingest drop accounting (audit F3) | `native3_gates.log` | 14/14 | 1849 passed / 0 failed / 42 ignored |
+**Every gate run on disk is listed below** — all 24 of them, in the order they
+were run. A run that was superseded is marked as such, and a run that FAILED is
+marked as a failure. The gate log is named by the commit it preceded, which
+is how each row was attributed.
+
+| # | Time | Gate log | Commit it gated | Gates | Aggregate | Status |
+|---|---|---|---|---|---|---|
+| 1 | 10-20 18:05 | `master_gates.log` | — | **8/14** | 1197/0 | **FAILED, superseded** |
+| 2 | 10-20 22:55 | `scan_gates.log` | `2868250` | 14/14 | 1799/0/42 | superseded by CI on the commit |
+| 3 | 10-21 00:09 | `perf_gates.log` | — | **11/14** | 273/2 | **FAILED, superseded** |
+| 4 | 10-21 00:11 | `perf2_gates.log` | — | **11/14** | 378/3 | **FAILED, superseded** |
+| 5 | 10-21 00:25 | `perf3_gates.log` | `19a6ccc` | 14/14 | 1810/0/42 | green |
+| 6 | 10-21 00:44 | `d1_gates.log` | `d41b286` | 14/14 | 1813/0/42 | green |
+| 7 | 10-21 00:52 | `d1b_gates.log` | `d41b286` (re-run) | 14/14 | 1813/0/42 | green |
+| 8 | 10-21 01:13 | `doc_gates.log` | `079cbae` | 14/14 | 1813/0/42 | green |
+| 9 | 10-21 01:25 | `pkg_gates.log` | `009ab24` | 14/14 | 1813/0/42 | green |
+| 10 | 10-21 02:40 | `panicfix_gates.log` | `760f6ba` | 14/14 | 1813/0/42 | green |
+| 11 | 10-21 02:51 | `evid_gates.log` | `55ff73a` | 14/14 | 1813/0/42 | green |
+| 12 | 10-21 03:02 | `evid2_gates.log` | `253aa42` | 14/14 | 1813/0/42 | green |
+| 13 | 10-21 03:15 | `tri_gates.log` | `0a65f64` | 14/14 | 1813/0/42 | green |
+| 14 | 10-21 03:26 | `cap_gates.log` | `017103a` | 14/14 | 1813/0/42 | green |
+| 15 | 10-21 03:38 | `xdp_gates.log` | `e5caac1` | 14/14 | 1813/0/42 | green |
+| 16 | 10-21 06:47 | `posture_gates.log` | `b1a9e9e` — the posture change *before* the review responses | 14/14 | 1828/0/42 | green, superseded by row 17 |
+| 17 | 10-21 07:06 | `final_gates.log` | `b1a9e9e` — *after* the review responses | 14/14 | 1831/0/42 | green |
+| 18 | 10-21 07:16 | `dec_gates.log` | `6efa8f9` | 14/14 | 1831/0/42 | green |
+| 19 | 10-21 07:26 | `trail_gates.log` | `54ee1b7` | 14/14 | 1831/0/42 | green |
+| 20 | 10-21 07:43 | `native_gates.log` | `60ce0f1` — the tree *before* the clippy fix | **12/14** | 1840/0 | **FAILED on clippy, superseded** |
+| 21 | 10-21 07:57 | `native2_gates.log` | `60ce0f1` | 14/14 | 1849/0/42 | green |
+| 22 | 10-21 07:57 | `native3_gates.log` | `60ce0f1` (re-run) | 14/14 | 1849/0/42 | green |
+| 23 | 10-21 08:04 | `trail2_gates.log` | `26c3ab6` | 14/14 | 1849/0/42 | green |
+| 24 | 10-21 08:19 | `trail3_gates.log` | `066ef7f` | 14/14 | 1849/0/42 | green |
+| 25 | 10-21 08:36 | `ledger_gates.log` | the ledger commit | 14/14 | 1849/0/42 | green |
+
+**25 runs, 21 green, 4 failed.** The four failures are named and explained
+below. Nothing was hidden and no failure was retried into a passing log
+without the failed log being kept and named.
+
+As with the CI table above, the newest run on disk is always one row ahead of
+this table: the run taken for the commit that adds the final row cannot be
+in the row it gates. Its log name is in that commit's message.
 
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
 byte-identical to what was committed apart from the review report added in the
 same commit. The direct evidence on the committed tree itself is CI: all four
-workflows green on `2868250`. Every later batch was gated on the committed
-tree.
+workflows green on `2868250`.
+
+For every later batch the run was taken on the working tree immediately
+before its commit, with no source change in between, and the committed
+tree's own direct evidence is the four green CI workflows on that SHA. The
+"Commit it gated" column names the commit that followed the run, not a tree
+that was already committed when the run happened.
 
 ### Preserve state, verified after the last push
 
@@ -349,19 +382,47 @@ tree.
 | Other worktrees | `ramshield-pr19-fix` at `918732b`, two backlog-dispatcher worktrees, all untouched |
 | Deployment | none, and none authorized |
 
-**Two superseded logs remain on disk and both show failures.** `perf_gates.log`
-(11/14, 2 failed) and `perf2_gates.log` (11/14, 3 failed) are from the
-*intermediate* second-batch tree, before the IPC line-limit check was
-reimplemented against the unterminated tail. Both failed the same single
-pre-existing test, `ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset`
-(`tests/ipc_wiring.rs:92`), which the intermediate implementation broke. That
-test was never modified — `19a6ccc` touched `tests/ipc_wiring.rs` with 59
-insertions and 0 deletions — and it passes on every tree since.
+**Four gate logs on disk show a failure.** All four are kept, named and
+explained:
+
+- **`master_gates.log` (8/14, 10-20 18:05)** — the first attempt at the
+  master repair, before the coherent candidate was established. It was
+  superseded by `scan_gates.log` (row 2) and by the commit `63a41ba`. The
+  repair that followed is recorded in
+  `docs/development/MASTER_PIPELINE_INVESTIGATION.md`.
+- **`perf_gates.log` (11/14, 2 failed) and `perf2_gates.log` (11/14, 3
+  failed)** — both from the *intermediate* second-batch tree, before the IPC
+  line-limit check was reimplemented against the unterminated tail. Both
+  failed the same single pre-existing test,
+  `ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset`
+  (`tests/ipc_wiring.rs:92`), which the intermediate implementation broke.
+  That test was never modified — `19a6ccc` touched `tests/ipc_wiring.rs`
+  with 59 insertions and 0 deletions — and it passes on every tree since.
+- **`native_gates.log` (12/14, 10-21 07:43)** — the first run of the native
+  ingest drop-accounting batch. **Clippy failed it** with
+  `too_many_arguments (9/7)` on `process_packet`
+  (`src/engine/native.rs:675`), because threading the metrics handle and the
+  log-emission counter pushed the function past the lint limit. The gate
+  caught it before the commit. The fix was an
+  `#[allow(clippy::too_many_arguments)]` with the same justification the file
+  already uses on `run_linux` and `run_socket`; the re-run is row 21.
+
+**The four failures are all superseded intermediate trees.** No failing run was
+discarded, and no failure was reported as a pass.
 
 An earlier status report cited `perf2_gates.log` as the second batch's passing
 log. **That was a filename error**: the passing run is `perf3_gates.log`
 (14/14, 1810/0/42), which matches the aggregate that was reported. The
 substance was correct; the citation was not, and it is corrected here.
+
+### Outstanding implementation work
+
+The durable task list for the issues that still need implementation — the
+CGNAT shared-memory lookup semantics (F1) and the native capture worker
+lifecycle (F2), with their required fixes, closure criteria and the owner
+decisions each one needs — is
+`docs/development/OPEN_FINDINGS.md`. It also carries the status of F5, F3 and
+F4 (closed) and of F6, F7 and F8 (open, not started).
 
 ### Refuted leads
 
