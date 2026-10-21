@@ -30,9 +30,26 @@ operator-facing and wrong in the direction that matters:
 twice with different meanings (once in the body, once in the *Worst
 three* list). Cite the file and the claim, not the number.
 
-The rest are recorded below, unfixed. They are documentation defects, not
-code defects: no production behaviour depends on them, and the fixes are
-per-file, per-claim edits.
+**Fixed since this file was written.** The sweep's other
+operator-facing claims have been corrected on this branch, each against
+the source:
+
+- **`crates/ramshield-forecasting/README.md`** — the `Hypothesis`
+  variant names (`VolumetricDoS`, `SlowRampDoS`; there is no
+  `Volumetric` or `SlowRamp` variant), the loop method (`run()`, not
+  `tick()`), the data source (`store.traffic`, not
+  `Store::get_batch_history()`), and a note that the daemon does not
+  construct a `Forecaster` at all. See the `Status: FIXED` line under
+  F31 and the *Worst three* "F1".
+- **`crates/ramshield-xdp/README.md`** — the build prerequisites
+  (`bpf-linker`, not `clang`/`llvm-strip`), the phantom
+  `BlocklistValue` type, and the drop path. See F26, F27, F28 and F30.
+- **`crates/ramshield-types/README.md`** — the `BlockReason` variants
+  and their wire tokens. See F6.
+
+Everything else is recorded below, unfixed. They are documentation
+defects, not code defects: no production behaviour depends on them, and
+the fixes are per-file, per-claim edits.
 
 **How to work this list.** Each entry gives the file and line, the claim
 as written, and what the code actually says. Fix them in file-sized
@@ -91,6 +108,9 @@ Code: `src/ip_network.rs:8` — `#[derive(… Eq, Hash, Serialize)] pub struct I
 > "Maps to stable strings … `"rate_limit"`, `"subnet_burst"`, `"pulse_wave"`, `"manual"`."
 
 Code: `src/error.rs:25-34` has **8** variants — `HighRps, SubnetBatch, ForecastAnomaly, EntropyAnomaly, ManualBlock, L7HighRps, L7Cost, Http2StreamAbuse`; `as_str()` (`error.rs:38-49`) returns `high_rps, subnet_burst, forecast_anomaly, entropy_anomaly, manual, l7_high_rps, l7_cost, http2_stream_abuse`. Grep for `rate_limit|pulse_wave` across repo: hits only three READMEs — no code emits those tokens; `from_reason_str` (`error.rs:52-70`) never accepts them. 4 of 8 real reasons missing; 2 documented tokens non-existent. Wire vocabulary + Prometheus labels wrong.
+
+**Status: FIXED.** The README lists all eight variants and the eight
+tokens `as_str()` returns.
 
 **F7 (MEDIUM)** `crates/ramshield-metrics/README.md:61`
 > `pub reason: String,    // "rate_limit", "subnet_burst", "pulse_wave", "manual"`
@@ -200,22 +220,39 @@ Code: `src/welford.rs:20-25` — `AtomicU32` + `AtomicU32` + `AtomicU64` + `f32`
 
 Code: `crates/ramshield-xdp/build.rs:24-31,35-55,57-99` — `bpf-linker` + `cargo build --target=bpfel-unknown-none`; no clang, no llvm-strip, no strip step. Wrong build prerequisites.
 
+**Status: FIXED.** The README now says the BPF program is Rust
+(`ramshield-xdp-bpf/src/main.rs`, built with `aya-ebpf`), and that the
+build needs `bpf-linker` and the `bpfel-unknown-none` target — not
+`clang` and `llvm-strip`, and with no strip step. `build.rs` looks for
+`bpf-linker` on `PATH` and in `~/.local/bin`, and skips the BPF build
+with a warning when it finds neither.
+
 **F27 (MEDIUM)** `crates/ramshield-xdp/README.md:35`
 > "The enforcement crate also defines the BPF map types (`BlocklistKey`, `BlocklistValue`)"
 
 Code: grep `BlocklistValue` repo-wide → only the comment `crates/ramshield-xdp/src/lib.rs:5`. No such type exists.
+
+**Status: FIXED.** There is no `BlocklistValue` type in the tree — the
+map value is a plain `u64`, the absolute expiry on the monotonic clock,
+with `u64::MAX` for permanent. The README now says that.
 
 **F28 (MEDIUM)** `crates/ramshield-xdp/README.md:41-44`
 > "2. Hashes it into the blocklist map. 3. If the IP is in the map, drops the packet."
 
 Code: `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs:200-215` copies raw wire bytes into the key (no hash); `:220-228` drops only if `now < expiry` (expired entry passes); `:186` and `:230` drop via LPM CIDR maps `BLOCKCIDR6`/`BLOCKCIDR` even when the IP is absent from the flat map. Also VLAN stripping `:141-154`. Documented behaviour omits expiry semantics and the CIDR drop path.
 
+**Status: FIXED.** The README now describes the drop path as the code
+does it: the key is the raw wire bytes of the address (no hash), the
+flat-map hit only drops while its expiry is in the future, and the CIDR
+LPM tries (`BLOCKCIDR` / `BLOCKCIDR6`) drop a packet even when the
+address is absent from the flat map.
+
 **F29 (MEDIUM)** `crates/ramshield-xdp/README.md:68`
 > "No unit tests — the crate's correctness is verified by `ramshield-enforcement` integration tests that load the BPF program"
 
 Code: `crates/ramshield-xdp/src/lib.rs` has **19** unit tests (v4/v6 key layout, wire-contract v4/v6, split/routing, VLAN, BLOCKLIST/BLOCKLIST6 separation) plus `#[ignore]`-marked root-required tests: `aya_load_verifies_maps_and_program` (`:376-378`) and `insert_lookup_roundtrip_v4` (`:395-396`) — these are exactly the live-kernel/hardware tests the backlog item asks to be identified. (Root-required test set: these two + `insert_lookup_roundtrip_v6`; `crates/ramshield-xdp/tests/ddos_stress.rs` also needs root.)
 
-**F30 (MEDIUM)** `crates/ramshield-xdp/README.md:5` — "compiles a BPF program (written in C or Rust)": build.rs compiles `ramshield-xdp-bpf/src/main.rs` (Rust/aya-ebpf). `bpf/main.rs` is a 7-line stub not built; no C source in the tree. Low impact, folded here.
+**F30 (MEDIUM)** `crates/ramshield-xdp/README.md:5` — "compiles a BPF program (written in C or Rust)": build.rs compiles `ramshield-xdp-bpf/src/main.rs` (Rust/aya-ebpf). `bpf/main.rs` is a 7-line stub not built; no C source in the tree. Low impact, folded here. **Status: FIXED** — the README now says the BPF program is Rust.
 
 ---
 
