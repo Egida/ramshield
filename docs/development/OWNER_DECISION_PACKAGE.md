@@ -970,6 +970,44 @@ This also corrects an overclaim in the I-022 commit message, which said
 the gate "fails the build on any tracked `/home/<user>/` path". It did
 not: it failed on the file types it happened to list.
 
+### Branch state — `fix/i-013-synproxy-fixture-parity`
+
+**Base:** `bd417cd` (= `origin/master`, unchanged by this work).
+**Head:** `5882941`. **18 commits**, none pushed. The branch has **no
+upstream**, so `git push` cannot reach `master` by accident.
+
+**Gates on the head SHA** (`gate_run26.log`): `cargo fmt --all -- --check`
+0, `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+0, `cargo test --workspace --all-features` 0, the `lint-no-unwrap` filter
+0, `scripts/check_dev_paths.sh` 0, its contract test 0, `nft -c -f
+tests/fixtures/synproxy.nft` 0.
+
+| What | Commits |
+|---|---|
+| I-013 SYNPROXY fixture parity, then strengthened to pin the whole baseline config | `72981e1`, `40f3d28` |
+| I-020 dashboard quarantine search | `9978268` |
+| I-022 systemd portability + the dev-path gate | `b08c431`, `bf01372`, `1506887` |
+| I-024 protocol README, golden vector, and the key-sorted signing rule | `8727e05`, `f230c67` |
+| The `lint-no-unwrap` filter counted braces inside string literals | `705d098` |
+| nft fixture checked in CI, in its own job | `3254345` |
+| Comment and doc corrections (replay store, daemon pipeline, forecasting, types, xdp) | `b4d4337`, `a4c7f28`, `f230c67` |
+| A load-sensitive read timeout in an IPC test | `908a83c` |
+| Ledger updates | `3c98b63`, `6340824`, `4055034`, `5882941` |
+
+**Production behaviour changed on this branch, in full:** two lines of
+JavaScript in `src/dashboard/static/index.html` (the search listener and
+the re-apply after the 5-second rebuild), the systemd unit's path
+handling, and the CI workflow files. Everything else is documentation,
+comments, tests, or gate scripts. The Rust production paths are untouched
+except for comments.
+
+**Findings recorded, not fixed:** F9 (the enforcement lost update), F10
+(the key-sorted MAC input — a wire-contract decision), F11 (54 crate-README
+claims, 2 fixed).
+
+**Not pushed, not merged, and `origin/master` untouched at `bd417cd`.**
+Pushing needs an explicit branch refspec from the owner.
+
 ### Preserve state, verified after the last push
 
 | Item | State |
