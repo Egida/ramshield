@@ -143,14 +143,27 @@ jobs:
         run: cargo test --workspace --locked --all-features
       - name: Verify C SHM ABI and reader/writer stress
         run: RAMSHIELD_SHM_TSAN=1 scripts/verify_shm_header.sh
-      # The nft SYNPROXY fixture is a tracked file that nothing else checks
-      # for nft syntax: no workflow installed nftables, so this gate never
-      # ran in CI. nft is not in the runner image - install it. `nft -c`
-      # needs the netlink cache, which needs CAP_NET_ADMIN, hence sudo.
+
+  nft-fixture:
+    name: nft SYNPROXY fixture syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # The nft SYNPROXY fixture is a tracked file that no workflow checked
+      # for nft syntax: nftables was never installed, so `nft -c -f` ran only
+      # from two local scripts that no workflow calls. The gate was dead.
+      #
+      # This is its own job on purpose. `nft -c` evaluates the ruleset
+      # against the runner kernel, so it needs the nft_synproxy module; if
+      # the runner kernel does not have it, this job fails on its own
+      # instead of taking the test matrix down with it.
       - name: Install nftables
         run: |
           sudo apt-get update
           sudo apt-get install -y nftables
+      - name: Load the synproxy expression module
+        run: sudo modprobe nft_synproxy || true
       - name: nft SYNPROXY fixture syntax
         run: sudo nft -c -f tests/fixtures/synproxy.nft
 
