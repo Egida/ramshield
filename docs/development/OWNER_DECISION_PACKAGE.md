@@ -732,6 +732,12 @@ reverting the README to the old signing string fails it.
 --workspace --all-features` 0, `nft -c -f tests/fixtures/synproxy.nft` 0.
 No production behaviour changed — the only non-test change is the README.
 
+The golden vector was also recomputed outside the repository, in Python with
+`hmac`/`hashlib`, from the documented layout
+`decimal ts_ms || "." || key_id || raw payload`: it reproduces
+`3bba49ff…cad8a` exactly. The separator is load-bearing — `.`, `:`, `|` and
+the empty string give four different digests.
+
 ### F9 — enforcement's block path is a lost update against detection
 
 **Status:** OPEN (P1), recorded in `docs/development/OPEN_FINDINGS.md`. No
