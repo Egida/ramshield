@@ -364,6 +364,43 @@ is how each row was attributed.
 | 25 | 10-21 08:36 | `ledger_gates.log` | the ledger commit | 14/14 | 1849/0/42 | green |
 | 26 | 10-21 08:50 | `open_gates.log` | `a6a61f5`, `29dd601` | 14/14 | 1849/0/42 | green |
 | 27 | 10-21 09:12 | `queue_gates.log` | `d18535b` | 14/14 | 1852/0/42 | green |
+| 28 | 10-21 10:28 | `f1_push_gates.log` | `d1f4a81` | 14/14 | 1858/0/42 | green |
+
+### F1 — CGNAT shared-memory lookup (closed)
+
+**Commit:** `d1f4a81` — "F1: a contended SHM lookup must not masquerade as a
+coherent miss". Pushed to `master` as a fast-forward from `191a7d4`.
+
+**Gates:** `f1_push_gates.log` — 14/14 EXIT=0, 1858 passed / 0 failed / 42
+ignored, `SHM C ABI and concurrent reader/writer stress: PASS`,
+`SHM lookup contract: PASS`. The run covered the exact tree that was
+committed (`d1f4a81^{tree}` = `027d2390a835605f0c4854b575afb3efdc368e81`).
+
+**CI on the pushed SHA `d1f4a81`:** CI `39570398184` success, Review
+Pipeline `39570398263` success, lint-no-unwrap `39570397566` success,
+Subnet Stress Pin `39570397458` success.
+
+**Reviews:** `docs/development/CGNAT_SHM_LOOKUP_REVIEW.md` (PASS, safe to
+push) and `docs/development/CGNAT_SHM_LOOKUP_DELTA_REVIEW.md` (PASS, with
+three required prose corrections, all applied). The delta review also
+prompted a property-by-property check of the producer/consumer protocol,
+which is recorded in `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` §4.5.
+
+**The RED→GREEN evidence** was reproduced with the final code: eight
+checks fail with the fix reverted, and each of the two behaviours added
+after the first review was re-proved alone by reintroducing its defect
+(`got 1` = MISS for the probe-window case, `got 0` = FOUND for the
+reserved-key case).
+
+**Two prose claims of the first draft were wrong and are corrected** in
+the report: the bool wrapper has one behaviour change, not two (the old
+reader already scanned the whole probe window — its "empty terminates the
+probe" comment did not describe the code), and the `shm_publish` counter is
+one *lower* per reserved-key decision than before, not unchanged.
+
+**Left open:** F1a — a /0 rule is now inexpressible end to end, and the
+reserved key is not only the /0 case (`0.0.0.32/32` also hashes to 0). The
+three options and their consequences are in `docs/development/OPEN_FINDINGS.md`.
 
 **27 runs, 23 green, 4 failed.** The four failures are named and explained
 below. Nothing was hidden and no failure was retried into a passing log

@@ -25,7 +25,8 @@ are the ones used here.
 | F5 | Unauthenticated local control plane (IPC + dashboard) | P1 on `e5caac1` | **CLOSED** — `b1a9e9e` | no |
 | F3 | Native ingest drops invisible | P2 | **CLOSED** — `60ce0f1` | no |
 | F4 | XDP LRU eviction residual not stated | P3 (doc) | **CLOSED** — `79f4eac` | no |
-| **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
+| **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — `d1f4a81`, see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
+| **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | no — the three options are recorded below |
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | OPEN | no — but the file is fenced by a standing rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
@@ -35,8 +36,10 @@ are the ones used here.
 
 ## F1 — CGNAT shared-memory lookup semantics
 
-**Status:** CLOSED — implemented, gated, reviewed. The report is
-`docs/development/CGNAT_SHM_LOOKUP_FIXES.md`.
+**Status:** CLOSED — implemented, gated, reviewed and pushed as `d1f4a81`.
+The report is `docs/development/CGNAT_SHM_LOOKUP_FIXES.md`; the two
+independent reviews are `CGNAT_SHM_LOOKUP_REVIEW.md` and
+`CGNAT_SHM_LOOKUP_DELTA_REVIEW.md`.
 
 **The ABI question dissolved.** It was flagged as needing an owner
 compatibility decision, on the reasoning that a tri-state return type
