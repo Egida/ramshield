@@ -268,6 +268,67 @@ would have required changing the existing `default_config_validates`
 assertion, and that test encodes the decision. The existing test was left
 untouched.
 
+### 7g. The kernel-side block maps under extreme traffic — sound
+
+The requirement is that the RAM-side and kernel-side maps of blocked IPs stay
+correct and bounded under extreme high traffic. Every layer was checked.
+
+**1. The per-IP kernel map is LRU — a flood cannot fill it.**
+`crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs:27` declares
+`BLOCKLIST`/`BLOCKLIST6` as `LruHashMap`, with the comment *"LRU_HASH: kernel
+auto-evicts coldest entry when full — no E2BIG under botnet flood."* The
+kernel evicts the coldest entry rather than failing the insert, so a flood of
+unique source IPs degrades the oldest blocks instead of permanently breaking
+the map.
+
+**2. The per-IP userspace map is capped, atomically, and fails closed.**
+See §7f: `write.rs:108-129` reserves capacity before the entry exists with a
+CAS loop, and rejects with `RsError::CapacityExceeded` plus a `warn!` when
+the limit would be exceeded.
+
+**3. The CIDR LPM trie has no LRU and no TTL in its value — and is still
+bounded.** `BLOCKCIDR`/`BLOCKCIDR6` are `LpmTrie<[u64; 2], u8>` with 102,400
+entries (`main.rs:37`). The kernel offers no eviction for an LPM trie, and
+the `u8` value carries no expiry, so the BPF lookup
+(`BLOCKCIDR6.get(&Key::new(128, key)).is_some()`, `main.rs:186`) enforces a
+prefix until it is explicitly removed. Two facts make that bounded:
+
+- The reconcile removes **every** trie entry that is not in the expected set
+  (`crates/ramshield-enforcement/src/xdp.rs:668-679`), so the trie's contents
+  are exactly the expected set, not a monotone accumulation.
+- The expected set is `store.active_cidrs`
+  (`crates/ramshield-enforcement/src/service/run.rs:7-8`), and CIDR expiry
+  removes the network from it
+  (`crates/ramshield-enforcement/src/service/enforce.rs:569-573`), so an
+  expired prefix leaves the expected set and is removed from the trie on the
+  next reconcile (every 10 s: 40 ticks x 250 ms, `service/run.rs:34-39`).
+
+**The residual is a bounded over-enforcement window of at most one reconcile
+interval (10 s)**, because the kernel-side entry has no TTL of its own. That
+is the safe direction for a mitigation system.
+
+**4. CIDR blocks are operator-driven, so the "tens, not thousands" assumption
+holds.** `BlockCidr` originates only from the IPC `block_cidr` request
+(`src/ipc/server/handlers.rs:85`) and the enforcement command path
+(`service/enforce.rs:121,325`). The detection engine's subnet leg
+(`crates/ramshield-detection/src/subnet_scan.rs`, `flush.rs:183`) computes
+subnet *counts* and promotes individual IPs; it never issues a CIDR block. A
+botnet flood of source IPs therefore produces per-IP blocks, which are
+LRU-bounded, and cannot fill the 102,400-entry prefix trie.
+
+**5. The userspace CIDR membership check is a linear scan — deliberately.**
+`crates/ramshield-storage/src/store/access.rs:17-27` documents it: *"the set
+is bounded by subnet decisions (tens, not thousands). Upgrade to an LPM trie
+if a deployment ever holds thousands of concurrent prefix blocks."* Given
+point 4, that assumption is sound, and the upgrade path is recorded.
+
+**No change made.** The kernel and userspace block maps are bounded at every
+layer, the LRU absorbs per-IP floods, the prefix trie is self-cleaning, and
+the one residual — a 10 s over-enforcement window on an expired prefix — is
+bounded and in the safe direction.
+
+---
+
 ### 7f. The store's memory bound under extreme unique-IP traffic — sound
 
 A flood of distinct source IPs is the obvious way to make a per-IP state map
