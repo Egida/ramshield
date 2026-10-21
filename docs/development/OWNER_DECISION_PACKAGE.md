@@ -166,8 +166,10 @@ These are on the standing preserve list, so deletion needs an explicit call.
 
 ## What is already done and needs no decision
 
-The master scan's non-mesh work is complete. Four fast-forward pushes, all
-gates green on each, all four GitHub workflows green on each:
+The master scan's non-mesh work is complete. Six fast-forward pushes, all
+gates green on each, all four GitHub workflows green on each.
+
+### Pushed commits and their verification
 
 | Commit | Contents |
 |---|---|
@@ -175,14 +177,59 @@ gates green on each, all four GitHub workflows green on each:
 | `19a6ccc` | XDP reconcile syscall cost (missing-only + CIDR hash lookup); detection merge-lock amplification; local WAL durability before CRDT merge; IPC line limit |
 | `d41b286` | P0 WAL retention deleted segments still holding required history |
 | `079cbae` | IPC trust-boundary documentation accuracy; metrics README accuracy |
+| `009ab24` | Owner decision package |
+| `760f6ba` | Correction of the release-profile `panic = "abort"` claim |
+
+### Verification evidence
+
+The authoritative, durable record is GitHub CI — every pushed SHA below ran
+all four workflows, all green:
+
+| SHA | CI | Review Pipeline | lint-no-unwrap | Subnet Stress Pin |
+|---|---|---|---|---|
+| `2868250` | `39504360095` | `39504360118` | `39504360098` | `39504360156` |
+| `19a6ccc` | `39508224937` | `39508225269` | `39508225062` | `39508225133` |
+| `d41b286` | `39511268917` | `39511268951` | `39511268931` | `39511268993` |
+| `079cbae` | `39514032029` | `39514031980` | `39514031996` | `39514032004` |
+| `009ab24` | `39515415664` | `39515415636` | `39515415565` | `39515415594` |
+| `760f6ba` | `39523215976` | `39523216091` | `39523216078` | `39523215939` |
+
+The local 14-gate runner (fmt, check core/all-features, clippy core/all,
+build core/all, test core/full/mesh/all-features, release build, lint-no-unwrap,
+SHM ABI) produced, per batch:
+
+| Batch | Gate log | Gates | Aggregate |
+|---|---|---|---|
+| first fix batch | `scan_gates.log` | 14/14 | 1799 passed / 0 failed / 42 ignored |
+| performance + durability | `perf3_gates.log` | 14/14 | 1810 passed / 0 failed / 42 ignored |
+| WAL retention | `d1_gates.log`, `d1b_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
+| documentation accuracy | `doc_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
+| owner decision package | `pkg_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
+| panic-claim correction | `panicfix_gates.log` | 14/14 | 1813 passed / 0 failed / 42 ignored |
+
+**Two superseded logs remain on disk and both show failures.** `perf_gates.log`
+(11/14, 2 failed) and `perf2_gates.log` (11/14, 3 failed) are from the
+*intermediate* second-batch tree, before the IPC line-limit check was
+reimplemented against the unterminated tail. Both failed the same single
+pre-existing test, `ipc_wiring_oversize_connection_gets_error_frame_not_bare_reset`
+(`tests/ipc_wiring.rs:92`), which the intermediate implementation broke. That
+test was never modified — `19a6ccc` touched `tests/ipc_wiring.rs` with 59
+insertions and 0 deletions — and it passes on every tree since.
+
+An earlier status report cited `perf2_gates.log` as the second batch's passing
+log. **That was a filename error**: the passing run is `perf3_gates.log`
+(14/14, 1810/0/42), which matches the aggregate that was reported. The
+substance was correct; the citation was not, and it is corrected here.
+
+### Refuted leads
 
 Six scan leads were **refuted** with evidence and are recorded in
 `docs/development/MASTER_SCAN_NEGATIVE_RESULTS.md` so they are not
 re-investigated: a peer cannot suppress another node's ban (the CRDT is
 origin-bound); the native TPACKET_V3 parser is sound; the replay store is
-sound against replay; the release profile has no `panic = "abort"`; the
-dashboard's unauthenticated loopback default is a tested decision; and
-`deployment_cli.rs` contains no real `unwrap()`.
+sound against replay; the release profile **does** set `panic = "abort"` and
+`AGENTS.md` now says so; the dashboard's unauthenticated loopback default is a
+tested decision; and `deployment_cli.rs` contains no real `unwrap()`.
 
 Two mesh findings are confirmed but **parked by the roadmap** — the
 `merge_delta` race (F-02: *"Prevent an older block from overriding a durable
