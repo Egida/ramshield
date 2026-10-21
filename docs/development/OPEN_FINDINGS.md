@@ -601,4 +601,3 @@ hide in one); the check reports a binary hit as "Binary file ... matches".
 neither name, and `.gitignore` carries both.
 
 ---
-
