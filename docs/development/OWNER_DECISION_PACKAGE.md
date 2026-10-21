@@ -365,6 +365,8 @@ is how each row was attributed.
 | 26 | 10-21 08:50 | `open_gates.log` | `a6a61f5`, `29dd601` | 14/14 | 1849/0/42 | green |
 | 27 | 10-21 09:12 | `queue_gates.log` | `d18535b` | 14/14 | 1852/0/42 | green |
 | 28 | 10-21 10:28 | `f1_push_gates.log` | `d1f4a81` | 14/14 | 1858/0/42 | green |
+| 29 | 10-21 11:35 | `bench_gates.log` | `5a8a32f` | 14/14 | 1858/0/42 | green |
+| 30 | 10-21 12:20 | `backlog_gates.log` | (this commit) | 14/14 | 1858/0/42 | green |
 
 ### F1 — CGNAT shared-memory lookup (closed)
 
@@ -401,6 +403,80 @@ one *lower* per reserved-key decision than before, not unchanged.
 **Left open:** F1a — a /0 rule is now inexpressible end to end, and the
 reserved key is not only the /0 case (`0.0.0.32/32` also hashes to 0). The
 three options and their consequences are in `docs/development/OPEN_FINDINGS.md`.
+
+### F1 follow-up — the lookup cost, measured
+
+**Commit:** `5a8a32f` — "Measure the lookup cost under collision, and drop
+an unsupported cost claim". Fast-forward from `971c088`.
+
+The external review asked for the lookup cost to be measured under
+realistic collision rates, because the table is the reverse proxy's lookup
+path. `scripts/shm_lookup_bench.c` does it, and the gate now runs it.
+
+**Gates:** `bench_gates.log` — 14/14 EXIT=0, 1858 passed / 0 failed / 42
+ignored.
+
+**CI on the pushed SHA `5a8a32f`:** CI `39577146127` success, Review
+Pipeline `39577146172` success, lint-no-unwrap `39577146205` success,
+Subnet Stress Pin `39577146188` success.
+
+**Measured**, on the development host (i7-3687U @ 2.10 GHz, gcc -O2, best
+of 5 repetitions of 200 000 lookups): 25.7 ns for a rule in the primary
+slot, 29.1 / 32.4 / 36.3 ns at probe distance 1 / 2 / 3, and 54.3 ns for
+the mixed hit/miss workload. Each extra slot in the probe window costs
+about 3.5 ns, so the full-window scan — which the reader has always done,
+not a change of this work — costs about 10 ns more than a single-slot
+lookup.
+
+**The `(<15ns)` comment** in `crates/ramshield-detection/src/lib.rs` was
+not backed by any measurement and the measured cost is higher. It now
+carries the measured figures and the caveat. That is one instance of the
+performance-claims finding (F7) closed by measurement rather than by
+assertion.
+
+**The benchmark found a flaw in itself first:** the first workload let two
+keys share a primary slot, so one rule overwrote another and 1143 of
+200 000 lookups returned the wrong answer. The table is now built with
+disjoint probe windows.
+
+### F6 — `BACKLOG.md` re-pointed at master (closed)
+
+**Owner decision:** the standing fence on `BACKLOG.md` was lifted by the
+repository owner on 2026-10-21, with the instruction to update the backlog
+after the review and to double-check the findings.
+
+**Review:** `docs/development/BACKLOG_VALIDATION_AGAINST_MASTER.md` —
+verdict: **no**, `BACKLOG.md` was not a safe answer to "what is proven on
+master". All four cited header facts were stale; 18 of 33 rows carried
+PASS/closed statuses that no longer described master; 4 rows described
+defects the work since had closed; 4 items open on master were not
+mentioned at all. It also found that the fence's designated successor file,
+`docs/development/AUDIT_FINDINGS_BACKLOG.md`, did not exist on master — it
+existed only on the parked mesh branch.
+
+**What was done:** the audit-branch material moved verbatim into the new
+`docs/development/AUDIT_FINDINGS_BACKLOG.md`, verified byte-identical
+against the pre-change file, with the replaced header and handoff-contract
+lines recorded there too. `BACKLOG.md` was re-pointed at `master` and the
+assessed SHA, all 33 rows were re-stamped, a new "Open on master" section
+records the 11 items the file did not mention, and the 100/100 gate is
+bound to a SHA with the note that it has never been satisfied on any single
+SHA.
+
+**The findings were double-checked before they were written down.** The
+review's checkable claims were re-verified against the tree: the missing
+successor file, the SYNPROXY port discrepancy, the unbound `filterTable`,
+the hard-coded systemd path, the tracked `fix.patch`, `hostNetwork`/
+`NET_ADMIN`, the absent `rs/STATUS.md`, the dashboard session gate and its
+default, the XDP reconcile regression test, and the Containerfile layer
+order. All confirmed as stated.
+
+**One review claim was wrong and was corrected.** The review stated that
+the parked branch `f75abb5` "contains no `crates/ramshield-mesh` source
+change". It does: 625 changed lines in `crates/ramshield-mesh/src/transport.rs`
+plus test changes. The conclusion the reviewer drew — that none of it is on
+master — holds, because the diff against master shows the branch is behind
+master. The prose in `BACKLOG.md` states the accurate version.
 
 **One workflow is red, and it is not this code.** The scheduled *Mesh
 Acceptance Watch* run `39571107161` failed at 08:40 on 2026-10-21. It did

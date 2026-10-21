@@ -28,7 +28,7 @@ are the ones used here.
 | **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — `d1f4a81`, see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
 | **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | no — the three options are recorded below |
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
-| F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | OPEN | no — but the file is fenced by a standing rule |
+| F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 | rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 
@@ -225,8 +225,35 @@ the configured subsystem is functioning.
 
 ## F6 — `BACKLOG.md` is not a reliable master release ledger
 
-**Status:** OPEN (P2, documentation)
-**File:** `BACKLOG.md`
+**Status:** CLOSED (P2, documentation) — the owner lifted the standing fence
+on 2026-10-21 and the file was re-pointed at `master`.
+**Files:** `BACKLOG.md`, `docs/development/AUDIT_FINDINGS_BACKLOG.md` (new)
+**Review:** `docs/development/BACKLOG_VALIDATION_AGAINST_MASTER.md`
+
+The independent review found the header stale on all four cited facts, 18 of
+33 rows carrying PASS/closed statuses that no longer described master, 4
+rows describing defects the work since had closed, and 4 items open on
+master that the file never mentioned. It also found that the fence's
+designated successor file, `docs/development/AUDIT_FINDINGS_BACKLOG.md`,
+did not exist on master at all — it existed only on the parked mesh branch.
+
+**What was done:** the audit-branch material moved verbatim into the new
+`docs/development/AUDIT_FINDINGS_BACKLOG.md` (verified byte-identical);
+`BACKLOG.md` was re-pointed at `master` and the assessed SHA; all 33 rows
+were re-stamped — 4 as `CLOSED (commit)`, 3 as `PASS (exact SHA)` on the
+current SHA with the evidence named, the rest as `PASS (historical)` or
+`OPEN` with the verification state stated; a new "Open on master" section
+records the 11 items the file did not mention; and the 100/100 gate is
+bound to a SHA with the note that it has never been satisfied on any
+single SHA.
+
+**One review claim was corrected before it was written down.** The review
+stated that the parked branch `f75abb5` "contains no
+`crates/ramshield-mesh` source change". That is wrong: the branch carries
+625 changed lines in `crates/ramshield-mesh/src/transport.rs` plus test
+changes. The conclusion the reviewer drew — that none of it is on master —
+is correct, because a diff against master shows the branch is behind
+master. The prose in `BACKLOG.md` states the accurate version.
 
 The checked-in header still describes `audit-branch` as the target branch and
 cites three superseded SHAs. PASS rows are pinned to a SHA that is no longer
