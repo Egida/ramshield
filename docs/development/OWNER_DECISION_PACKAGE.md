@@ -681,6 +681,13 @@ what the filter does.
 | `cargo test --workspace --all-features` | 0 | 0 |
 | `nft -c -f tests/fixtures/synproxy.nft` | 0 | 0 |
 
+These are local runs on the exact SHAs. The run logs are not committed to
+the tree, so this table is a claim about a run, not a piece of evidence
+in the repository: re-run the commands above on those SHAs to reproduce
+it. The CI run ids quoted elsewhere in this document are the only
+in-tree-independent evidence, and they are for `master` commits, not for
+this branch.
+
 **The negative controls, because a green gate that cannot fail is not
 evidence.** The nft gate fails on a deliberately broken copy of the
 fixture: `dport { 22, 99999 }` → exit 1 ("Service out of range"), closing
