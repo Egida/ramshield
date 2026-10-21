@@ -249,6 +249,14 @@ impl ShmTableManager {
             .unwrap_or_default()
             .as_millis() as u64;
 
+        // Key 0 is the reserved empty-slot sentinel: a reader treats a slot
+        // with client_hash == 0 as empty, so a rule published under it would
+        // be invisible to every reader. Refuse it rather than publish a rule
+        // that can never be enforced.
+        if client_hash == 0 {
+            return false;
+        }
+
         let primary = client_hash as usize & (SHM_TABLE_CAPACITY - 1);
         let mut selected = None;
 
@@ -628,5 +636,36 @@ mod path_safety {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The C slot-key hash and the Rust one must agree.
+    ///
+    /// A rule published by the Rust writer is looked up by the C reader. If
+    /// the two hashes diverge, the reader looks in a slot the writer never
+    /// touched, and every rule is silently unenforced. The same vectors are
+    /// pinned by `scripts/shm_lookup_contract.c`, so a change to either
+    /// implementation breaks one of the two tests.
+    #[test]
+    fn c_and_rust_slot_key_hash_agree() {
+        assert_eq!(subnet_key(0xC000_0200, 24), 0xff30_6298);
+        assert_eq!(subnet_key(0xC000_0200, 0), 0xab61_6229);
+        // The C ipv4 variant masks the client IP to the prefix first, so
+        // these are the masked-network vectors.
+        assert_eq!(subnet_key(0xC633_6400, 24), 0x7601_e635);
+        assert_eq!(subnet_key(0xC633_6401, 32), 0x4c38_342d);
+    }
+
+    /// A rule published under the reserved key 0 would be invisible to every
+    /// reader, because a slot with client_hash == 0 is the empty-slot
+    /// sentinel. The publisher must refuse it.
+    #[test]
+    fn publish_refuses_the_reserved_zero_key() {
+        // `scratch` returns a directory; the table is a file inside it.
+        let path = scratch("zero-key").join("rules.shm");
+        let mgr = ShmTableManager::open_or_create(&path).expect("open");
+        assert!(
+            !mgr.publish_rule(0, 60_000, 2, 0, false),
+            "a rule under the reserved key 0 must be refused, not published"
+        );
     }
 }

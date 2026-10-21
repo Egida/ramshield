@@ -1,5 +1,9 @@
 use super::*;
 
+/// One-shot latch for the reserved-key warning: the condition is a property
+/// of the subnet table, not of a tick, so it must not repeat every scan.
+static RESERVED_KEY_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 impl DetectionEngine {
     /// 2-probe fill estimate: FP ≈ (1 - e^(-2n/b))². At 2n/b = 0.1 the FP is
     /// ~1%; the guard fires at 2n/b = 0.25 (n ≥ b/20) — above that the
@@ -229,7 +233,30 @@ impl DetectionEngine {
                 std::net::IpAddr::V6(_) => sk as u64,
             };
             if subnet_tier != ramshield_cgnat::CGNAT_TIER_ALLOW {
-                if self.shm_table.publish_rule(
+                if shm_key == 0 {
+                    // Key 0 is the SHM table's reserved empty-slot sentinel, so
+                    // a rule stored under it is invisible to every reader, and
+                    // the publisher refuses it.
+                    //
+                    // The key is 0 whenever the masked network address equals
+                    // its prefix length -- the hash mixer is 0-preserving. For
+                    // IPv4 that is every /0 (0.0.0.0/0 masks to 0) and
+                    // 0.0.0.32/32; for IPv6 it is the u128 subnet key
+                    // truncated to u64.
+                    //
+                    // It is NOT a saturated probe window, and saying so would
+                    // send an operator looking in the wrong place.
+                    //
+                    // One-shot: the condition is a property of the table, not
+                    // of a tick, and the scan runs every 500 ms.
+                    RESERVED_KEY_WARNED.get_or_init(|| {
+                        warn!(
+                            subnet = ?cidr,
+                            "CGNAT SHM rule is not representable (the reserved key 0); \
+                             userspace enforcement remains authoritative"
+                        );
+                    });
+                } else if self.shm_table.publish_rule(
                     shm_key,
                     cfg.detection.subnet_burst_ttl_secs * 1000,
                     subnet_tier,

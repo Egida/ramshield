@@ -25,7 +25,7 @@ are the ones used here.
 | F5 | Unauthenticated local control plane (IPC + dashboard) | P1 on `e5caac1` | **CLOSED** — `b1a9e9e` | no |
 | F3 | Native ingest drops invisible | P2 | **CLOSED** — `60ce0f1` | no |
 | F4 | XDP LRU eviction residual not stated | P3 (doc) | **CLOSED** — `79f4eac` | no |
-| **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **OPEN** | **yes — published C ABI shape** |
+| **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | OPEN | no — but the file is fenced by a standing rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
@@ -35,7 +35,38 @@ are the ones used here.
 
 ## F1 — CGNAT shared-memory lookup semantics
 
-**Status:** OPEN
+**Status:** CLOSED — implemented, gated, reviewed. The report is
+`docs/development/CGNAT_SHM_LOOKUP_FIXES.md`.
+
+**The ABI question dissolved.** It was flagged as needing an owner
+compatibility decision, on the reasoning that a tri-state return type
+changes a published C API. It does not: the header is `static inline`, so
+every consumer compiles it in. The tri-state was added **alongside** the
+existing functions, whose signatures and behaviour are unchanged — `true` only
+on a match, `false` otherwise, exactly as before. No consumer breaks, and
+there is no ABI change to decide.
+
+**The scope was corrected by the investigation.** The C header is the only
+rule-lookup path in this repository; the Rust `ramshield-cgnat` crate has
+**no read path at all** — it only publishes, and `get_slot` is used inside
+`publish_rule`, in one test and one bench. So the earlier review's suggested
+"align the Rust read path" step is a no-op, and the review's hedge about
+that path being unverified resolves into something stronger.
+
+**A third defect was found that neither the audit nor the review had
+reported:** a /0 prefix masks to network 0, which hashes to key 0 — the
+reserved empty-slot sentinel — and the publisher treats a zero-hash slot as
+free. A rule published under that key sat in a slot every other publisher
+considered empty, so the next colliding publish overwrote it, and a
+prefix-0 lookup was routed to key 0 with no error. The publisher now
+refuses the reserved key, and the lookup rejects it as `INVALID` rather
+than routing it into the table.
+
+The reserved key is not only the /0 case: the slot-key mixer is
+0-preserving, so a key is 0 exactly when the masked network address equals
+its prefix length — every /0, and `0.0.0.32/32` among others.
+
+**The original finding, for the record:**
 **Files:** `crates/ramshield-cgnat/include/ramshield_shm.h`, issue `#30`,
 draft PR `#32`
 **Severity:** P1/P2
@@ -87,6 +118,43 @@ has passing C/Rust regression tests plus independent review.
   independently; do not assume the defect is present or absent there.
 - The `shm-abi` gate in the local 14-gate runner and the C ABI/stress checks
   in CI are the relevant gates.
+
+---
+
+## F1a — a /0 rule is not representable in the SHM table (residual of F1)
+
+**Status:** OPEN — a design gap, deliberately not fixed in F1.
+
+F1 closed the lookup contract, and it closed the reserved-key hazard by
+refusing that key on both sides: the publisher refuses `client_hash == 0`
+and the reader rejects it with `INVALID`. The consequence is that **a /0 rule is now inexpressible end
+to end**.
+
+That is correct for a table whose key space reserves 0, but it means a
+deployment that needs a *global* block has no path into this table. The
+in-repo enforcement path is unaffected — a /0 CIDR block is still enforced
+through the normal channel, and the userspace path remains authoritative.
+
+**Why it was not fixed here:** supporting /0 needs a different key
+derivation, not a patch. The reserved sentinel and the key space are
+coupled in the on-disk layout, so changing the derivation is a format
+decision, and the format is shared with an out-of-repo consumer.
+
+**The three options, with their consequences.** This is a format decision
+for the owner, not a patch:
+
+| option | what it means | consequence |
+|---|---|---|
+| **Retain the restriction** | `/0` stays unsupported in this side-channel format | nothing changes in the format. The consumers must be told, and the in-repo enforcement path keeps covering `/0`. Cheapest and safest. |
+| **Change the representation** | give `/0` an explicit encoding that does not collide with the reserved key | the key derivation changes on both sides and the parity vectors are re-pinned. The format is shared with an out-of-repo consumer, so this needs **coordinated compatibility work** — the consumer must be updated in the same release, or it will look up the wrong slot. |
+| **Use a separate representation** | carry a default-route rule in its own field or mechanism rather than in the table | the table format stays frozen, but a second mechanism has to be defined, published, read and enforced by the consumer. More moving parts, no compatibility break. |
+
+What must not happen is silently reinterpreting the reserved key: a
+consumer outside this repository would keep using the old key space.
+
+**Required fix, when it is wanted:** the owner picks an option, then the C
+and Rust derivations change together and the parity vectors are re-pinned.
+This is a follow-up, not a defect in the shipped behaviour.
 
 ---
 

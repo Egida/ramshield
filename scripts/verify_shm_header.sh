@@ -15,6 +15,14 @@ cc -std=c11 -Wall -Wextra -Werror -pthread -I. \
   scripts/shm_abi_stress.c -o "$TMP/shm-abi-stress"
 "$TMP/shm-abi-stress"
 
+# Deterministic contract tests for the lookup result semantics: a contended
+# lookup must not be reported as a coherent miss, an unrepresentable prefix
+# must be rejected before any slot is read, and the C and Rust slot-key
+# hashes must agree.
+cc -std=c11 -Wall -Wextra -Werror -pthread -I. \
+  scripts/shm_lookup_contract.c -o "$TMP/shm-lookup-contract"
+"$TMP/shm-lookup-contract"
+
 # ThreadSanitizer is opt-in because some hosted/container kernels cannot
 # reserve its shadow address space. Unsupported compiler/runtime is reported
 # as SKIP; actual sanitizer findings remain fatal.

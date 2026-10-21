@@ -435,10 +435,20 @@ substance was correct; the citation was not, and it is corrected here.
 ### Outstanding implementation work
 
 The durable task list for the issues that still need implementation — the
-CGNAT shared-memory lookup semantics (F1) and the native capture worker
-lifecycle (F2), with their required fixes, closure criteria and the owner
-decisions each one needs — is
-`docs/development/OPEN_FINDINGS.md`. It also carries the status of F5, F3 and
+native capture worker lifecycle (F2), the `BACKLOG.md` ledger (F6) and the
+performance-claims evidence template (F7) — is
+`docs/development/OPEN_FINDINGS.md`.
+
+**F1 (CGNAT shared-memory lookup semantics) is closed**, in
+`docs/development/CGNAT_SHM_LOOKUP_FIXES.md`. The owner decision it was
+waiting on dissolved on inspection: the header is `static inline`, so every
+consumer compiles it in, and the tri-state result was added *alongside* the
+existing functions whose signatures and behaviour are unchanged. There was
+no ABI change to decide. The investigation also corrected the finding's
+scope — the C header is the only rule-lookup path in the repository, the
+Rust crate has no read path at all — and found a third defect neither the
+audit nor the review had reported: a /0 prefix hashes to the reserved
+empty-slot key, so such a rule could be published and never found. It also carries the status of F5, F3 and
 F4 (closed) and of F6, F7 and F8 (open, not started).
 
 ### Refuted leads
