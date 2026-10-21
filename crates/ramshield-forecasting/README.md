@@ -22,7 +22,7 @@ The detection crate catches obvious attacks — high rate, many IPs, status code
 
 ### Tick Cycle
 
-`Forecaster::tick()` runs periodically (default: every 10 seconds). It pulls the last 120 batch records from `Store::get_batch_history()` — a ring buffer of recent detection flushes — and feeds them to three independent models.
+The forecaster's run loop ticks every second (`tokio::time::interval(Duration::from_secs(1))` in `forecaster.rs`). Each tick pulls the last 120 batch records from `Store::get_batch_history()` — a ring buffer of recent detection flushes — and feeds them to three independent models.
 
 ### Holt-Winters Triple Exponential Smoothing
 
@@ -71,11 +71,14 @@ Classifies the current traffic state into one of four hypotheses:
 ```rust
 pub enum Hypothesis {
     Normal,       // H0: baseline traffic
-    FlashCrowd,   // H1: legitimate spike (product launch, viral link)
+    Volumetric,   // H1: fast flood
     SlowRamp,     // H2: coordinated slow ramp attack
-    Volumetric,   // H3: fast flood
+    FlashCrowd,   // H3: legitimate spike (product launch, viral link)
 }
 ```
+
+H1 (volumetric) and H2 (slow ramp) trigger a preemptive block; H3
+(flash crowd) does not, because a flash crowd is legitimate traffic.
 
 `bayesian_update(z, delta_h, threat, cusum_alarm)` computes posterior probabilities for all four hypotheses using Bayes' rule. The model uses pre-computed likelihood tables — not learned parameters — so it requires no training data. `best_above_threshold()` returns the hypothesis with the highest posterior that exceeds a confidence threshold (default 0.95).
 

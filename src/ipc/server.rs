@@ -192,15 +192,17 @@ impl IpcServer {
             active_connections: Arc::new(AtomicU64::new(0)),
             rejected_connections: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
-            // 256 entries × 35s TTL = bounded memory, covers full 30s clock-skew
-            // the clock-skew window. Honest comment: cap is per-key not global
-            // because the store is shared across keys; tune if one key churns
-            // hard. Add global cap when a second key_id lands in prod.
-            // P2 fix (replay-hole): a signer clock +30s fast (max tolerated
-            // skew) makes a captured frame replayable for skew+TTL = 60s of
-            // verifier time, while a 35s store window expired at +35s — a 25s
-            // replay gap at max drift. TTL now 2*MAX_CLOCK_SKEW + 5s slack;
-            // cap raised to 1024 (32B digests => ~33KB, trivial).
+            // Bounded memory, and long enough to cover the clock-skew window
+            // with room to spare: a frame whose signer clock is fast stays
+            // replayable until the store entry expires, so the TTL has to
+            // exceed the skew window or a captured frame can be replayed in
+            // the gap between the two.
+            //
+            // The cap is global as well as per-key, because the store is
+            // shared across keys. 1024 entries of 32-byte digests is ~33KB.
+            // At saturation the store REJECTS a new nonce rather than
+            // evicting a live one, so capacity pressure cannot reopen a
+            // replay window.
             replay_store: Arc::new(ramshield_protocol::auth::ReplayStore::with_per_key_cap(
                 1024, // global cap
                 256,  // per-key cap

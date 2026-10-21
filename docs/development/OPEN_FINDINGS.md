@@ -11,7 +11,8 @@ October audit's** `F1..F8`
 lists and must not be confused. This file tracks the **audit's** numbering.
 The roadmap's own `F-02` and `F-03` remain parked and unauthorised.
 **F9** is neither: it was found later, in this repository, while re-verifying
-backlog row I-011, and is tracked here only so it is not lost.
+backlog row I-011, and is tracked here only so it is not lost. **F10** was
+found the same way, while re-verifying backlog row I-024.
 
 Each audit finding was independently verified against the source in
 `docs/development/MASTER_AUDIT_2026_10_21_REVIEW.md`. The audit itself was
@@ -34,6 +35,8 @@ are the ones used here.
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — found while re-verifying I-011; no code change yet | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
+| **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
+| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — 2 of 54 fixed; the rest are listed in `docs/development/DOC_DRIFT_SWEEP.md` | no — per-file documentation edits |
 
 ---
 
@@ -410,3 +413,62 @@ unverified judgments, and it caps the confidence of every other finding.
 
 **Before any P1 item is closed**, require the corresponding gate on one exact
 SHA and treat the audit's severity labels as hypotheses.
+
+---
+
+## F10 — The IPC server MACs a key-sorted payload, not the client's bytes
+
+**Status:** OPEN. The documentation is corrected; the server behaviour is
+not, because the fix is a wire-contract decision.
+
+**What the server does.** `verify_frame_auth`
+(`src/ipc/server/auth.rs:94-115`) parses the frame into a
+`serde_json::Value`, removes the `auth` object, and re-serialises the rest
+with `serde_json::to_vec`. The signature is checked against **those** bytes.
+
+`serde_json` is built without `preserve_order` (`Cargo.lock`: the
+`serde_json` package's dependencies are `itoa`, `memchr`, `serde`,
+`serde_core`, `zmij` — no `indexmap`), so `Value`'s map is a `BTreeMap` and
+that re-serialisation is **key-sorted**. The server never sees the
+client's key order.
+
+Verified here, not assumed: a probe signing `{"zebra":1,"apple":2}` and
+re-serialising it produced `{"apple":2,"zebra":1}`.
+
+**The consequence.** A client that signs the frame in its own key order
+produces a different MAC input and is rejected with "signature mismatch".
+The rule a client must follow is: sign the compact, **key-sorted**
+serialisation of the frame without its `auth` object. `docs/IPC.md:125`
+happens to do this (`json.dumps(req, separators=(',',':'), sort_keys=True)`),
+which is why the repo's own example works — and why the bug went unnoticed.
+
+**Why nothing caught it.** No test in the tree signs a multi-key frame
+through the server. `src/ipc/server/tests/mod.rs` uses a single-key payload
+(`{"type":"get_status"}`), where sort order cannot differ, so the test
+passes either way and pins nothing.
+`crates/ramshield-protocol/tests/replay.rs` calls `auth::verify` directly,
+bypassing the server's re-serialisation entirely.
+
+**What was done about it.** The README now states the real rule
+(`crates/ramshield-protocol/README.md`), a guard test
+(`readme_states_the_key_sorted_signing_rule`) fails if it drifts back, and
+`verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes` in
+`src/ipc/server/tests/mod.rs` exercises a multi-key frame end to end: the
+same signature is accepted for either wire order, and a signature over the
+client's own order is rejected.
+
+**What is still open.** The server behaviour itself is unchanged, and that
+is a decision for the owner, not a defect to be patched in the same pass:
+
+- **Keep the sorted canonical form** and document it as the contract.
+  Clients must sort. No wire change; any existing client that does not
+  sort is broken today and would stay broken.
+- **Enable `preserve_order`** so the server MACs the client's own bytes.
+  That makes "sign the bytes you sent" true, at the cost of a dependency
+  feature and of two clients that order differently producing different
+  MAC inputs for the same logical frame.
+- **Canonicalise explicitly** — define a canonical byte form, sign that,
+  and say so in the protocol. The most work, the least surprise.
+
+The current README documents the first option, which is what the code
+actually does. The choice of which option to *enforce* is the open part.

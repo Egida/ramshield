@@ -24,6 +24,19 @@ fn readme_does_not_claim_forecasting_runs_in_the_pipeline() {
         README.contains("Forecasting is not in the pipeline"),
         "src/README.md must say that the daemon does not start the forecaster"
     );
+    // The prose and the diagram are read separately, and a reader of
+    // either one takes it at face value. The first fix here corrected the
+    // prose and left `Forecaster::new()` in the pipeline diagram two dozen
+    // lines above it, so the file still said forecasting was in the
+    // pipeline. The diagram is what a skimming reader sees.
+    assert!(
+        !README.contains("Forecaster::new()"),
+        "src/README.md still shows Forecaster::new() in the boot-pipeline diagram"
+    );
+    assert!(
+        !README.contains("forecast, enforcement"),
+        "src/README.md still shows a forecast arm in the tokio::select! that drives the daemon"
+    );
 }
 
 #[test]

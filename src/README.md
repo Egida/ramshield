@@ -17,9 +17,8 @@ main()
   │     │     ├── EnforcementService::new()
   │     │     ├── DetectionEngine::new()
   │     │     ├── DetectionEngine::spawn_workers()
-  │     │     ├── Forecaster::new()
   │     │     ├── IpcServer::bind()  ──→ TCP :7890
-  │     │     └── tokio::select! { IPC, detection, forecast, enforcement }
+  │     │     └── tokio::select! { IPC, detection, enforcement }
   │     │
   │     └── graceful shutdown on SIGTERM/SIGINT
   │

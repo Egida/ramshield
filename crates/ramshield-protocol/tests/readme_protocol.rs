@@ -30,6 +30,32 @@ fn readme_states_the_real_mac_input_layout() {
     );
 }
 
+/// The server re-serializes the frame after removing `auth`, and
+/// `serde_json` is built without `preserve_order`, so that
+/// re-serialization is key-sorted. The client never signs the bytes it
+/// sent; it signs the sorted form. A README that says "sign exactly the
+/// bytes of the frame minus its auth object" sends an implementer down a
+/// path the server rejects.
+#[test]
+fn readme_states_the_key_sorted_signing_rule() {
+    assert!(
+        README.contains("key-sorted serialization of the frame"),
+        "the README must state that the signed payload is the key-sorted serialization"
+    );
+    assert!(
+        README.contains("The server does not MAC the bytes you sent"),
+        "the README must state that the server re-serializes rather than using the client's bytes"
+    );
+    assert!(
+        README.contains("sort_keys=True"),
+        "the README must show the key-sorted form a client can actually produce"
+    );
+    assert!(
+        !README.contains("must sign exactly the bytes of the frame"),
+        "the README still says the client signs its own bytes, which the server never MACs"
+    );
+}
+
 #[test]
 fn readme_states_the_real_skew_window() {
     let secs = MAX_CLOCK_SKEW_MS / 1000;

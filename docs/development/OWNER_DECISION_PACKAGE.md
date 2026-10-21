@@ -600,6 +600,14 @@ the run taken for the commit that adds the final row cannot be in the row it
 gates. The table is updated when the next documentation commit lands, and
 the run it is missing is named in that commit's message.
 
+**The run ids and the gate logs in this document are not reproducible from
+the repository.** They were read from the GitHub Actions API and from gate
+logs on the machine that ran them; neither the run logs nor the log files
+are committed here. A reader can re-derive a run id from a SHA with
+`gh run list --commit <sha>`, but cannot verify a past run from this tree
+alone. Treat the table as a record of what was observed, not as in-tree
+evidence.
+
 **One precision note on the first batch.** Its gate run (`scan_gates.log`,
 22:55) predates the commit and ran against the *staged index*, which was
 byte-identical to what was committed apart from the review report added in the
@@ -632,12 +640,17 @@ unchanged — it already used `[22, 53, 80, 443]`; only the checked-in
 fixture was wrong.
 
 The fixture is now the generator's own output, and `nft_fixture_is_the_rendered_ruleset`
-compares it against `render_ruleset()` for the default config, so every
-knob is pinned — ports, mss, wscale, connection limits, rate limits — not
-just the field the row named. A hand-maintained copy of generated output
+compares it against `render_ruleset()` for the shipped baseline config, so
+every knob is pinned — ports, mss, wscale, connection limits, rate limits —
+not just the field the row named. A hand-maintained copy of generated output
 is what drifted; the test removes the duplication rather than policing one
 field of it. `baseline_config_ports_match_the_code_default` keeps the
 shipped baseline config on the same port set as the code default.
+
+(The first version of this test rendered from the code default, so only the
+ports were pinned; `40f3d28` changed it to render from the baseline, after
+an independent review showed that baseline drift on any other knob went
+undetected.)
 
 Production code is untouched: `git diff -U0 src/engine/synproxy.rs` is a
 single hunk, `@@ -262,0 +263,89 @@ mod tests {`, entirely inside the
@@ -688,10 +701,15 @@ adding `oninput` alone; the 5s rebuild would have undone it, which is why
 the re-apply is there.
 
 **Not covered.** DOM-level behaviour of the dashboard filter: the repo has
-no JS test harness in CI and adding one is a new dependency. The nft
-fixture gate is also still manual-only — no workflow runs
-`nft -c -f tests/fixtures/synproxy.nft` and `nft` is not installed on the
-CI runner image — so the Rust test is what protects the fixture in CI.
+no JS test harness in CI and adding one is a new dependency. The DOM
+behaviour was checked by hand with a Node DOM shim against the shipped
+`filterTable()`, but nothing in CI asserts it.
+
+The nft fixture gate was also manual-only at the time of writing: no
+workflow ran `nft -c -f tests/fixtures/synproxy.nft` and `nft` is not
+installed on the CI runner image. It is no longer manual-only — `40f3d28`
+added the check to `ci.yml` and `3254345` gave it a dedicated `nft-fixture`
+job that installs nftables first.
 
 ### I-024 — the protocol README documented a signing string the code never used
 
@@ -840,6 +858,91 @@ A copy of the test with the read timeout raised to 30s passed six times
 out of six under the same load, and with the timeout at 10s the file
 passed eight times out of eight. The read timeout is now 10s in both tests
 that wait for a frame; the behaviour under test is unchanged.
+
+### The protocol README documented the wrong signing rule, and no test caught it
+
+**Found by:** an independent review of the I-024 change, not by the author.
+
+The I-024 work corrected the README's MAC *layout* and skew window, but
+left a sentence that was wrong in a way that matters to an implementer:
+"a client must sign exactly the bytes of the frame minus its `auth`
+object".
+
+The server never MACs the client's bytes. `verify_frame_auth`
+(`src/ipc/server/auth.rs:94-115`) parses the frame into a
+`serde_json::Value`, removes `auth`, and re-serialises the rest. `serde_json`
+is built without `preserve_order`, so that re-serialisation is key-sorted —
+the server never sees the client's key order. A client that signs its own
+byte order produces a different MAC and is rejected.
+
+Verified here rather than assumed: a probe re-serialising
+`{"zebra":1,"apple":2}` produced `{"apple":2,"zebra":1}`.
+
+Nothing caught it because no test signs a multi-key frame through the
+server. The server test uses a single-key payload, where sort order cannot
+differ, so it passes either way and pins nothing; the protocol crate's test
+calls `auth::verify` directly, bypassing the server's re-serialisation.
+
+**Done:** the README states the real rule, a guard test fails if it drifts
+back, and `verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes`
+exercises a multi-key frame end to end. The server behaviour itself is
+unchanged — that is a wire-contract decision, recorded as **F10** in
+`docs/development/OPEN_FINDINGS.md` with the three options.
+
+### The other findings from that review, and what was done
+
+| Finding | Action |
+|---|---|
+| `src/README.md` prose said forecasting is not in the pipeline; the diagram two dozen lines above still showed `Forecaster::new()` and a `forecast` arm in the `tokio::select!` | Diagram fixed; the guard now fails if either string reappears (proven red by re-adding the diagram line) |
+| `src/ipc/server.rs` had a second, stale comment block: "256 entries × 35s TTL", "30s clock-skew", "TTL now 2*MAX_CLOCK_SKEW + 5s slack" — every number wrong, and it contradicted the two comments the same commit had fixed | Replaced with a comment that says what the code does |
+| `crates/ramshield-protocol/README.md` said the 65s TTL is "2 × skew + 5s slack", which is 25s | Stated as "several times the 10-second skew window" |
+| `crates/ramshield-forecasting/README.md` said "`Forecaster::tick()` runs every 10 seconds" — there is no `tick()` method, and the interval is 1s | Corrected |
+| `docs/development/BACKLOG_VALIDATION_AGAINEST_MASTER.md` still listed I-020, I-022 and I-024 as open | Rows updated to "FIXED ON BRANCH, NOT ON MASTER" |
+| `OWNER_DECISION_PACKAGE.md` said the nft gate was "still manual-only", false since the CI job was added | Corrected |
+| `BACKLOG.md` cited rustc error lines 57/424/431; the real locations are `57:38`, `419:27`, `426:52` | Corrected |
+| The review proposed reverting the `deployment_cli.rs` change, because that file is in no build target and does not compile | **Not reverted.** The file is tracked and contains a developer path, so reverting makes the dev-path gate fail on it. The change stands and the file's status is recorded in `BACKLOG.md` |
+| The review reported the `ExecStartPre` guard's `$$` escape as accidental — "the shell collapses it to a PID" | **Refuted by measurement.** On systemd 255, `$$` inside a quoted `sh -c` argument reaches the shell as a literal `$`, so `$RS_DISPATCHER_SCRIPT` expands normally: a probe with the variable unset printed `GATE_FIRED_var_is_empty`, and one printing `$$` directly printed `PID=$`, not a PID number |
+| The review reported the CI run ids and gate tables as unverifiable from the tree | Caveat added: the ids and logs are not committed, so the table is a record of what was observed, not in-tree evidence |
+
+**One incident during this pass, recorded because it nearly cost work.** A
+`git stash` intended to set aside one file popped a *pre-existing* stash
+from another branch and conflicted two mesh files. No data was lost: the
+stash count was unchanged at 24, the popped stash entry was kept by git,
+and the branch had never touched those files. The conflict markers were
+discarded by restoring the two files to HEAD, and the tree was re-verified
+clean and building. The lesson: `git stash pop` in a worktree that carries
+other people's stashes is a trap — `git stash push -- <pathspec>` must be
+checked against `git stash list` before the pop.
+
+### The I-025 documentation sweep found 54 wrong claims, and two of them were dangerous
+
+A read-only sweep of backlog row I-025 ("dependency/documentation drift")
+checked the crate READMEs against the source and found **54 defects across
+8 READMEs**. The full list, with the claim as written and what the code
+actually says, is in `docs/development/DOC_DRIFT_SWEEP.md` (F11 in
+`docs/development/OPEN_FINDINGS.md`).
+
+Two were fixed in the same pass, because both are wrong in the direction
+that changes an operator's decisions:
+
+- **`crates/ramshield-types/README.md`** listed four `BlockReason`
+  variants and two wire tokens — `rate_limit`, `pulse_wave` — that **no
+  code emits** (`grep` for them finds only READMEs). The real enum has
+  eight variants with eight tokens, and `from_reason_str` never accepted
+  the two invented ones.
+- **`crates/ramshield-forecasting/README.md`** had the hypothesis index
+  map inverted. The code is `Normal=0, VolumetricDoS=1, SlowRampDoS=2,
+  FlashCrowd=3`; the README claimed H1 was FlashCrowd and H3 Volumetric.
+  The daemon blocks on H1 (volumetric) and H2 (slow ramp) and
+  deliberately does **not** block on H3 (flash crowd, treated as
+  legitimate traffic). An operator reading the README would have
+  concluded that volumetric floods are not blocked and flash crowds are —
+  the exact opposite.
+
+The other 52 are recorded and unfixed. They are documentation defects
+only: no production behaviour depends on them, and the fixes are
+per-file, per-claim edits. They are the natural next bounded pass, one
+crate at a time.
 
 ### The dev-path checker had a hand-written pathspec list, and it was incomplete
 

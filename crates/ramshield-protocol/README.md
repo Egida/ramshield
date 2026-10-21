@@ -138,11 +138,18 @@ HMAC-SHA256(key, "<ts_ms>.<key_id><payload>")
 key bytes must not produce the same signature, or a frame signed under one
 key id would be accepted under another.
 
-The payload is the **compact serialization of the frame with the `auth`
-object removed** — the server strips `auth` and re-serializes the rest, so
-a client must sign exactly the bytes of the frame minus its `auth` object.
-Sign the compact form; a pretty-printed or differently-ordered
-serialization produces a different MAC and is rejected.
+The payload is the **compact, key-sorted serialization of the frame with
+the `auth` object removed**.
+
+The server does not MAC the bytes you sent. It parses the frame into a
+JSON value, removes `auth`, and re-serializes what is left. That
+re-serialization sorts the keys, so the bytes the server signs are the
+sorted ones — not yours. A client that signs its own byte order produces
+a different MAC and is rejected.
+
+Sign the sorted form: `json.dumps(obj, separators=(',', ':'), sort_keys=True)`
+in Python, or `serde_json::to_vec` of a `BTreeMap` in Rust. This is what
+`docs/IPC.md` shows.
 
 `verify()` recomputes the MAC, checks it matches, and rejects a timestamp
 further than `MAX_CLOCK_SKEW_MS` (10 seconds) from the server clock.
@@ -181,10 +188,10 @@ markers, so capacity pressure cannot reopen a replay window. Expired
 entries are removed lazily.
 
 The default TTL is 1 second, which is shorter than the skew window and is
-only suitable for tests. The IPC server uses a 65-second TTL — `2 *
-MAX_CLOCK_SKEW_MS` plus 5 seconds of slack — so a frame signed by a clock
-running fast cannot be replayed in the gap between the skew window and the
-store window, and the store is bounded at 1024 entries globally and 256 per
+only suitable for tests. The IPC server uses a 65-second TTL — several
+times the 10-second skew window — so a frame signed by a clock running
+fast cannot be replayed in the gap between the skew window and the store
+window, and the store is bounded at 1024 entries globally and 256 per
 key.
 
 ### Wire Format
