@@ -22,6 +22,12 @@ Entries are append-only in intent. A commit is recorded by the next log update, 
 - **Purpose:** Record a bounded review of the master HEAD commit and a confirmed stale/equality claim in the backlog header.
 - **Validation:** Read `BACKLOG.md` at exact SHA `bd417cd9c79492dbe4a75de08186c9bf79f4e759` and checked recent commit ancestry. No local tests or CI status verification performed.
 
-### 3. Pending log entry
+### 3. `fe1cef84b8e1540900d2d95860777f1479513c1d`
 
-The commit adding this file will be recorded in the next update to this log. Its SHA is intentionally not guessed before GitHub returns it.
+- **Parent/base:** `48fc0fc6cdedf4633389442a18df4d879b5d0ebe`
+- **Message:** `docs(review): log review branch commits`
+- **Path:** `REVIEW_LOG/BRANCH_COMMITS.md` (initial version)
+- **Purpose:** Create the branch-level commit log and document the initial two commits.
+- **Validation:** GitHub Contents API confirmed file creation on the feature branch. Documentation-only; no tests applicable.
+
+The current log-update commit will be recorded in the next update.
