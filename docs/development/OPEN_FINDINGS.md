@@ -128,15 +128,41 @@ has passing C/Rust regression tests plus independent review.
 
 **Status:** OPEN — a design gap, deliberately not fixed in F1.
 
-F1 closed the lookup contract, and it closed the reserved-key hazard by
-refusing that key on both sides: the publisher refuses `client_hash == 0`
-and the reader rejects it with `INVALID`. The consequence is that **a /0 rule is now inexpressible end
-to end**.
+**"Unexpressible", defined.** A rule the policy language can state but the
+SHM rule table has no representation for. It is a *representational*
+limitation of one data structure — not a missing feature, not a bug in the
+enforcement path, and not something the reader can work around.
 
-That is correct for a table whose key space reserves 0, but it means a
-deployment that needs a *global* block has no path into this table. The
-in-repo enforcement path is unaffected — a /0 CIDR block is still enforced
-through the normal channel, and the userspace path remains authoritative.
+**What the table is.** A 262 144-slot open-addressed table in shared
+memory, 64 bytes per slot, 4-slot probe window. A slot holds a rule:
+`client_hash`, `expires_at_ms`, two challenge-seed words, `max_rps`,
+`tier`, `flags`. The slot index is
+`subnet_key(masked_network, prefix_len) & (CAPACITY-1)`. The Rust crate
+only writes; the C header in `crates/ramshield-cgnat/include/ramshield_shm.h`
+is the only reader, and its consumer is an out-of-repo native reverse
+proxy. It is a side channel: in-repo enforcement goes through the XDP LPM
+map and is unaffected by anything in this table.
+
+**Why a /0 is unexpressable.** Key `0` is the **empty-slot sentinel** — a
+slot whose `client_hash == 0` is free, and the publisher picks the first
+such slot. But the slot-key mixer is 0-preserving, so
+`subnet_key(N, p) == 0` exactly when the masked network `N` equals the
+prefix length `p`. The key that would mean "the default route" is the
+same key that means "no rule here". There is no spare bit in the slot to
+tell them apart: `client_hash` is the only discriminator, and `0` is
+taken. Every `/0` masks to network 0, so every `/0` lands on the sentinel.
+So does `0.0.0.32/32`, and so can an IPv6 subnet whose u128 key truncates
+to 0 in u64.
+
+**What F1 did.** F1 closed the lookup contract, and with it the
+reserved-key hazard: the publisher refuses `client_hash == 0` and the
+reader rejects it with `INVALID`. The consequence is that **a /0 rule is
+now inexpressible end to end** — the table says so instead of storing
+something invisible.
+
+**What it does NOT affect.** The in-repo enforcement path: a /0 CIDR block
+is still enforced through the normal channel, and the userspace path
+remains authoritative.
 
 **Why it was not fixed here:** supporting /0 needs a different key
 derivation, not a patch. The reserved sentinel and the key space are
@@ -148,7 +174,7 @@ for the owner, not a patch:
 
 | option | what it means | consequence |
 |---|---|---|
-| **Retain the restriction** | `/0` stays unsupported in this side-channel format | nothing changes in the format. The consumers must be told, and the in-repo enforcement path keeps covering `/0`. Cheapest and safest. |
+| **Retain the restriction** | `/0` stays unsupported in this side-channel format | nothing changes in the format; the cheapest and the safest. The consumers must be told, and the in-repo enforcement path keeps covering `/0`. Cheapest and safest. |
 | **Change the representation** | give `/0` an explicit encoding that does not collide with the reserved key | the key derivation changes on both sides and the parity vectors are re-pinned. The format is shared with an out-of-repo consumer, so this needs **coordinated compatibility work** — the consumer must be updated in the same release, or it will look up the wrong slot. |
 | **Use a separate representation** | carry a default-route rule in its own field or mechanism rather than in the table | the table format stays frozen, but a second mechanism has to be defined, published, read and enforced by the consumer. More moving parts, no compatibility break. |
 

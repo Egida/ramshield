@@ -552,6 +552,29 @@ CPU load of 3.92–5.01 on 4 vCPUs — the condition that broke the old
 version. Production code was restored after every simulation; the diff
 touches the test only.
 
+**The backlog was rebuilt once more, for readability.** The version that
+re-stamped all 33 rows left the file in a poor shape: a 25-line header
+with eight framed paragraphs, four separate pending tables (P0, P1, P2 and
+the three audit-import ones), a "No P0 row is pending" claim contradicted
+by a P0 row further down, and a stale assessed SHA. It now has:
+
+- one compact header — target, assessed SHA `2adc966`, that SHA's CI run
+  ids, and a three-line table pointing at the files that answer the other
+  two questions;
+- **one pending table** with a priority column, holding all 14 pending
+  rows from all four sources;
+- a separate short table for the pending work that is not a row (F1a, F2,
+  F7, F8);
+- "Recorded, not pending" for state that needs no work — the master's own
+  fixes, the two XDP LRU residuals, the red Mesh Acceptance Watch, the
+  parked F-01 branch, the failed gate runs, the two parked mesh findings;
+- a glossary defining **unexpressable** and describing the SHM rule table,
+  with the full F1a explanation under the pending table;
+- the completed rows at the end, and the 100/100 gate bound to a SHA.
+
+All 33 rows survived with byte-identical area, required-work and status
+text. Verified mechanically against the pre-rebuild file.
+
 **One workflow is red, and it is not this code.** The scheduled *Mesh
 Acceptance Watch* run `39571107161` failed at 08:40 on 2026-10-21. It did
 not test master: `.github/workflows/mesh-acceptance-watch.yml:66` resolves
