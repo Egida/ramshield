@@ -116,9 +116,13 @@ fn sweep_entries(text: &str) -> Vec<SweepEntry> {
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
-        if trimmed.starts_with("**F")
-            && let Some(close) = trimmed.find(")**")
-        {
+        // A claim is `**F<n> (SEVERITY)**`. Anything else that starts with
+        // `**F` - `**Fixed since this file was written:**` - is prose, and
+        // counting it as a claim puts a phantom entry in the totals.
+        let after_id = trimmed.strip_prefix("**F").unwrap_or_default();
+        let id_len = after_id.chars().take_while(|c| c.is_ascii_digit()).count();
+        let is_claim = id_len > 0 && after_id[id_len..].starts_with(" (");
+        if is_claim && let Some(close) = trimmed.find(")**") {
             // The path is not always right after the severity - one claim
             // names several files - so count the claim either way and
             // take the path when there is one.

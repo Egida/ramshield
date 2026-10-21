@@ -38,7 +38,7 @@ are the ones used here.
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 17 of 62 claims fixed, 45 open: `ramshield-types` 13, `ramshield-storage` 8, `ramshield-metrics` 8, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config template is now pinned by a test that loads it out of the README | no — per-file documentation edits |
+| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 30 of 62 claims fixed, 32 open: `ramshield-config` 1, `ramshield-storage` 8, `ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6, `ramshield-xdp` 2, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config and types READMEs are now pinned by tests | no — per-file documentation edits |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
 
@@ -565,23 +565,29 @@ actually does. The choice of which option to *enforce* is the open part.
 
 ## F11 — Crate README documentation drift
 
-**Status:** OPEN — 17 of the 62 claims are fixed; 45 remain.
+**Status:** OPEN — 30 of the 62 claims are fixed; 32 remain.
 
 **What this is.** The I-025 sweep read every claim in the crate READMEs
 against the source and listed the ones that were false. The per-claim
 list is `docs/development/DOC_DRIFT_SWEEP.md`, which names each claim,
 the quoted README line, the code that says otherwise, and the fix.
 
-**What is fixed.** All eleven `ramshield-config` claims, and four of the
-five `ramshield-xdp` ones. The config crate's eleven are pinned by a test
-rather than by prose: `crates/ramshield-config/tests/readme_template.rs`
-extracts the ```toml block out of the README and loads it through
-`Config::from_toml_file`, which parses and validates. The old template
-failed that test. One `ramshield-types` claim and one `ramshield-forecasting`
-claim are fixed too; the rest of those two READMEs are not.
+**What is fixed.** All eleven `ramshield-config` claims, four of the
+five `ramshield-xdp` ones, and all thirteen `ramshield-types` ones, plus
+one `ramshield-forecasting` claim. The config crate's eleven are pinned
+by a test rather than by prose:
+`crates/ramshield-config/tests/readme_template.rs` extracts the ```toml
+block out of the README and loads it through `Config::from_toml_file`,
+which parses and validates. The old template failed that test. The types
+crate's thirteen are pinned the same way:
+`crates/ramshield-types/tests/readme_claims.rs` checks the README's
+dependency list against `Cargo.toml`, its "read by" list against the
+workspace manifests, every type it shows against the crate's public API,
+and its test count against the tests that exist. The old README failed
+the first two.
 
-**What remains.** 45 claims in six READMEs: `ramshield-types` (13),
-`ramshield-storage` (8), `ramshield-metrics` (8), `ramshield-forecasting` (8),
+**What remains.** 32 claims in six READMEs: `ramshield-config` (1),
+`ramshield-storage` (8), `ramshield-metrics` (7), `ramshield-forecasting` (8),
 `ramshield-analytics` (6) and `ramshield-xdp` (2).
 
 **Closure criterion.** Every claim in the sweep is either marked fixed, or
