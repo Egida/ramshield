@@ -367,6 +367,9 @@ is how each row was attributed.
 | 28 | 10-21 10:28 | `f1_push_gates.log` | `d1f4a81` | 14/14 | 1858/0/42 | green |
 | 29 | 10-21 11:35 | `bench_gates.log` | `5a8a32f` | 14/14 | 1858/0/42 | green |
 | 30 | 10-21 12:20 | `backlog_gates.log` | `e6d01ab` | 14/14 | 1858/0/42 | green |
+| 31 | 10-21 12:20 | `pending_gates.log` | (F6 pending-list) | 13/14 | 1858/0/42 | **FAILED** — `test-full`: the flaky merge-lock test, 5,663 acquisitions vs a bound of 1,000 |
+| 32 | 10-21 12:25 | `pending2_gates.log` | (F6 pending-list) | 12/14 | 1858/0/42 | **FAILED** — `clippy-core`, `clippy-full`: an unused variable left by the probe rewrite |
+| 33 | 10-21 12:35 | `pending3_gates.log` | `ab5cc59` | 14/14 | 1858/0/42 | green |
 
 ### F1 — CGNAT shared-memory lookup (closed)
 
@@ -504,6 +507,15 @@ CURRENT (master):  ramshield_shm_read(table, 0, ...) -> false
 
 `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` §2.4, the header's wrapper
 comment and the crate README's release note now state both differences.
+
+**CI on the pushed SHA `ab5cc59`:** CI `39586094914` success, Review
+Pipeline `39586094542` success, lint-no-unwrap `39586094723` success,
+Subnet Stress Pin `39586094595` success.
+
+**Two gate runs failed on the way to that commit, and both are in the
+ledger above** — `pending_gates.log` (the flaky test) and
+`pending2_gates.log` (a leftover unused variable that clippy rejected).
+Neither was waved through.
 
 **A flaky test was found and fixed on the way.** The 14-gate run for this
 commit failed once: `test-full` exited 101 on
