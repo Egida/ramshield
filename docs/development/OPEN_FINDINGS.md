@@ -497,3 +497,36 @@ hide in one); the check reports a binary hit as "Binary file ... matches".
 **What is still open.** `master` still carries both files until this is
 merged. Removing them from `master` is the owner's call, like every other
 change to that branch.
+
+---
+
+## F13 — the workspace does not compile on Windows
+
+**Severity:** MEDIUM (build portability, not a runtime defect)
+
+`OpenOptions::mode` is a Unix-only API. It is used unguarded in
+`src/engine/checkpoint.rs:66`, `crates/ramshield-cgnat/src/shm.rs:133`
+and `crates/ramwal/src/wal.rs:542`, so the crate fails to compile for a
+Windows target:
+
+```
+error[E0599]: no method named `mode` found for mutable reference
+              `&mut std::fs::OpenOptions` in the current scope
+```
+
+`.github/workflows/advanced.yml` runs a `windows-latest` job, so that job
+is red on every branch that has run it — including master. The macOS job
+passes, because `mode` exists there.
+
+**What was done about it.** Nothing in the code: the finding is recorded
+here. The branch that carries it does not touch those files, so the
+Windows job fails on it exactly as it fails on master.
+
+**What is still open.** The fix is not a one-liner in the general case.
+`mode(0o600)` is how the state files and the shared-memory file are
+restricted to their owner, and Windows has no equivalent mode bit: the
+options are (a) a `#[cfg(unix)]` guard with a documented Windows
+alternative, (b) `set_permissions` after the file is created, or (c)
+dropping the Windows job and saying so. Which one is right is the
+owner's call, because it changes what the permissions mean on a platform
+the project may not intend to support.
