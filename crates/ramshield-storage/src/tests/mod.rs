@@ -957,6 +957,68 @@ fn an_unblock_does_not_roll_back_the_detection_counters() {
 }
 
 #[test]
+fn the_blocked_index_is_updated_under_the_same_lock_as_the_record() {
+    // F-9 follow-up. The vacant branch of `block_ip` published the record
+    // with `insert` - which releases the shard lock - and updated the
+    // blocked index afterwards. A reader that saw the record in that
+    // window saw a blocked record that was not in the index, and a
+    // concurrent unblock landing there decremented a counter that was
+    // still zero: a u64 underflow, and an index left holding a key whose
+    // record was clean.
+    //
+    // The observer below does what such a reader does: it takes the shard
+    // lock, reads the record, and then reads the index. With the index
+    // update inside the lock, the two can never disagree - a reader that
+    // can see the record can also see the index entry.
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    let store = Arc::new(Store::new(16));
+    let ram_lim = 64 * 1024 * 1024;
+
+    for round in 0..200u32 {
+        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(
+            10,
+            98,
+            (round / 200) as u8,
+            (round % 200) as u8,
+        ));
+        let mut block = blank_record(ip);
+        block.block_state = BlockState::Blocked {
+            reason: BlockReason::HighRps,
+            since_ns: 1_000,
+        };
+
+        let writer_store = store.clone();
+        let writer_block = block.clone();
+        let writer = std::thread::spawn(move || {
+            writer_store.block_ip(ip, writer_block, ram_lim).unwrap();
+        });
+
+        // The observer can only read the record once the writer has
+        // released the shard lock - which is exactly the window.
+        let mut saw_record_without_index = false;
+        for _ in 0..200_000 {
+            if let Some(Value::IpRecord(r)) = store.get(&ip) {
+                if matches!(r.block_state, BlockState::Blocked { .. })
+                    && !store.blocked_set.contains_key(&ip)
+                {
+                    saw_record_without_index = true;
+                }
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        writer.join().unwrap();
+
+        assert!(
+            !saw_record_without_index,
+            "round {round}: the record was visible before the blocked index was updated"
+        );
+    }
+}
+
+#[test]
 fn an_unblock_creates_no_record_for_an_unknown_ip() {
     // An unblock must not resurrect a clean record for an IP there is no
     // state for - the store would then hold a record nobody ever saw.
