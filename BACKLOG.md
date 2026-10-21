@@ -1,6 +1,6 @@
 # RamShield Production-Essential Audit Backlog
 
-**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD:** `1be1318`
+**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD at assessment:** `1be1318`
 
 `2adc966` is the parent of `bd417cd`; the rows below were assessed
 against `2adc966`, and `bd417cd` rebuilt this file's tables without
@@ -9,7 +9,7 @@ changing the code. The rows whose fixes have since landed on `master`
 
 **CI on `2adc966`:** CI 39587482510 · Review Pipeline 39587482567 · lint-no-unwrap 39587482557 · Subnet Stress Pin 39587482512 — all success. Local 14-gate run on the same tree: 14/14 EXIT=0, 1858 passed / 0 failed / 42 ignored.
 
-**CI on `bd417cd` (current master HEAD):** CI 39589296986 · Review Pipeline 39589297074 · lint-no-unwrap 39589297157 · Subnet Stress Pin 39589297129 · Agent Flow Contract 39617102370 — all success.
+**CI on `bd417cd`:** CI 39589296986 · Review Pipeline 39589297074 · lint-no-unwrap 39589297157 · Subnet Stress Pin 39589297129 · Agent Flow Contract 39617102370 — all success.
 
 **Where the truth lives.** This file is the **status of each row**. The other two answers are elsewhere:
 
@@ -56,7 +56,7 @@ Every row still to be done. The *Required work* column is what done looks like; 
 | ID | Pri | Area | Required work / acceptance evidence | Status |
 |---|---|---|---|---|
 
-| I-003 | P0 | Mesh production safety and provenance | Keep mesh optional and disabled in production. Do not ship/enable until authenticated per-origin signatures/identity, receiver-confirmed recovery completion (generation + WAL boundary + deterministic state digest), restart/retention behavior, and multi-process fault-injection convergence gates pass on the same exact SHA with independent review. | BLOCKED — still correct, and the gate is still unmet. The pairwise-HMAC branch `feature/mesh-f01-hmac-edge-secrets` (`f75abb5`) is unpublished and not merged: no mesh transport or aworset change from it is on master. Mesh stays optional and disabled in production. No cryptographic change is proposed here — the v1.2 constraint (HMAC stays, no asymmetric signatures, no public-key identity, no pairwise-HMAC migration without owner approval) is respected by the current state. |
+| I-003 | P0 | Mesh production safety and provenance | Keep mesh optional and disabled in production. Do not ship/enable until authenticated per-origin signatures/identity, receiver-confirmed recovery completion (generation + WAL boundary + deterministic state digest), restart/retention behavior, and multi-process fault-injection convergence gates pass on the same exact SHA with independent review. | BLOCKED — still correct, and the gate is still unmet. The pairwise-HMAC branch `feature/mesh-f01-hmac-edge-secrets` is unpublished and not merged: no mesh transport or aworset change from it is on master. Mesh stays optional and disabled in production. No cryptographic change is proposed here — the v1.2 constraint (HMAC stays, no asymmetric signatures, no public-key identity, no pairwise-HMAC migration without owner approval) is respected by the current state. |
 
 | I-011 | P1 | Storage eviction vs threat accumulators | Verify cardinality-driven LRU eviction cannot repeatedly erase the attacker's own CUSUM/pulse-wave history and create a threshold bypass. Define bounded behavior under capacity pressure; add adversarial rotating-IP tests before changing policy. | OPEN — no master record closes this, and the defect was not re-verified in this pass. UNVERIFIED whether it exists on current master. |
 
@@ -84,6 +84,22 @@ Every row still to be done. The *Required work* column is what done looks like; 
 
 | I-026 | P2 | Benchmark harness duplication | Inspect `ramwal` benchmark targets for duplicated Criterion harness code. Consolidate only if it reduces maintenance without obscuring benchmark comparability; attach before/after commands/results. | UNVERIFIABLE — the path the row names (`crates/ramshield-ramwal/benches`) does not exist on master; the crate's layout differs, so the finding cannot be located or dismissed as written. |
 
+| I-027 | P1 | Kubernetes node-guard DaemonSet is refused at admission | The node-guard DaemonSet sets `mountPropagation: Bidirectional` on `/sys/fs/bpf` while `securityContext.privileged` is not set. The Kubernetes API server rejects that combination, so the DaemonSet never starts and the XDP profile cannot be deployed. | OPEN — verified on `master`: `deploy/k8s/daemonset.yaml:97` sets `Bidirectional` and the file sets no `privileged: true`. The upstream validation checks the `privileged` field alone, so adding capabilities does not pass it. Nothing in the repo applies the manifest, and `kubectl apply --dry-run=client` does not run server-side validation, so it cannot be caught that way. Fix: `privileged: true` (which needs `--allow-privileged` on the cluster) or drop the propagation to `HostToContainer`. This is a distinct defect from I-012, which is the capability-minimisation review. |
+
+| I-028 | P2 | The Ansible quality gate reports a failed CI run as a pass | The `quality` role's poll script exits 0 as soon as a workflow run is `completed`, whatever the conclusion. `ci_failed` is then derived only from that exit code, so a `failure` conclusion is printed and then ignored. | OPEN — verified on `master`: `ansible/roles/quality/tasks/main.yml:24-26` exits 0 on `completed` without comparing `$conclusion`; `:48-50` computes `ci_failed` from the return code, and the only non-zero exit is the poll timeout. The role is wired into five playbooks, but no CI workflow invokes ansible, so this is an operator-run gate rather than a release gate. `ansible/playbook-quality-replay.yml` already has the correct check. |
+
+| I-029 | P2 | The dashboard quarantine table and its CSV export disagree on the columns | The table declares 5 headers and injects 6 cells per row (the sixth is a trailing `—`), and the CSV export declares 5 columns while slicing 4, so every exported row silently drops the Time value. | OPEN — verified on `master`: `src/dashboard/static/index.html:325-333` declares 5 `<th>`, `:484` injects 6 `<td>`, `:594-595` writes the header `IP,Module,Severity,Tier,Time` and slices `slice(0,4)`. The 5-second feed rebuild re-renders the same rows, so the mismatch returns on every refresh. No test asserts the column counts. |
+
+| I-030 | P3 | `attack_nexus.py`'s interactive shell cannot stop a running flood | `start_flood` creates a local `StopFlag` and passes it to the flood thread, but the `stop` command signals the outer flag, which nothing polls — so the flood runs to its full duration. | OPEN — verified on `master`: `scripts/attack_nexus.py:521-527` creates and passes the local flag, `:648-649` signals the outer one. Only the interactive `shell` subcommand is affected: `scripts/suite.py` drives `profiles`/`run`, and no CI workflow or Makefile target runs the script. |
+
+| I-031 | P3 | The integration runners read a config example that no longer exists | `scripts/auth_e2e.py` and `scripts/final_integration.py` read `config.prod.toml.example`, which was deleted in `af3f465`, so both crash with `FileNotFoundError`. | OPEN — verified on `master`: the file does not exist; `config.baseline.toml` is the shipped template. In `auth_e2e.py` the read is dead code (the config is rebuilt from scratch afterwards); in `final_integration.py` the result is used, and the script also patches strings the baseline does not contain. Neither runner is in CI or the Makefile. |
+
+| I-032 | P3 | `network_create.py`'s `dual` family produces IPv4 only | The `family != "v6"` test sends the `dual` case down the IPv4 branch, so no IPv6 network is generated. | OPEN — verified on `master`: `scripts/network_create.py:19`. `main()` always calls `build_plan(..., "v4", 24, ...)`, so `dual` is unreachable from the CLI, and the single `prefixlen` argument cannot express both /24 and /64. The sibling `scripts/unique_network_generator.py:57` does it correctly. |
+
+| I-033 | P3 | `xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check | The pre-flight snapshot request is hardcoded to `127.0.0.1:9999`, so a run against another dashboard address fails with a traceback instead of the intended message. | OPEN — verified on `master`: `scripts/xdp_netns_sim.py:130` stores `--dashboard` in `DASH`, `:142` hardcodes the URL, while `:101` uses `DASH`. |
+
+| I-034 | P2 | The forecasting subsystem is never constructed by the daemon | The `Forecaster` is implemented and unit-tested, but `src/engine/boot.rs` never constructs it, so the production daemon produces no forecast-driven mitigation. | OPEN — verified on `master`: no `Forecaster` is constructed on the daemon's boot path. The crate README now says so (that claim was one of the corrected drift claims), but the product gap itself is unaddressed: either wire the subsystem into the daemon or formally deprecate it, and make the public claims match whichever it is. |
+
 **`I-003` is the only P0.** Mesh stays optional and disabled until its own gate passes, and no cryptographic change is proposed: the v1.2 constraint (HMAC stays, no asymmetric signatures, no public-key identity architecture, no pairwise-HMAC migration without owner approval) is respected by the current state.
 
 ---
@@ -98,6 +114,9 @@ These are the open items from the 21 Oct master audit. Full text, closure criter
 | **F2** | Native capture worker lifecycle. | OPEN — one owner answer needed: on total capture failure, refuse readiness or mark the service degraded? The detection path's refuse-readiness behaviour is the in-repo precedent. |
 | **F7** | Performance and memory claims need workload evidence. | OPEN — process item. One instance closed by measurement (`5a8a32f`, the SHM lookup cost). |
 | **F8** | The 21 Oct audit was not locally reproduced. | OPEN — not actionable against the code; it caps the confidence of every severity label the audit carries. |
+| **F9** | Enforcement's block path is a lost update against detection. | OPEN — the fix is on `fix/f9-enforcement-lost-update-v2` (PR #43), not on master. |
+| **F10** | The IPC server MACs a key-sorted payload, not the client's bytes. | OPEN — the wire-contract decision is the owner's. `scripts/auth_e2e.py` is the client-side face of it. |
+| **F11** | Crate README documentation drift. | OPEN — 17 of 62 claims fixed, 45 open. |
 
 ### F1a — what "unexpressable" means, and what is up with the table
 
