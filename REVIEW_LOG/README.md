@@ -30,3 +30,30 @@ This branch is a review/documentation handoff. Do not modify product code, merge
 - Master SHA at branch creation: `bd417cd9c79492dbe4a75de08186c9bf79f4e759`
 - Commit: https://github.com/grep999/ramshield/commit/bd417cd9c79492dbe4a75de08186c9bf79f4e759
 - This directory's first commit is documentation only; it is not itself a semantic review of the product code.
+
+## Hourly collection
+
+`.github/workflows/independent-review-log.yml` runs on the hour and reads
+the remarks from the agent handoff issue (#31) with
+`scripts/independent_review_log.py`. It writes:
+
+- `REVIEW_LOG/commits/<sha>.md` - one file per reviewed commit. **A file
+  that already exists is never rewritten.** A review entry is work, and
+  the collector does not know what a better review would say.
+- `REVIEW_LOG/INDEX.md` - a table of every review seen. This is the only
+  file the collector rewrites; it is a view, not a review.
+- `REVIEW_LOG/BRANCH_COMMITS.md` - the commits made on this branch.
+  Entries are appended, never rewritten.
+
+A remark counts as a review when it starts with
+`## Independent master review - <sha>`. Anything else in the issue is
+ignored. The collector records what the remark said; it does not
+establish, upgrade or contradict a status. A status the remark does not
+state is recorded as `NOT VERIFIED`.
+
+The collector's own contract is `scripts/test_independent_review_log.py`.
+It runs in the workflow and locally.
+
+The schedule only fires for a workflow file on `master`, which is where
+GitHub runs scheduled workflows from. The log itself is committed to
+this branch, so `master` never carries it.

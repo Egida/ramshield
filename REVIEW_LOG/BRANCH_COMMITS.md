@@ -31,3 +31,12 @@ Entries are append-only in intent. A commit is recorded by the next log update, 
 - **Validation:** GitHub Contents API confirmed file creation on the feature branch. Documentation-only; no tests applicable.
 
 The current log-update commit will be recorded in the next update.
+
+### 4. `05202621e5b35f0efe8d6d34a70421796d468ad2`
+
+- **Parent/base:** `fe1cef84b8e1540900d2d95860777f1479513c1d`
+- **Message:** `docs(review): record log bootstrap commit`
+- **Path:** `REVIEW_LOG/BRANCH_COMMITS.md`
+- **Purpose:** recorded by the collector; what it did is in the message.
+- **Validation:** not validated. The commit was recorded by the
+  collector, not reviewed; no test, build or CI check was run for it.
