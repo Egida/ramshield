@@ -203,6 +203,81 @@ fn verify_frame_auth_rejects_replay() {
     );
 }
 
+/// The server does not MAC the client's bytes. It parses the frame into a
+/// `serde_json::Value`, removes `auth`, and re-serialises what is left.
+/// `serde_json` is built without `preserve_order`, so that re-serialisation
+/// is KEY-SORTED - the server never sees the client's key order.
+///
+/// So the signing rule is: sign the compact, key-sorted serialization of the
+/// frame without its `auth` object. A client that signs its own byte order
+/// gets a different MAC and is rejected.
+///
+/// This test pins that rule, because nothing else in the tree exercises a
+/// multi-key frame end to end: the existing server test uses a single-key
+/// payload, where sort order cannot differ, and the protocol crate's own
+/// test calls `auth::verify` directly, bypassing the server's
+/// re-serialisation.
+#[test]
+fn verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes() {
+    let key = b"0123456789abcdef0123456789abcdef";
+    let keys = vec![("k1".to_string(), key.to_vec())];
+    let store = ReplayStore::new(64, Duration::from_secs(65));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    // Two keys, deliberately in the opposite order in the two frames. The
+    // payload is the same set of members either way, so the key-sorted
+    // serialization is the same string and one signature covers both.
+    let sorted = br#"{"ip":"1.2.3.4","type":"check_ip"}"#;
+    let shuffled = br#"{"type":"check_ip","ip":"1.2.3.4"}"#;
+
+    let sig = auth::sign(key, "k1", now, sorted).expect("sign");
+    let frame = format!(
+        "{{\"auth\":{{\"key_id\":\"k1\",\"ts_ms\":{},\"sig\":\"{}\"}},\"ip\":\"1.2.3.4\",\"type\":\"check_ip\"}}\n",
+        now, sig
+    );
+    assert!(
+        verify_frame_auth(&keys, frame.as_bytes(), &store).is_ok(),
+        "a frame signed over the key-sorted payload must be accepted"
+    );
+
+    // Same members, opposite order on the wire, same signature. The server
+    // sorts before MACing, so it accepts this too - the client's key order
+    // is not part of the contract.
+    let store2 = ReplayStore::new(64, Duration::from_secs(65));
+    let frame_shuffled = format!(
+        "{{\"auth\":{{\"key_id\":\"k1\",\"ts_ms\":{},\"sig\":\"{}\"}},\"type\":\"check_ip\",\"ip\":\"1.2.3.4\"}}\n",
+        now, sig
+    );
+    assert!(
+        verify_frame_auth(&keys, frame_shuffled.as_bytes(), &store2).is_ok(),
+        "the server sorts before MACing, so the client's key order is not part of the contract"
+    );
+
+    // Signing the client's own byte order instead is a different MAC input
+    // and must be rejected. This is the failure a client hits if it signs
+    // the frame as it sent it.
+    //
+    // The frame carries the client's own order on the wire AND the
+    // signature over that same order. That is what makes the assertion
+    // mean something: a server that MACed the client's bytes would accept
+    // this frame, and a server that sorts before MACing rejects it. With
+    // the wire order sorted, both implementations reject it and the
+    // assertion cannot tell them apart.
+    let store3 = ReplayStore::new(64, Duration::from_secs(65));
+    let sig_unsorted = auth::sign(key, "k1", now, shuffled).expect("sign");
+    let frame_wrong = format!(
+        "{{\"auth\":{{\"key_id\":\"k1\",\"ts_ms\":{},\"sig\":\"{}\"}},\"type\":\"check_ip\",\"ip\":\"1.2.3.4\"}}\n",
+        now, sig_unsorted
+    );
+    assert!(
+        verify_frame_auth(&keys, frame_wrong.as_bytes(), &store3).is_err(),
+        "a frame signed over the client's own key order must be rejected: the server MACs the sorted payload"
+    );
+}
+
 #[test]
 fn verify_frame_auth_rejects_malformed_frames() {
     let keys = vec![(

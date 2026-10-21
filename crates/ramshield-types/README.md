@@ -88,14 +88,21 @@ Returned to the IPC client after a manual block/unblock command.
 
 ```rust
 pub enum BlockReason {
-    RateLimit,
-    SubnetBurst,
-    PulseWave,
-    Manual,
+    HighRps,
+    SubnetBatch,
+    ForecastAnomaly,
+    EntropyAnomaly,
+    ManualBlock,
+    L7HighRps,
+    L7Cost,
+    Http2StreamAbuse,
 }
 ```
 
-Maps to stable strings for wire protocol and Prometheus labels: `"rate_limit"`, `"subnet_burst"`, `"pulse_wave"`, `"manual"`. `from_reason_str()` provides reverse mapping.
+Maps to stable strings for wire protocol and Prometheus labels:
+`"high_rps"`, `"subnet_burst"`, `"forecast_anomaly"`, `"entropy_anomaly"`,
+`"manual"`, `"l7_high_rps"`, `"l7_cost"`, `"http2_stream_abuse"`.
+`from_reason_str()` provides reverse mapping.
 
 ### IpNetwork — CIDR representation
 

@@ -22,6 +22,9 @@ awk '
   END {print "OPEN P1:", c+0}
 ' BACKLOG.md
 
+echo "-- developer-specific absolute paths --"
+bash scripts/check_dev_paths.sh
+
 echo "-- A-030 fmt --"
 cargo fmt --all -- --check
 

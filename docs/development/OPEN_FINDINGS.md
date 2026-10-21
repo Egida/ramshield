@@ -4,12 +4,15 @@ The durable task list for the issues that still need implementation. Every
 entry states the current status, the required fix, and the closure criterion,
 so a later pass can pick it up without re-deriving the intent.
 
-**Two numbering namespaces.** The **roadmap's** `F-01..F-08`
+**Three numbering namespaces.** The **roadmap's** `F-01..F-08`
 (`/home/m/Downloads/ramshield-remediation-roadmap-v1.2.md`) and the **21
 October audit's** `F1..F8`
 (`/home/m/Downloads/ramshield_master_audit_2026-10-21.md`) are different
 lists and must not be confused. This file tracks the **audit's** numbering.
 The roadmap's own `F-02` and `F-03` remain parked and unauthorised.
+**F9** is neither: it was found later, in this repository, while re-verifying
+backlog row I-011, and is tracked here only so it is not lost. **F10** was
+found the same way, while re-verifying backlog row I-024.
 
 Each audit finding was independently verified against the source in
 `docs/development/MASTER_AUDIT_2026_10_21_REVIEW.md`. The audit itself was
@@ -30,7 +33,10 @@ are the ones used here.
 | **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 | rule |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
+| **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **OPEN** — found while re-verifying I-011; no code change yet | no — the fix shape is mechanical, but it touches the block write path |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
+| **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
+| F11 | Crate README documentation drift (54 claims) | P2 (docs) | OPEN — 2 of 54 fixed; the rest are listed in `docs/development/DOC_DRIFT_SWEEP.md` | no — per-file documentation edits |
 
 ---
 
@@ -330,6 +336,72 @@ reviewer did not contradict it but did not confirm it.
 
 ---
 
+## F9 — Enforcement's block path is a lost update against detection
+
+**Status:** OPEN (P1) — found while re-verifying backlog row I-011, and
+**not** what that row describes. No code change has been made.
+
+**Where it came from.** Backlog row I-011 asks whether "cardinality-driven
+LRU eviction" can erase an attacker's CUSUM/pulse-wave history. Its premise
+is wrong: there is no LRU eviction. `crates/ramshield-storage/src/store/capacity.rs:23-51`
+evicts only on TTL expiry, production inserts carry no TTL
+(`crates/ramshield-storage/src/lib.rs:91-99`), and under RAM pressure the
+store **refuses net-new keys** rather than evicting live ones
+(`crates/ramshield-storage/src/store/write.rs:103-152`). The row's stated
+mechanism does not exist in the code.
+
+**The real defect, in the same area.** The enforcement actor's block path is
+a read-modify-write across two lock acquisitions:
+
+- `crates/ramshield-enforcement/src/service/enforce.rs:244-283` does
+  `store.get(&cmd.ip)` -> mutate `block_state` -> `store.insert(...)`.
+- `store.get()` returns `None` for an expired record
+  (`crates/ramshield-storage/src/store/access.rs:4-10`), so the
+  `unwrap_or(IpRecord { cusum_s: 0.0, sample_count: 0, ... })` default
+  **replaces the record and erases its detection history**.
+- Between the `get()` and the `insert()`, a concurrent detection flush can
+  run `update_ip` and advance `cusum_s`, `sample_count` and the pulse
+  counters. The enforcement `insert()` then writes back its stale snapshot,
+  **rolling those counters back**. This is the mirror image of the P0 fixed
+  in `write.rs:156-173` — that fix made `update_ip` mutate in place so it
+  cannot clobber `block_state`; the same window still lets enforcement
+  clobber the *stat* fields.
+
+**Why it matters.** Detection's own state is the attacker's history. If a
+block lands concurrently with a flush, the attacker's accumulated evidence
+is rewound, and `CUSUM_WARMUP_SAMPLES = 6`
+(`crates/ramshield-detection/src/rate_tracker.rs:18`) may never be reached,
+so `hot || cusum_fired || pulse_fired || relative_fired`
+(`crates/ramshield-detection/src/merge.rs:140-163`) never fires for that IP.
+
+**Required fix.** Give the block path the same single-shard-lock treatment
+`update_ip` has: one mutate that touches only `block_state` and leaves the
+stat fields alone, instead of `get()` + `insert()`. The store's own
+contract already says the mutation must not touch `block_state`
+(`write.rs:165-168`) — a second, block-only mutator is the missing piece.
+It must also not resurrect a *clean* record for an IP that is still
+blocked, which is what the expired-record default does today.
+
+**Required test.** A test that races a detection `update_ip` against the
+block path and asserts the stat fields are not rolled back. It must fail on
+the current code.
+
+**Not started, and not a quick fix.** This touches the block write path and
+its XDP projection ordering, so it is a medium-risk change, not a bounded
+one-file fix. It is recorded here rather than patched in the same pass as
+the I-013/I-020/I-024 closures.
+
+**A second, related observation** (policy, not a defect): an IP refused by
+the RAM budget is dropped from detection entirely
+(`crates/ramshield-detection/src/flush.rs:216-239`, `stored == false` ->
+`cold_skipped`), so its `sample_count` restarts at 0 and the CUSUM warmup
+never completes. The refusal is already observable
+(`capacity_exceeded_count` / `capacity_exceeded_ips`); whether a
+capacity-refused IP should fail open or fail closed is a posture decision
+and is not proposed here.
+
+---
+
 ## F8 — The audit was not locally reproduced
 
 **Status:** not actionable against the code.
@@ -341,3 +413,120 @@ unverified judgments, and it caps the confidence of every other finding.
 
 **Before any P1 item is closed**, require the corresponding gate on one exact
 SHA and treat the audit's severity labels as hypotheses.
+
+---
+
+## F10 — The IPC server MACs a key-sorted payload, not the client's bytes
+
+**Status:** OPEN. The documentation is corrected; the server behaviour is
+not, because the fix is a wire-contract decision.
+
+**What the server does.** `verify_frame_auth`
+(`src/ipc/server/auth.rs:94-115`) parses the frame into a
+`serde_json::Value`, removes the `auth` object, and re-serialises the rest
+with `serde_json::to_vec`. The signature is checked against **those** bytes.
+
+`serde_json` is built without `preserve_order` (`Cargo.lock`: the
+`serde_json` package's dependencies are `itoa`, `memchr`, `serde`,
+`serde_core`, `zmij` — no `indexmap`), so `Value`'s map is a `BTreeMap` and
+that re-serialisation is **key-sorted**. The server never sees the
+client's key order.
+
+Verified here, not assumed: a probe signing `{"zebra":1,"apple":2}` and
+re-serialising it produced `{"apple":2,"zebra":1}`.
+
+**The consequence.** A client that signs the frame in its own key order
+produces a different MAC input and is rejected with "signature mismatch".
+The rule a client must follow is: sign the compact, **key-sorted**
+serialisation of the frame without its `auth` object. `docs/IPC.md:125`
+happens to do this (`json.dumps(req, separators=(',',':'), sort_keys=True)`),
+which is why the repo's own example works — and why the bug went unnoticed.
+
+**Why nothing caught it.** No test in the tree signs a multi-key frame
+through the server. `src/ipc/server/tests/mod.rs` uses a single-key payload
+(`{"type":"get_status"}`), where sort order cannot differ, so the test
+passes either way and pins nothing.
+`crates/ramshield-protocol/tests/replay.rs` calls `auth::verify` directly,
+bypassing the server's re-serialisation entirely.
+
+**What was done about it.** The README now states the real rule
+(`crates/ramshield-protocol/README.md`), a guard test
+(`readme_states_the_key_sorted_signing_rule`) fails if it drifts back, and
+`verify_frame_auth_signs_the_key_sorted_payload_not_the_client_bytes` in
+`src/ipc/server/tests/mod.rs` exercises a multi-key frame end to end: the
+same signature is accepted for either wire order, and a signature over the
+client's own order is rejected.
+
+**What is still open.** The server behaviour itself is unchanged, and that
+is a decision for the owner, not a defect to be patched in the same pass:
+
+- **Keep the sorted canonical form** and document it as the contract.
+  Clients must sort. No wire change; any existing client that does not
+  sort is broken today and would stay broken.
+- **Enable `preserve_order`** so the server MACs the client's own bytes.
+  That makes "sign the bytes you sent" true, at the cost of a dependency
+  feature and of two clients that order differently producing different
+  MAC inputs for the same logical frame.
+- **Canonicalise explicitly** — define a canonical byte form, sign that,
+  and say so in the protocol. The most work, the least surprise.
+
+The current README documents the first option, which is what the code
+actually does. The choice of which option to *enforce* is the open part.
+
+---
+
+## F12 — two compiled binaries are tracked in the repository
+
+**Severity:** MEDIUM (hygiene, not a runtime defect)
+
+`validate_mesh_fix` and `verify_boot_fix` are ELF executables of about
+4.4 MB each, committed at the root of the repository in `415f75f`
+("docs: update README files and add code health backlog"). Nothing in
+the tree references either of them, and no build target produces them at
+the root: they are build output that was committed by accident.
+
+They also carry the builder's home directory in their debug info
+(`/home/m/.rustup/toolchains/...`), which is how the dev-path check
+found them.
+
+**What was done about it.** Both files are removed and both names are in
+`.gitignore`, so a rebuild cannot put them back. The dev-path check no
+longer skips binary files (`git grep -I` skipped them, so a path could
+hide in one); the check reports a binary hit as "Binary file ... matches".
+
+**What is still open.** `master` still carries both files until this is
+merged. Removing them from `master` is the owner's call, like every other
+change to that branch.
+
+---
+
+## F13 — the workspace does not compile on Windows
+
+**Severity:** MEDIUM (build portability, not a runtime defect)
+
+`OpenOptions::mode` is a Unix-only API. It is used unguarded in
+`src/engine/checkpoint.rs:66`, `crates/ramshield-cgnat/src/shm.rs:133`
+and `crates/ramwal/src/wal.rs:542`, so the crate fails to compile for a
+Windows target:
+
+```
+error[E0599]: no method named `mode` found for mutable reference
+              `&mut std::fs::OpenOptions` in the current scope
+```
+
+`.github/workflows/advanced.yml` runs a `windows-latest` job, so that job
+is red on every branch that has run it — including master. The macOS job
+passes, because `mode` exists there.
+
+**What was done about it.** Nothing in the code: the finding is recorded
+here. The branch that carries it does not touch those files, so the
+Windows job fails on it exactly as it fails on master.
+
+**What is still open.** The fix is not a one-liner in the general case.
+`mode(0o600)` is how the state files and the shared-memory file are
+restricted to their owner, and Windows has no equivalent mode bit: the
+options are (a) a `#[cfg(unix)]` guard with a documented Windows
+alternative, (b) `set_permissions` after the file is created, or (c)
+dropping the Windows job and saying so. Which one is right is the
+owner's call, because it changes what the permissions mean on a platform
+the project may not intend to support.

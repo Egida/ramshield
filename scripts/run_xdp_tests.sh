@@ -32,5 +32,5 @@ else
     # Use sudoers NOPASSWD path
     echo "[Executing root-gated tests...]"
     exec sudo -E env PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" RUSTUP_HOME="$HOME/.rustup" \
-        /home/m/.cargo/bin/cargo test -p ramshield-xdp --features elf -- --ignored ddos_ --test-threads=1
+        "$HOME/.cargo/bin/cargo" test -p ramshield-xdp --features elf -- --ignored ddos_ --test-threads=1
 fi

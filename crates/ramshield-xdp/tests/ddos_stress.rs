@@ -1,7 +1,7 @@
 //! DDoS stress tests — proves RamShield XDP survives peak attack load.
 //! All tests require root. Run with:
 //!   sudo env PATH="$HOME/.cargo/bin:$PATH" RUSTUP_HOME="$HOME/.rustup" \
-//!     /home/m/.cargo/bin/cargo test -p ramshield-xdp --features elf \
+//!     "$HOME/.cargo/bin/cargo" test -p ramshield-xdp --features elf \
 //!     -- --ignored ddos_ --test-threads=1
 
 #![allow(unsafe_code, unsafe_op_in_unsafe_fn)] // test-only raw BPF syscall wrappers, root-gated

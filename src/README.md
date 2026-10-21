@@ -17,9 +17,8 @@ main()
   │     │     ├── EnforcementService::new()
   │     │     ├── DetectionEngine::new()
   │     │     ├── DetectionEngine::spawn_workers()
-  │     │     ├── Forecaster::new()
   │     │     ├── IpcServer::bind()  ──→ TCP :7890
-  │     │     └── tokio::select! { IPC, detection, forecast, enforcement }
+  │     │     └── tokio::select! { enforcement actor, IPC server, shutdown }
   │     │
   │     └── graceful shutdown on SIGTERM/SIGINT
   │
@@ -50,9 +49,16 @@ The workspace crates are libraries. They need an entry point that creates shared
 1. **WAL replay** — if enabled, `Wal::open()` opens the write-ahead log and `replay_wal_into_store()` restores blocked IPs and their TTLs.
 2. **Enforcement** — `EnforcementService::new(store, metrics, xdp, shutdown)` takes the enforcement channel receiver and spawns a tokio task that processes `EnforceCommand`s.
 3. **Detection** — `DetectionEngine::new(cfg, store, metrics, enforcement_tx)` creates the batch processing system and `spawn_workers()` launches N batch processor threads (default: CPU core count) plus one subnet aggregation thread.
-4. **Forecasting** — `Forecaster::new(store, config, enforcement_tx, metrics)` spawns a tokio task that runs `tick()` every 10 seconds.
-5. **IPC** — `IpcServer::bind(addr)` starts accepting TCP connections. Each connection spawns a tokio task that reads line-delimited JSON, dispatches to detection/enforcement, and writes responses.
-6. **Select loop** — `tokio::select!` monitors the shutdown signal. When SIGTERM or SIGINT arrives, it sets the shutdown flag and breaks the loop.
+4. **IPC** — `IpcServer::bind(addr)` starts accepting TCP connections. Each connection spawns a tokio task that reads line-delimited JSON, dispatches to detection/enforcement, and writes responses.
+5. **Select loop** — `tokio::select!` monitors the shutdown signal. When SIGTERM or SIGINT arrives, it sets the shutdown flag and breaks the loop.
+
+**Forecasting is not in the pipeline.** The `ramshield-forecasting` crate
+implements `Forecaster`, but the daemon never constructs one —
+`Forecaster::new` is called only from that crate's own tests. The crate is
+in the workspace and its types are re-exported, so the capability exists,
+but nothing in `boot_pipeline()` starts it and no forecast reaches the
+enforcement channel. Treat forecasting as unwired, not as an active
+mitigation path.
 
 ### Graceful Shutdown
 
