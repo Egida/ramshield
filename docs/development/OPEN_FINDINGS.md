@@ -253,6 +253,15 @@ The baseline config's `ram_limit_mb = 1024` and `pre_aggs_max_size = 1_000_000`
 are **configuration ceilings**, not measured RSS. The "~100 MB working set"
 wording is a sizing rationale, not an observed figure.
 
+**One instance is now closed by measurement.** The CGNAT table's
+"(<15ns)" comment in `crates/ramshield-detection/src/lib.rs` was a cost
+claim with no measurement behind it. `scripts/shm_lookup_bench.c` now
+measures the lookup cost by probe distance and over a mixed workload, and
+the comment carries the measured figures instead of the unsupported one.
+That is the standard this finding asks for, applied to the one claim the
+audit could point at. What is left is the policy: no RSS or throughput
+figure goes public without the workload and the machine recorded.
+
 **Required fix:** before any RSS or throughput figure is published, record the
 exact SHA, build profile and features, toolchain and config hash; the machine,
 CPU, RAM, kernel, driver and NIC; the workload generator, packet sizes and

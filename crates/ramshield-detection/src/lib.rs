@@ -131,7 +131,15 @@ pub struct DetectionEngine {
     worker_handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// P2: CGNAT graduated mitigation guard, clamped tier dispatch.
     cgnat_guard: ramshield_cgnat::CgnatGuard,
-    /// P2: Shared memory rule table for proxy lookups (<15ns).
+    /// P2: Shared memory rule table for proxy lookups.
+    ///
+    /// The old comment here claimed "<15ns". That figure was not backed by
+    /// a measurement, and the measured cost is higher: see
+    /// `scripts/shm_lookup_bench.c`, which puts a lookup at roughly 26 ns
+    /// for a rule in the primary slot and 36 ns for one at the far end of
+    /// the probe window, on the host it was measured on. A cost figure may
+    /// only be published with the workload and the machine recorded, which
+    /// is what the performance-claims finding (F7) requires.
     shm_table: Arc<ramshield_cgnat::ShmTableManager>,
     /// (ip, reason) admission gate: key -> last-admitted wall-clock ns.
     /// A re-emit for a key inside its cooldown (ttl/2, or 30s for permanent

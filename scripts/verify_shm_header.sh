@@ -23,6 +23,18 @@ cc -std=c11 -Wall -Wextra -Werror -pthread -I. \
   scripts/shm_lookup_contract.c -o "$TMP/shm-lookup-contract"
 "$TMP/shm-lookup-contract"
 
+# The cost of a lookup under collision. The table is the reverse proxy's
+# lookup path, so the cost of a colliding key is a property of the hot
+# path. Only the CORRECTNESS of the answers is enforced -- a timing
+# assertion on a shared runner is a flake generator, not a test -- but the
+# measured figures are printed for the record.
+#
+# -O2 because a benchmark compiled at -O0 measures the compiler's lack of
+# optimisation, not the lookup.
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -I. \
+  scripts/shm_lookup_bench.c -o "$TMP/shm-lookup-bench"
+"$TMP/shm-lookup-bench"
+
 # ThreadSanitizer is opt-in because some hosted/container kernels cannot
 # reserve its shadow address space. Unsupported compiler/runtime is reported
 # as SKIP; actual sanitizer findings remain fatal.

@@ -357,7 +357,48 @@ acquire fence before the second, so a mixed state from a concurrent
 publication is discarded rather than returned. The reader's bounded retry
 budget keeps it bounded under contention.
 
-### 4.6 What is a known limitation, not a fix
+### 4.6 The cost of a lookup under collision — measured, not argued
+
+The table is the reverse proxy's lookup path, so the cost of a colliding
+key is a property of the hot path. `scripts/shm_lookup_bench.c` measures
+it: the cost of a lookup by the probe distance of its rule, and the cost of
+a mixed hit/miss workload over a populated table. Every lookup in it is
+also checked for the right answer.
+
+Measured on the development host (Intel Core i7-3687U @ 2.10 GHz, 4 vCPU,
+Linux 6.8, gcc -O2, best of 5 repetitions of 200 000 lookups):
+
+| rule's probe distance | slots scanned | ns/lookup |
+|---|---|---|
+| 0 | 1 | 25.7 |
+| 1 | 2 | 29.1 |
+| 2 | 3 | 32.4 |
+| 3 | 4 | 36.3 |
+
+Mixed workload (4096 rules, hits and misses alternating over a 4096-key
+working set): **54.3 ns/lookup**.
+
+Two things follow.
+
+**The full-window scan is cheap.** Each extra slot in the probe window
+costs about 3.5 ns, so scanning four slots instead of one costs about
+10 ns. The scan was not introduced by this change — the old reader scanned
+the same window — so this is the cost that already existed, now measured.
+
+**The "<15ns" comment was not true.** `crates/ramshield-detection/src/lib.rs`
+claimed the table was a "<15ns" lookup path. The measured cost is roughly
+26 ns for the simplest case and 36 ns at the far end of the window, on a
+host that is shared and noisy enough that the run-to-run spread on a single
+figure is wider than the difference between probe distances. The comment
+now carries the measured figures and the caveat instead of the unsupported
+one. This is a performance claim, so it belongs to F7's evidence policy:
+a figure may only be published with the workload and the machine recorded.
+
+The gate enforces the **correctness** of the answers, not the timings — a
+timing assertion on a shared runner is a flake generator. The measured
+figures are printed for the record.
+
+### 4.7 What is a known limitation, not a fix
 
 **A /0 rule is now inexpressible end to end.** The publisher refuses it and
 the reader rejects it. That is the correct behaviour for a table whose key

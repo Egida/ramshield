@@ -112,6 +112,32 @@ vectors: `c_and_rust_slot_key_hash_agree` in `src/shm.rs` and
 `test_key_parity_with_rust` in `scripts/shm_lookup_contract.c`. A change to
 either implementation breaks one of the two.
 
+### The cost of a lookup
+
+The table is the reverse proxy's lookup path, so the cost of a colliding
+key is a property of the hot path.
+`scripts/shm_lookup_bench.c` measures it — the cost of a lookup by the
+probe distance of its rule, and the cost of a mixed hit/miss workload —
+and checks every answer while it does so.
+
+Measured on the development host (i7-3687U @ 2.10 GHz, gcc -O2, best of 5
+repetitions of 200 000 lookups):
+
+| rule's probe distance | slots scanned | ns/lookup |
+|---|---|---|
+| 0 | 1 | 25.7 |
+| 1 | 2 | 29.1 |
+| 2 | 3 | 32.4 |
+| 3 | 4 | 36.3 |
+
+Mixed workload (4096 rules, hits and misses over a 4096-key working set):
+**54.3 ns/lookup**. Each extra slot in the probe window costs about
+3.5 ns, so the full-window scan — which the reader has always done — costs
+about 10 ns more than a single-slot lookup.
+
+These figures are for that host. A cost figure may only be published with
+the workload and the machine recorded.
+
 ### Testing
 
 `scripts/verify_shm_header.sh` (the `shm-abi` gate) compiles and runs:
