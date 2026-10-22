@@ -1369,7 +1369,10 @@ and the script cannot delete a directory it did not create.
 
 ## F28 — The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure
 
-**Status:** FIXED — the benchmark build failure fails the job
+**Status:** FIXED — the test step no longer runs the benchmark
+harness (`cargo test --workspace --locked`, the primary workflow's
+test-target policy), the benchmarks run in their own bounded job with
+no `|| true`, and a benchmark build failure fails the job.
 **Files:** `.github/workflows/advanced.yml`
 **Severity:** P2 (CI)
 
