@@ -20,8 +20,8 @@ spec:
         app.kubernetes.io/name: ramshield
         app.kubernetes.io/component: server
     spec:
-      hostNetwork: false
-      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: ramshield
       securityContext:
         runAsNonRoot: true
