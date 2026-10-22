@@ -75,10 +75,10 @@ class Server:
         # Scratch config: loopback binds + scratch WAL + XDP off. Never the
         # live config.toml (dev binds 7890/9999; XDP iface "lo" would attach
         # a program to the loopback the prod daemon and IPC share).
-        src = open(REPO + "/config.prod.toml.example").read()
-        src = src.replace('tcp_addr = "0.0.0.0:7890"', f'tcp_addr = "{IPC_HOST}:{IPC_PORT}"')
-        src = src.replace('http_addr = "0.0.0.0:9999"', f'http_addr = "127.0.0.1:{DASH_PORT}"')
-        src = src.replace('dir = "/var/lib/ramshield/wal"', f'dir = "{s.WAL_DIR}"')
+        src = open(REPO + "/config.baseline.toml").read()
+        src = src.replace('tcp_addr = "127.0.0.1:7890"', f'tcp_addr = "{IPC_HOST}:{IPC_PORT}"')
+        src = src.replace('http_addr = "127.0.0.1:9999"', f'http_addr = "127.0.0.1:{DASH_PORT}"')
+        src = src.replace('dir = "/tmp/ramshield-wal"', f'dir = "{s.WAL_DIR}"')
         subprocess.run(["rm", "-rf", s.WAL_DIR], check=True)
         open(s.SCRATCH_CFG, "w").write(src)
 

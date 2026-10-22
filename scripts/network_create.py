@@ -16,9 +16,17 @@ def build_plan(count: int, family: str, prefixlen: int, hosts_per_network: int, 
         raise ValueError("IPv6 test fixtures require /64")
     out = []
     for i in range(count):
-        net = ipaddress.ip_network(f"192.0.{2 + i}.0/24") if family != "v6" else ipaddress.ip_network(f"2001:db8:{seed + i}::/64")
-        hosts = [{"ip": str(net.network_address + (j % (net.num_addresses - 2)) + 1), "events": 1} for j in range(hosts_per_network)]
-        out.append({"network": str(net), "family": 4 if net.version == 4 else 6, "hosts": hosts})
+        # "dual" means both families, one network each per index - the
+        # sibling generator does the same.
+        families = ("v4", "v6") if family == "dual" else (family,)
+        for fam in families:
+            net = (
+                ipaddress.ip_network(f"192.0.{2 + i}.0/24")
+                if fam == "v4"
+                else ipaddress.ip_network(f"2001:db8:{seed + i}::/64")
+            )
+            hosts = [{"ip": str(net.network_address + (j % (net.num_addresses - 2)) + 1), "events": 1} for j in range(hosts_per_network)]
+            out.append({"network": str(net), "family": 4 if net.version == 4 else 6, "hosts": hosts})
     return out
 
 def ramshield_overlay(interface: str, ipc_port: str, dashboard_port: str) -> dict:

@@ -44,10 +44,10 @@ are the ones used here.
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
 | F16 | The ansible quality gate reported a red CI run as a pass | P2 | **FIXED** — the role now compares the run's conclusion with `success` and exits 1 otherwise | no |
 | F17 | The dashboard's quarantine table had 5 headers and 6 cells, and its CSV export dropped the Time column | P2 | **FIXED** — the surplus cell is gone and the export takes all five columns | no |
-| F18 | `scripts/attack_nexus.py`'s `stop` command does not stop the flood | P3 | **OPEN** — the command sets a flag the flood thread never polls | no |
-| F19 | Two helper scripts read `config.prod.toml.example`, which does not exist on master | P3 | **OPEN** — one of them reads it and does not use the result | no |
-| F20 | `scripts/network_create.py`'s `dual` family produces IPv4 only | P3 | **OPEN** — the `dual` branch takes the IPv4 path | no |
-| F21 | `scripts/xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check | P3 | **OPEN** — the snapshot request is hardcoded to the default port | no |
+| F18 | `scripts/attack_nexus.py`'s `stop` command does not stop the flood | P3 | **FIXED** — the flood polls the flag the command sets | no |
+| F19 | Two helper scripts read `config.prod.toml.example`, which does not exist on master | P3 | **FIXED** — the dead read is gone and the other script reads the baseline | no |
+| F20 | `scripts/network_create.py`'s `dual` family produces IPv4 only | P3 | **FIXED** — `dual` now emits a /24 and a /64 per index | no |
+| F21 | `scripts/xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check | P3 | **FIXED** — the pre-flight uses the parsed dashboard URL | no |
 
 ---
 
@@ -777,26 +777,26 @@ failed with six cells against five headers.
 
 ## F18 — `scripts/attack_nexus.py`'s `stop` command does not stop the flood
 
-**Status:** OPEN (P3) — a dev tool, not in CI
+**Status:** FIXED (P3) — the flood polls the flag the command sets
 
-**What it is.** The interactive `shell` subcommand's `stop` command sets
+**What it was.** The interactive `shell` subcommand's `stop` command set
 the outer `StopFlag`, but the flood thread polls a different flag: the
 thread is started with a fresh `local_stop`, and `stop.clear()` clears
 the outer one. The `stop` command is therefore a no-op and the flood
 runs to its duration. `quit` has the same problem.
 
-The fix is to pass the outer flag to `run_flood` and drop the local
-one. It is not done here because the script has no test harness and the
-path is the interactive shell, which no workflow or Makefile target
-reaches.
+The flood thread now polls the flag the `stop` command sets, so the
+command stops the flood instead of running to its duration. The
+interactive shell is the only path that reaches this: no workflow and
+no Makefile target runs the script.
 
 ---
 
 ## F19 — two helper scripts read a config example that does not exist
 
-**Status:** OPEN (P3) — a dev tool, not in CI
+**Status:** FIXED (P3) — the dead read is gone and the other script reads the baseline
 
-**What it is.** `config.prod.toml.example` was renamed to
+**What it was.** `config.prod.toml.example` was renamed to
 `config.baseline.toml` and then deleted; it is not on master. Two
 scripts still read it:
 
@@ -809,30 +809,34 @@ scripts still read it:
   contains (`127.0.0.1:7890`, `127.0.0.1:9999`, `/tmp/ramshield-wal`),
   so the script fails whichever file it is pointed at.
 
-The first is a deletion: the dead read goes. The second needs the
-replacement targets corrected against the baseline file.
+The dead read in `auth_e2e.py` is gone - the config it wrote was built
+from scratch anyway, so the read only ever raised `FileNotFoundError`.
+`final_integration.py` now reads `config.baseline.toml` and replaces the
+strings that file actually contains (`127.0.0.1:7890`,
+`127.0.0.1:9999`, `/tmp/ramshield-wal`).
 
 ---
 
 ## F20 — `scripts/network_create.py`'s `dual` family produces IPv4 only
 
-**Status:** OPEN (P3) — a library API with no CLI path
+**Status:** FIXED (P3) — `dual` emits both families
 
 **What it is.** `build_plan` picks the IPv4 branch when
 `family != "v6"`, so `dual` is identical to `v4`: it emits no IPv6
 networks at all. The sibling generator `scripts/unique_network_generator.py`
 handles `dual` correctly, which is what makes this one an outlier.
 
-The CLI never asks for `dual` - `main()` always passes `v4` - and the
-existing test only exercises `v4`. A single `prefixlen` parameter also
-cannot express "a /24 and a /64", so `dual` has no coherent meaning in
-this signature.
+`dual` now emits a /24 and a /64 per index, the way the sibling
+generator does. `scripts/test_network_tools.py` has a case for it:
+against the old generator it fails with `dual produced only {4}`. The
+CLI still never asks for `dual` - `main()` always passes `v4` - so this
+is a library-API fix.
 
 ---
 
 ## F21 — `scripts/xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check
 
-**Status:** OPEN (P3) — a local dev script, needs root and netns
+**Status:** FIXED (P3) — the pre-flight uses the parsed dashboard URL
 
 **What it is.** `--dashboard` is parsed and stored, and it is used for
 the counters, but the pre-flight snapshot request is hardcoded to
@@ -840,6 +844,8 @@ the counters, but the pre-flight snapshot request is hardcoded to
 pre-flight raises an uncaught `URLError` instead of printing the
 intended `FAIL: xdp_active=false`.
 
-The fix is one line: build the request from the parsed URL.
+The pre-flight now builds the request from the parsed URL, so a
+non-default `--dashboard` is used for the snapshot as well as for the
+counters.
 
 ---

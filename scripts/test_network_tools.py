@@ -26,6 +26,16 @@ def test_fixture_addresses_match_network_create_contract():
     assert len({item["network"] for item in plan}) == 2
 
 
+def test_dual_family_produces_both_families():
+    # "dual" used to take the IPv4 branch and emit no IPv6 network at all.
+    create = load("network_create")
+    plan = create.build_plan(2, "dual", 24, 4, 7)
+    families = {item["family"] for item in plan}
+    assert families == {4, 6}, f"dual produced only {families}"
+    assert len(plan) == 4, f"dual produced {len(plan)} networks, expected 2 per family"
+    assert all(item["network"].endswith("/64") for item in plan if item["family"] == 6)
+
+
 def test_config_overlay_uses_isolated_test_binds():
     create = load("network_create")
     overlay = create.ramshield_overlay("xdp_test0", "17890", "19999")
