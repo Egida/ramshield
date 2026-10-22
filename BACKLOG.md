@@ -127,6 +127,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | **F27** | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path. | OPEN — the unblock, CIDR and TTL checks are advertised and absent; `rm -rf "$WAL_DIR"` runs on a path the environment can override. |
 | **F28** | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure. | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true`. |
 | **F29** | The Subnet Stress Pin gate asserts against a fixed four-second sleep. | FIXED — the script waits for the counters to settle. The run on `4b88864` was red on a docs-only commit (206 IPs tracked against a threshold of 800). |
+| **F30** | `block_ip` trusts the caller to pass a blocked fallback; the only guard is a `debug_assert!`. | OPEN — the release build publishes whatever `block_state` the fallback carries, and a clean fallback would put the key in the blocked index while the record says clean. The only production caller passes the right thing. |
 
 **The 2026-10-22 master audit** (`35f4557`) is in this table already, item
 by item: the node-guard admission blocker is **I-027**/F15, the IPC

@@ -47,6 +47,7 @@ are the ones used here.
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
 | F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
 | F29 | The Subnet Stress Pin gate asserts against a fixed four-second sleep | P2 (CI) | **FIXED** — the script now waits for the counters to settle | no |
+| F30 | `block_ip` trusts the caller to pass a blocked fallback; the only guard is a `debug_assert!` | P3 (hardening) | OPEN — the release build publishes whatever `block_state` the fallback carries, and a clean fallback would put the key in the blocked index while the record says clean | no |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -536,6 +537,17 @@ that `update_ip` still had the shape F9 removed from `block_ip`: the
 vacant branch published the record without updating the blocked index,
 and the occupied branch released the shard lock before the size
 accounting. That is fixed with F14.
+
+**What a later review of the F-14 fix found.** The same review found
+the eviction paths doing the same thing - `Store::remove` and
+`evict_batch` updated the blocked index after the shard lock was
+released, which could drop a live block from the XDP map. That is F24,
+and it is fixed. It also noted that three of the F-9 tests are
+sequential, so they assert the right invariants but do not fail against
+the old two-acquisition pattern; the property test and the F-14 index
+test are the two that are load-bearing. That is recorded here so no one
+quotes the four sequential tests as proof the lost update cannot come
+back.
 
 ---
 
@@ -1118,6 +1130,56 @@ disagree, which is exactly how the stale entry was caught.
 
 **Closure criterion.** The dependency is gone, or the crate uses it. **Met.**
 
+
+
+## F30 — `block_ip` trusts the caller to pass a blocked fallback
+
+**Status:** OPEN
+**Files:** `crates/ramshield-storage/src/store/write.rs`,
+`crates/ramshield-enforcement/src/service/enforce.rs`
+**Severity:** P3 (hardening)
+
+Found by the independent review of the F-14 fix.
+
+### The defect
+
+`Store::block_ip` copies the block state out of the caller's fallback
+record and publishes it:
+
+```rust
+let state = fallback.block_state.clone();
+debug_assert!(
+    matches!(state, BlockState::Blocked { .. }),
+    "block_ip publishes a blocked record"
+);
+```
+
+The guard is a `debug_assert!`, so it is compiled out in release. The
+same function then does `sync_blocked_index(key, false, true)`, which
+inserts the key into `blocked_set` and increments `blocked_count`. A
+caller that passed a `Clean` fallback would therefore produce a record
+that says clean while the index says blocked - exactly the invariant
+the F-9 and F-14 work is about.
+
+The only production caller passes the right thing:
+`crates/ramshield-enforcement/src/service/enforce.rs:269` builds
+`block_state: BlockState::Blocked { reason, since_ns: now_ns }`
+unconditionally, not under `debug_assertions`. So this is not a live
+defect; it is a contract that only a debug build checks.
+
+### Required fix
+
+1. Either derive the published state inside the store, so it cannot be
+   wrong, or make the check a real error in release.
+2. Keep a test that a clean fallback cannot produce a blocked index
+   entry with a clean record.
+
+### Closure criterion
+
+The release build cannot publish a clean record for a key the blocked
+index lists as blocked.
+
+---
 
 ## F29 — The Subnet Stress Pin gate asserts against a fixed four-second sleep
 
