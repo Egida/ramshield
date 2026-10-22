@@ -6,8 +6,8 @@ Comprehensive verification of all module relationships against audit findings.
 import subprocess, sys, json, time, signal, os, socket
 import urllib.request
 
-REPO = __file__[:-len("scripts/final_integration.py")]
-BIN = REPO + "/target/release/ramshield"
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BIN = os.path.join(REPO, "target/release/ramshield")
 IPC_HOST, IPC_PORT = "127.0.0.1", 17890
 DASH_PORT = 19999
 DASH_URL = f"http://127.0.0.1:{DASH_PORT}"

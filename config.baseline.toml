@@ -79,7 +79,7 @@ l7_block_ttl_secs = 300
 
 [ipc]
 tcp_addr = "127.0.0.1:7890"
-max_connections = 1024
+max_connections = 128
 max_line_length = 262_144
 max_connection_bytes = 1_048_576
 read_timeout_ms = 5000

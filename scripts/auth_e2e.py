@@ -205,10 +205,10 @@ def main() -> int:
             resp2 = send_line(IPC_PORT, json.dumps(wire))
             print("replay response:", resp2[:200])
             if resp2 == resp and "error" not in resp2.lower():
-                # May or may not differ; if identical success, replay store might not key on full frame
-                print("WARN: replay returned same success — verify ReplayStore wiring")
+                print("FAIL: replayed authenticated frame was accepted as success")
+                failures += 1
             else:
-                print("OK: replay handled distinctly or errored")
+                print("OK: replay rejected")
 
         finally:
             proc.terminate()

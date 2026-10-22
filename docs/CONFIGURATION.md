@@ -51,7 +51,7 @@ Use the baseline values only when they are appropriate for your workload. Detect
 | Key | Baseline | Built-in default |
 |---|---|---:|
 | `tcp_addr` | `127.0.0.1:7890` | `127.0.0.1:7890` |
-| `max_connections` | `1000000` | `256` |
+| `max_connections` | `128` | `256` |
 | `max_line_length` | `262144` | 256 KiB when serde default is applied |
 | `max_connection_bytes` | `1048576` | 1 MiB |
 | `read_timeout_ms` | `5000` | 5000 |

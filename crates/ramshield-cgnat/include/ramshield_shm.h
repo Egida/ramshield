@@ -157,7 +157,7 @@ ramshield_shm_read_ex(const RamshieldShmRuleEntry *table,
      * a key is 0 exactly when the masked network address equals its prefix
      * length -- every /0, and 0.0.0.32/32 among others. The publisher
      * refuses all of them the same way. */
-    if (hash == 0) {
+    if (table == NULL || hash == 0) {
         return RAMSHIELD_SHM_INVALID;
     }
     uint32_t primary = (uint32_t)(hash & (RAMSHIELD_SHM_TABLE_CAPACITY - 1));
@@ -191,15 +191,17 @@ ramshield_shm_read_ex(const RamshieldShmRuleEntry *table,
 
             coherent = true;
             if (client_hash == hash && expires_at_ms > now_ms) {
-                out->client_hash = client_hash;
-                out->expires_at_ms = expires_at_ms;
-                out->max_rps = max_rps;
-                out->tier = tier;
-                out->flags = flags;
-                for (unsigned i = 0; i < 8; ++i)
-                    out->challenge_seed[i]     = (uint8_t)(challenge_seed_lo >> (8 * i));
-                for (unsigned i = 0; i < 8; ++i)
-                    out->challenge_seed[8 + i] = (uint8_t)(challenge_seed_hi >> (8 * i));
+                if (out != NULL) {
+                    out->client_hash = client_hash;
+                    out->expires_at_ms = expires_at_ms;
+                    out->max_rps = max_rps;
+                    out->tier = tier;
+                    out->flags = flags;
+                    for (unsigned i = 0; i < 8; ++i)
+                        out->challenge_seed[i]     = (uint8_t)(challenge_seed_lo >> (8 * i));
+                    for (unsigned i = 0; i < 8; ++i)
+                        out->challenge_seed[8 + i] = (uint8_t)(challenge_seed_hi >> (8 * i));
+                }
                 return RAMSHIELD_SHM_FOUND;
             }
 

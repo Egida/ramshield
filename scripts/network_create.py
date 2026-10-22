@@ -66,10 +66,14 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=("plan", "create", "destroy"))
     p.add_argument("--count", type=int, default=2)
+    p.add_argument("--family", choices=("v4", "v6", "dual"), default="v4")
+    p.add_argument("--prefixlen", type=int, default=None)
+    p.add_argument("--hosts-per-net", type=int, default=32)
     p.add_argument("--output", default="-")
     args = p.parse_args()
     try:
-        result = build_plan(args.count, "v4", 24, 32, 7) if args.action == "plan" else (create(args.count) if args.action == "create" else (destroy(args.count) or {"destroyed": args.count}))
+        prefix = args.prefixlen if args.prefixlen is not None else (64 if args.family == "v6" else 24)
+        result = build_plan(args.count, args.family, prefix, args.hosts_per_net, 7) if args.action == "plan" else (create(args.count) if args.action == "create" else (destroy(args.count) or {"destroyed": args.count}))
     except (ValueError, PermissionError, subprocess.CalledProcessError) as e:
         print(f"network_create: {e}")
         return 2

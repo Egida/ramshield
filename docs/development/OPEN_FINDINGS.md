@@ -65,7 +65,7 @@ are the ones used here.
 | F45 | Two exported series miss the `ramshield_` namespace | P3 (metrics) | **FIXED** — every exported series carries the namespace | no |
 | F46 | The pipeline stage bars mix units | P3 (display) | **FIXED** — the pipeline stages share their units | no |
 | F47 | The quarantine table fabricates the severity and tier of every row | P3 (display) | **FIXED** — the quarantine table shows the record's reason | no |
-| F48 | `/metrics` bypasses the session auth that guards every other route | P3 (exposure) | OPEN — An unauthenticated metrics endpoint on a port the network policy opens to other namespaces. | no |
+| F48 | `/metrics` bypasses the session auth that guards every other route | P3 (exposure) | FIXED — `/metrics` now requires session auth like every other route. | no |
 | F49 | The backlog gate's open-row parser never matches BACKLOG.md | P3 (CI) | **FIXED** — the gate's parser reads the table BACKLOG.md has | no |
 | F50 | Three scheduled workflows can never run | P3 (CI) | **FIXED** — the three dead scheduled workflows are deleted | no |
 | F51 | The qualification docs tell operators to run a cargo-audit invocation that does not exist | P3 (docs) | **FIXED** — the docs name the flags the workflow runs (PR #83) | no |

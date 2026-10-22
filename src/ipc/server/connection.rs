@@ -170,6 +170,16 @@ pub(crate) async fn handle_connection(
             let _ = timeout(config.write_timeout, write_resp(&mut socket, &resp)).await;
             return Ok(());
         }
+
+        // Buffer-bloat guard: split_to advances the start pointer but the
+        // capacity stays at the high-water mark for the connection's lifetime.
+        // Once the drain loop has emptied the buffer, hand the big allocation
+        // back instead of holding it against a connection that idles — a
+        // client that once pipelined 1 MiB must not pin ~1-2 MiB of capacity
+        // for its remaining lifetime. Re-arm at the initial 8 KiB.
+        if buf.is_empty() && buf.capacity() > 8192 {
+            buf = BytesMut::with_capacity(8192);
+        }
     }
 }
 
