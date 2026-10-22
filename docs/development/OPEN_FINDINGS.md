@@ -40,9 +40,10 @@ are the ones used here.
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | **FIXED** — all 62 claims are fixed; every crate README the sweep covers is now pinned by a test | no |
 | F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | OPEN — `ramshield-types` and `ramshield-storage` are declared in `crates/ramshield-analytics/Cargo.toml`; no file under `crates/ramshield-analytics/src/` mentions either. The crate is self-contained | no — remove the two path dependencies, or use them |
+| F24 | `Store::remove` drops the blocked index entry after the shard lock is released | P2 (live) | OPEN — the eviction path and the enforcement actor are both live; a concurrent re-block of the same key loses its index entry | no — take the shard lock across the removal, like `block_ip` does |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
-| F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
+| F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
 | F16 | The ansible quality gate reported a red CI run as a pass | P2 | **FIXED** — the role now compares the run's conclusion with `success` and exits 1 otherwise | no |
 | F17 | The dashboard's quarantine table had 5 headers and 6 cells, and its CSV export dropped the Time column | P2 | **FIXED** — the surplus cell is gone and the export takes all five columns | no |
@@ -479,6 +480,23 @@ never completes. The refusal is already observable
 capacity-refused IP should fail open or fail closed is a posture decision
 and is not proposed here.
 
+**A correction to the commit message.** The commit message of `7457150`
+says the new property test is deterministic. An independent re-review of
+that fix found it is not: the test fails the old code in 186 of 200
+rounds, and 121 of those failures are on round 0 - it is a probabilistic
+test with a high hit rate, not a deterministic one. The commit is merged,
+so the message cannot be amended; this note is the correction. The
+deterministic part of the fix is covered by the single-threaded tests
+(`a_block_does_not_roll_back_the_detection_counters`,
+`an_unblock_does_not_roll_back_the_detection_counters`), which fail on
+the old code every time.
+
+**What the same re-review found next door.** The re-review also found
+that `update_ip` still had the shape F9 removed from `block_ip`: the
+vacant branch published the record without updating the blocked index,
+and the occupied branch released the shard lock before the size
+accounting. That is fixed with F14.
+
 ---
 
 ## F8 — The audit was not locally reproduced
@@ -658,11 +676,13 @@ neither name, and `.gitignore` carries both.
 
 ## F14 — the store's `insert()` updates the blocked index after releasing the shard lock
 
-**Status:** OPEN (P2, latent) — not reachable concurrently today
+**Status:** FIXED (P2) — the vacant branch of `insert()` and of
+`update_ip()` now publish under the shard lock, and the size accounting
+moved inside it too.
 
-**What it is.** The same shape as the defect F9 just fixed, one function
-over. `Store::insert` publishes a record with `v.insert(...)`, which
-releases the shard lock, and only then updates the blocked index:
+**What it was.** The same shape as the defect F9 fixed, one function
+over. `Store::insert` published a record with `v.insert(...)`, which
+releases the shard lock, and only then updated the blocked index:
 
     crates/ramshield-storage/src/store/write.rs:130  v.insert(new_entry);
     crates/ramshield-storage/src/store/write.rs:131  if new_blocked {
@@ -674,7 +694,7 @@ A concurrent unblock landing in that window would decrement a counter
 that is still zero, and leave the index holding a key whose record was
 clean — the exact failure F9's fix removed from `block_ip`.
 
-**Why it is not live.** The only callers that can insert a *blocked*
+**Why it was not live.** The only callers that can insert a *blocked*
 record are the startup recovery paths: the WAL replay
 (`crates/ramshield-enforcement/src/replay.rs:186`, called from
 `src/engine/boot.rs:470-483`) and the checkpoint restore
@@ -684,10 +704,51 @@ does not insert: it mutates in place with `update_ip`
 (`crates/ramshield-detection/src/merge.rs:31`), which by contract never
 touches `block_state`.
 
-**What would close it.** The same change F9 made: `insert_entry` instead
-of `insert`, and the index update inside the lock. It is not proposed
-here because no live path reaches it, and a fix with no reachable path
-is a change without a failing test to write.
+**What an independent re-review of the F9 fix found.** `update_ip` had
+the same shape in two places, and one of them was live:
+
+- The vacant branch published the caller's record and never touched the
+  blocked index at all, so a blocked record published there was invisible
+  to every reader that asks the index. The store's own invariant - every
+  blocked record is in `blocked_set`, every entry in `blocked_set` is a
+  blocked record - was broken by construction. The only caller passes
+  `BlockState::Clean`, so nothing was broken in practice.
+- The occupied branch released the shard lock before
+  `apply_growth_size_only`, so the capacity gate could be momentarily
+  exceeded by a concurrent insert. This path **is** live: the detection
+  flush calls `update_ip` on every new IP.
+
+**What changed.** `crates/ramshield-storage/src/store/write.rs`:
+
+- `insert()`'s vacant branch publishes with `v.insert_entry(...)` instead
+  of `v.insert(...)`. `insert_entry` returns an `OccupiedEntry` that
+  holds the shard's write guard, so the lock is released only when the
+  guard is dropped - after the blocked index, the TTL count and the size
+  accounting have landed. The index update goes through the same
+  `sync_blocked_index` helper the block and unblock paths use.
+- `update_ip()`'s vacant branch does the same, and it now syncs the
+  blocked index for the record it publishes, using the record's own
+  block state.
+- `update_ip()`'s occupied branch moves `apply_growth_size_only` inside
+  the lock, before the guard is dropped, so the capacity gate and the
+  bytes it accounts for cannot disagree.
+
+**The test.** `an_update_that_publishes_a_blocked_record_indexes_it` in
+`crates/ramshield-storage/src/tests/mod.rs` publishes a blocked record
+through `update_ip` on a fresh key and asserts that the counter and the
+index both know about it, then runs the store's own invariant check. It
+fails on the old code with "the blocked record was not counted". The
+concurrent case is covered by the store's existing stress test
+(`stress_block_unblock_concurrent`), which asserts the same invariants
+after eight threads have hammered insert, unblock and remove.
+
+**What is still open.** `Store::remove` has the same shape: it takes the
+record out with `self.inner.remove(key)`, which releases the shard lock,
+and only then decrements the counter and drops the index entry. A
+concurrent `block_ip` for the same key - the eviction path and the
+enforcement actor are both live - can publish a blocked record and index
+it in between, and the removal then deletes the index entry of a record
+that is blocked. That is F24.
 
 ---
 
@@ -912,3 +973,55 @@ validated but never read.
 
 **Closure criterion.** The forecaster honours `min_entropy`, or the
 config crate drops the field and its validation.
+
+## F24 — `Store::remove` drops the blocked index entry after the shard lock is released
+
+**Status:** OPEN (P2, live) — found while closing F14.
+
+**What it is.** `crates/ramshield-storage/src/store/access.rs:30-58` takes
+the record out with `self.inner.remove(key)`. DashMap's `remove` releases
+the shard's write lock when it returns the value, so the bookkeeping that
+follows runs with no lock held:
+
+    let freed = ...;
+    self.ram_bytes.fetch_sub(freed, Ordering::Relaxed);
+    ...
+    if e.value.is_blocked() {
+        self.blocked_count.fetch_sub(1, Ordering::Relaxed);
+        self.blocked_set.remove(key);
+    }
+
+**Why it is live.** The eviction path removes records while the
+enforcement actor blocks them. Both run in the daemon at the same time,
+and they take the same shard lock for the record itself - which is why the
+window is narrow, but the lock is exactly what is missing here.
+
+**The interleaving.**
+
+1. The record is blocked: the counter is 1, the index holds the key.
+2. `remove` takes the record out. The lock is released. The counter is
+   still 1 and the index still holds the key.
+3. The enforcement actor calls `block_ip` for the same key. The key is
+   vacant, so `block_ip` publishes a blocked record, increments the
+   counter to 2 and inserts the index entry - all under the shard lock,
+   which the removal no longer holds.
+4. The removal's bookkeeping lands: the counter goes back to 1, and
+   `blocked_set.remove(key)` drops the index entry of a record that is
+   blocked.
+
+The counter is right; the index is wrong. The store's own invariant -
+every blocked record is in `blocked_set` - is broken, and it stays broken
+until the next block or unblock for that key. The dashboard's blocked list
+(`get_blocked_ips`) and the counter then disagree.
+
+**What would close it.** The same treatment `block_ip` got: take the
+record out under the shard lock and do the counter, index and size
+bookkeeping inside that critical section. DashMap has no "remove and keep
+the lock" call, so the removal has to go through the entry API
+(`self.inner.entry(key)` -> `Occupied` -> `o.remove()`), with the
+bookkeeping before `o.remove()` and the subnet-index update after it, to
+keep the lock order the same as today.
+
+**Closure criterion.** The blocked index and the counter are updated
+under the shard lock, and a test asserts that a re-block concurrent with
+a removal keeps its index entry.
