@@ -38,6 +38,18 @@ spec:
             capabilities:
               drop: ["ALL"]
               add:
+                # Capability rationale (I-012) — each retained capability is
+                # required by the XDP path and nothing else:
+                # - NET_ADMIN: attaching the XDP program to the interface
+                #   (netlink IFLA_XDP) requires it; unprivileged attach is refused.
+                # - BPF: bpf() syscalls that create/update the pinned maps
+                #   under /sys/fs/bpf (the unprivileged bpf() syscall is
+                #   restricted to a fixed allow-list that excludes map
+                #   creation and program load).
+                # - PERFMON: the packet path is traced via perf_event_open
+                #   probes used by the capture/telemetry path.
+                # Filesystem access comes from the explicit hostPath mounts
+                # below; no other capability is granted.
                 - NET_ADMIN
                 - BPF
                 - PERFMON
