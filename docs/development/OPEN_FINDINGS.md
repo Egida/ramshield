@@ -39,10 +39,10 @@ are the ones used here.
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | **FIXED** — all 62 claims are fixed; every crate README the sweep covers is now pinned by a test | no |
-| F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | **FIXED** — `ramshield-types` and `ramshield-storage` are gone from `crates/ramshield-analytics/Cargo.toml`; the crate has no workspace dependency at all | no |
-| F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
+| F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | **FIXED** — on `master` as `35f4557` (PR #57, the code commit `f0b84c6`): `ramshield-types` and `ramshield-storage` are gone from `crates/ramshield-analytics/Cargo.toml`; the crate has no workspace dependency at all | no |
+| F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — on `master` as `6474bc4` (PR #56, the code commit `fcf1be4`): `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
-| F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | **FIXED** — the dependency is gone from `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types` | no |
+| F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | **FIXED** — on `master` as `1315236` (PR #63, the code commit `4fbf680`): the dependency is gone from `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types` | no |
 | F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | **FIXED** — the document states each subsystem's own posture, and `tests/fail_safe_claims.rs` pins it to the source | no |
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
 | F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
@@ -983,7 +983,8 @@ counters.
 
 ## F22 — the analytics crate declares two dependencies it never uses
 
-**Status:** FIXED (P3) — both path dependencies are gone.
+**Status:** FIXED (P3) — on `master` as `35f4557` (PR #57, the code commit
+`f0b84c6`); both path dependencies are gone.
 
 **What it was.** `crates/ramshield-analytics/Cargo.toml` declared
 `ramshield-types` and `ramshield-storage` as path dependencies. No file
@@ -1100,8 +1101,9 @@ all green).
 
 ## F25 — `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses
 
-**Status:** FIXED (P3) — the dependency is out of
-`crates/ramshield-protocol/Cargo.toml`; the crate declares only
+**Status:** FIXED (P3) — on `master` as `1315236` (PR #63, the code commit
+`4fbf680`); the dependency is out of
+`crates/ramshield-protocol/Cargo.toml` and the crate declares only
 `ramshield-types`. Found while fixing F22, which was the same defect in
 the analytics crate.
 
