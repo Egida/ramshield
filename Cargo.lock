@@ -1494,7 +1494,6 @@ dependencies = [
  "hex",
  "hmac",
  "proptest",
- "ramshield-storage",
  "ramshield-types",
  "serde",
  "serde_json",

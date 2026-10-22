@@ -122,7 +122,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | **F10** | The IPC server MACs a key-sorted payload, not the client's bytes. | OPEN — the wire-contract decision is the owner's. `scripts/auth_e2e.py` is the client-side face of it. |
 | **F11** | Crate README documentation drift. | CLOSED — all 62 claims are fixed; every crate README the sweep covers is pinned by a test. |
 | **F23** | `forecasting.min_entropy` is a config knob nothing reads. | OPEN — the config crate validates it and the forecasting crate never reads it. |
-| **F25** | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses. | OPEN — no file under `crates/ramshield-protocol/src/` mentions `ramshield_storage`. |
+| **F25** | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses. | FIXED — the dependency is out of `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types`. |
 | **F26** | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have. | OPEN — the global sentence contradicts the document's own fail-open section and the BPF program's `XDP_PASS` paths. |
 | **F27** | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path. | OPEN — the unblock, CIDR and TTL checks are advertised and absent; `rm -rf "$WAL_DIR"` runs on a path the environment can override. |
 | **F28** | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure. | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true`. |
