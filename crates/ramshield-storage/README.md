@@ -245,11 +245,12 @@ The storage benchmarks in it are `subnet_key_v4`, `subnet_key_v6`,
 
 ## Testing
 
-49 tests: shard-level concurrency (8 threads inserting at once), the RAM
+50 tests: shard-level concurrency (8 threads inserting at once), the RAM
 limit (an insert past the limit is refused, and no phantom entry or
 blocked-index entry is left behind), the blocked index staying in step
 with the records (a blocked record published through `update_ip` is
-counted and indexed), WAL append and replay round-trips, subnet index
+counted and indexed, and a removal concurrent with a re-block does not
+lose the index entry), WAL append and replay round-trips, subnet index
 consistency (insert an IP, verify the index, remove the IP, verify the
 index is cleaned up), and TTL expiry timing. `tests/fuzz.rs` is a
 proptest over the WAL segment, and `tests/wal_concurrency.rs` races

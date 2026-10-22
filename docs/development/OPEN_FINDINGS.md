@@ -40,7 +40,7 @@ are the ones used here.
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | **FIXED** — all 62 claims are fixed; every crate README the sweep covers is now pinned by a test | no |
 | F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | OPEN — `ramshield-types` and `ramshield-storage` are declared in `crates/ramshield-analytics/Cargo.toml`; no file under `crates/ramshield-analytics/src/` mentions either. The crate is self-contained | no — remove the two path dependencies, or use them |
-| F24 | `Store::remove` drops the blocked index entry after the shard lock is released | P2 (live) | OPEN — the eviction path and the enforcement actor are both live; a concurrent re-block of the same key loses its index entry | no — take the shard lock across the removal, like `block_ip` does |
+| F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
@@ -742,13 +742,13 @@ concurrent case is covered by the store's existing stress test
 (`stress_block_unblock_concurrent`), which asserts the same invariants
 after eight threads have hammered insert, unblock and remove.
 
-**What is still open.** `Store::remove` has the same shape: it takes the
-record out with `self.inner.remove(key)`, which releases the shard lock,
-and only then decrements the counter and drops the index entry. A
-concurrent `block_ip` for the same key - the eviction path and the
-enforcement actor are both live - can publish a blocked record and index
-it in between, and the removal then deletes the index entry of a record
-that is blocked. That is F24.
+**What was still open, and is now fixed too.** The removal paths had the
+same shape: `Store::remove` and `evict_batch` took the record out with a
+call that releases the shard lock, and only then decremented the counter
+and dropped the index entry. A concurrent `block_ip` for the same key can
+publish a blocked record and index it in between, and the removal then
+deletes the index entry of a record that is blocked. That was F24, and it
+is fixed with this change.
 
 ---
 
@@ -974,14 +974,17 @@ validated but never read.
 **Closure criterion.** The forecaster honours `min_entropy`, or the
 config crate drops the field and its validation.
 
-## F24 — `Store::remove` drops the blocked index entry after the shard lock is released
+## F24 — the removal paths drop the blocked index entry after the shard lock is released
 
-**Status:** OPEN (P2, live) — found while closing F14.
+**Status:** FIXED (P3) — `Store::remove` and `evict_batch` now take the
+record out through the entry API and do their bookkeeping under the shard
+lock.
 
-**What it is.** `crates/ramshield-storage/src/store/access.rs:30-58` takes
-the record out with `self.inner.remove(key)`. DashMap's `remove` releases
-the shard's write lock when it returns the value, so the bookkeeping that
-follows runs with no lock held:
+**What it was.** `Store::remove`
+(`crates/ramshield-storage/src/store/access.rs:30`) took the record out
+with `self.inner.remove(key)`. DashMap's `remove` releases the shard's
+write lock when it returns the value, so the bookkeeping that followed ran
+with no lock held:
 
     let freed = ...;
     self.ram_bytes.fetch_sub(freed, Ordering::Relaxed);
@@ -991,15 +994,13 @@ follows runs with no lock held:
         self.blocked_set.remove(key);
     }
 
-**Why it is live.** The eviction path removes records while the
-enforcement actor blocks them. Both run in the daemon at the same time,
-and they take the same shard lock for the record itself - which is why the
-window is narrow, but the lock is exactly what is missing here.
+`evict_batch` (`crates/ramshield-storage/src/store/capacity.rs:23`) had the
+same shape with `e.remove_entry()`.
 
 **The interleaving.**
 
 1. The record is blocked: the counter is 1, the index holds the key.
-2. `remove` takes the record out. The lock is released. The counter is
+2. The removal takes the record out. The lock is released. The counter is
    still 1 and the index still holds the key.
 3. The enforcement actor calls `block_ip` for the same key. The key is
    vacant, so `block_ip` publishes a blocked record, increments the
@@ -1009,19 +1010,38 @@ window is narrow, but the lock is exactly what is missing here.
    `blocked_set.remove(key)` drops the index entry of a record that is
    blocked.
 
-The counter is right; the index is wrong. The store's own invariant -
-every blocked record is in `blocked_set` - is broken, and it stays broken
-until the next block or unblock for that key. The dashboard's blocked list
+The counter is right; the index is wrong, and it stays wrong until the
+next block or unblock for that key. The dashboard's blocked list
 (`get_blocked_ips`) and the counter then disagree.
 
-**What would close it.** The same treatment `block_ip` got: take the
-record out under the shard lock and do the counter, index and size
-bookkeeping inside that critical section. DashMap has no "remove and keep
-the lock" call, so the removal has to go through the entry API
-(`self.inner.entry(key)` -> `Occupied` -> `o.remove()`), with the
-bookkeeping before `o.remove()` and the subnet-index update after it, to
-keep the lock order the same as today.
+**How narrow it is.** Two things have to line up.
 
-**Closure criterion.** The blocked index and the counter are updated
-under the shard lock, and a test asserts that a re-block concurrent with
-a removal keeps its index entry.
+- The removal paths are barely reachable with a *blocked* record.
+  `Store::remove` is called only by the WAL replay
+  (`crates/ramshield-enforcement/src/replay.rs:143`), at startup, before
+  the enforcement actor serves traffic. `evict_batch` is live - the
+  detection subnet scan runs the janitor
+  (`crates/ramshield-detection/src/subnet_scan.rs:70`) - but it only
+  evicts records whose TTL has passed, and the block path clears the TTL,
+  so a blocked record is never expired. A blocked record with a TTL only
+  exists after a checkpoint restore (`src/engine/checkpoint.rs:259`).
+- The removal's window is a handful of instructions between the
+  `inner.remove` and the `blocked_set.remove`. The blocker's publish has
+  to land inside it, which in practice means the removal thread is
+  preempted there.
+
+**What changed.** Both removals go through the entry API
+(`self.inner.entry(key)`), so the shard's write guard is held while the
+counter, the index and the size accounting are updated, and the record
+leaves the map inside that critical section. The subnet-index update
+stays after the removal, where it was, so the lock order does not change.
+
+**The test.** `a_re_block_concurrent_with_a_removal_keeps_its_index_entry`
+in `crates/ramshield-storage/src/tests/mod.rs` hammers one key from two
+threads - one removing, one blocking - and checks after every removal
+that a record that is still there and still blocked is in the index. The
+removal is the only writer that can drop an index entry and the block
+path only ever adds one, so the check is not racy in the thread that runs
+it. **It is a race, not a proof:** with 200,000 iterations it caught the
+old code in 2 runs out of 5, and it never fails on the fixed code (5 runs,
+all green).

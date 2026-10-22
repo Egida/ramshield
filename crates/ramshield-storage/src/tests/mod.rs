@@ -806,6 +806,59 @@ fn assert_store_invariants(store: &Store) {
     );
 }
 
+/// F-24: the removal took the record out with `inner.remove`, which
+/// releases the shard lock, and dropped the blocked index entry after
+/// that. A concurrent re-block of the same key landing in that window
+/// would publish a blocked record and index it - and the removal would
+/// then delete the index entry of a record that is blocked, leaving the
+/// index and the records disagreeing for good.
+///
+/// The test is a race, not a proof: it hammers the same key from two
+/// threads and checks the store's own invariants at the end.
+#[test]
+fn a_re_block_concurrent_with_a_removal_keeps_its_index_entry() {
+    use std::sync::Arc;
+    use std::thread;
+    let store = Arc::new(Store::new(16));
+    let ip: IpAddr = "10.98.0.7".parse().unwrap();
+    let ram_lim = 64 * 1024 * 1024;
+
+    let s = store.clone();
+    let remover = thread::spawn(move || {
+        for _ in 0..200_000u32 {
+            s.remove(&ip);
+            // The removal is the only writer that can drop the index
+            // entry, and the block path only ever adds one. So if the
+            // record is there and blocked, the index must have it: a
+            // re-block that landed in the removal's window lost its
+            // index entry, and nothing would put it back.
+            if let Some(Value::IpRecord(r)) = s.get(&ip)
+                && r.block_state != BlockState::Clean
+            {
+                assert!(
+                    s.blocked_set.get(&ip).is_some(),
+                    "a blocked record lost its index entry to a concurrent removal"
+                );
+            }
+        }
+    });
+    let s = store.clone();
+    let blocker = thread::spawn(move || {
+        for _ in 0..200_000u32 {
+            let mut blocked = blank_record(ip);
+            blocked.block_state = BlockState::Blocked {
+                reason: BlockReason::HighRps,
+                since_ns: 1_000,
+            };
+            let _ = s.block_ip(ip, blocked, ram_lim);
+        }
+    });
+    remover.join().unwrap();
+    blocker.join().unwrap();
+
+    assert_store_invariants(&store);
+}
+
 /// Overloaded concurrency stress: 8 IPs, 8 threads, each doing 500
 /// random block/unblock/remove cycles. Verifies all invariants hold
 /// after convergence.
