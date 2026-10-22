@@ -43,6 +43,9 @@ are the ones used here.
 | F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
 | F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | OPEN — no file under `crates/ramshield-protocol/src/` mentions `ramshield_storage` | no — remove the path dependency, or use it |
+| F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | OPEN — the global claim contradicts the document's own section 1 and the BPF program | no — restate the claim per subsystem |
+| F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
+| F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -1109,3 +1112,138 @@ readme guards (`crates/ramshield-storage/tests/readme_claims.rs` and
 `crates/ramshield-protocol/tests/readme_claims.rs`) keep them in step.
 
 **Closure criterion.** The dependency is gone, or the crate uses it.
+
+## F26 — `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have
+
+**Status:** OPEN
+**Files:** `FAIL_SAFE_BEHAVIOR.md`, `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs`
+**Severity:** P2 (doc)
+
+Found by the 2026-10-22 master audit.
+
+### The defect
+
+`FAIL_SAFE_BEHAVIOR.md:7` says:
+
+> RamShield follows a **fail-closed** security posture across all production
+> code paths. The guiding principle is: **any uncertainty or failure
+> defaults to blocking traffic, never allowing it through.**
+
+The dataplane does not behave that way, and the document says so itself
+nine lines later: `### 1. Kernel-Level Fail-Open (XDP Dataplane)`
+(`FAIL_SAFE_BEHAVIOR.md:11`). The BPF program agrees with the section, not
+with the summary: `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs`
+returns `XDP_PASS` on the parse-failure and unsupported-packet paths
+(lines 130, 192, 197, 236) and `XDP_DROP` only on the paths it can
+classify (182, 189, 226, 233).
+
+Fail-open on a malformed or unsupported packet is the right operational
+choice: dropping every packet the parser cannot read would be a
+self-inflicted outage. The problem is the global sentence, which an
+operator can read as "RamShield blocks on any uncertainty".
+
+The document also dates itself: "All findings and implementations are
+based on the code audit performed on 2026-10-13" (line 3), so it predates
+the current dataplane.
+
+### Required fix
+
+1. Restate the posture per subsystem: what happens on a parse failure, a
+   map failure, a worker failure, a storage failure and a shutdown.
+2. Delete the global "never allowing it through" sentence.
+3. Re-point the document at the current code, not the 2026-10-13 audit.
+
+### Closure criterion
+
+No sentence in the document claims a behaviour the code does not have.
+
+---
+
+## F27 — `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path
+
+**Status:** OPEN
+**Files:** `scripts/prod_smoke.sh`
+**Severity:** P1 (data loss)
+
+Found by the 2026-10-22 master audit.
+
+### The defect
+
+The header advertises a coverage the script does not have
+(`scripts/prod_smoke.sh:11`):
+
+> unblock → verify absent → CIDR block → verify → TTL expiry → verify
+
+What the script actually does:
+
+- **Unblock**: it sends `unblock_ip` and checks the response says
+  `unblock queued` (`:139-140`). It never checks that the IP is gone.
+- **CIDR**: there is no CIDR request in the script at all. The blocks it
+  sends are `block_ip` for `203.0.113.7` and `203.0.113.99` (`:112`,
+  `:154`).
+- **TTL expiry**: nothing waits for a TTL to expire. The TTLs it sets are
+  300 seconds (`:112`, `:154`) and the script does not outlive them.
+
+The cleanup is the sharper edge. `WAL_DIR` comes from the environment
+(`:20`, `WAL_DIR="${WAL_DIR:-/tmp/ramshield-prod-smoke-wal}"`) and the
+script then runs `rm -rf "$WAL_DIR"` (`:37`) before it starts. An operator
+who has `WAL_DIR` exported at a real data directory loses it, and the
+loss happens before the test says anything.
+
+### Required fix
+
+1. Refuse to delete a directory that is not a fresh temporary one: create
+   a `mktemp -d` directory by default, and refuse to `rm -rf` a path that
+   does not carry the smoke test's own name in it.
+2. Verify the unblock: after the unblock, assert the IP is absent.
+3. Send and verify a CIDR block.
+4. Wait for a short TTL to expire and assert the block is gone.
+5. Fail the script when the resulting state differs from the expectation.
+
+### Closure criterion
+
+Every scenario the header advertises is performed end to end and asserted,
+and the script cannot delete a directory it did not create.
+
+---
+
+## F28 — The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure
+
+**Status:** OPEN
+**Files:** `.github/workflows/advanced.yml`
+**Severity:** P2 (CI)
+
+Found by the 2026-10-22 master audit.
+
+### The defect
+
+The primary CI workflow deliberately does not use `--all-targets` for its
+test step, because the repository has already had a long-running
+benchmark harness executed by the test command. The advanced workflow
+still does exactly that:
+
+- `.github/workflows/advanced.yml:39` — `cargo build --all-targets --verbose`
+- `.github/workflows/advanced.yml:40` — `cargo test --all-targets --verbose`
+
+and its benchmark job masks the failure that would tell anyone the
+benchmarks no longer compile:
+
+- `.github/workflows/advanced.yml:74` — `cargo bench --no-run || true`
+
+`|| true` makes a broken benchmark build invisible: the job is green and
+nothing says the benchmark targets stopped compiling.
+
+### Required fix
+
+1. Use the primary workflow's test-target policy in the advanced
+   workflow.
+2. Run the benchmarks in their own bounded job.
+3. Remove the blanket `|| true`, or record a narrowly justified skip for
+   the one target that cannot build.
+
+### Closure criterion
+
+No CI job runs the benchmark harness as a test, and a benchmark build
+failure is visible.
+
+---

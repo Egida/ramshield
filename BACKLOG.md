@@ -121,6 +121,18 @@ These are the items tracked as findings rather than as rows: the open items from
 | **F11** | Crate README documentation drift. | CLOSED — all 62 claims are fixed; every crate README the sweep covers is pinned by a test. |
 | **F23** | `forecasting.min_entropy` is a config knob nothing reads. | OPEN — the config crate validates it and the forecasting crate never reads it. |
 | **F25** | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses. | OPEN — no file under `crates/ramshield-protocol/src/` mentions `ramshield_storage`. |
+| **F26** | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have. | OPEN — the global sentence contradicts the document's own fail-open section and the BPF program's `XDP_PASS` paths. |
+| **F27** | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path. | OPEN — the unblock, CIDR and TTL checks are advertised and absent; `rm -rf "$WAL_DIR"` runs on a path the environment can override. |
+| **F28** | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure. | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true`. |
+
+**The 2026-10-22 master audit** (`35f4557`) is in this table already, item
+by item: the node-guard admission blocker is **I-027**/F15, the IPC
+signing contract is **F10**, the capture lifecycle is **F2**, the `/0`
+representation is **F1a**, the performance claims are **F7**, the unused
+knob and the unused dependency are **F23** and **F25**, and the historical
+header metadata is this file's header. Its three new items are **F26**,
+**F27** and **F28** above. The audit's own note that the ansible gate and
+the dashboard columns are already fixed matches the rows below.
 
 ### F1a — what "unexpressable" means, and what is up with the table
 
