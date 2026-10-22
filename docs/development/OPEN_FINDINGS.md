@@ -45,7 +45,7 @@ are the ones used here.
 | F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | **FIXED** — on `master` as `1315236` (PR #63, the code commit `4fbf680`): the dependency is gone from `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types` | no |
 | F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | **FIXED** — the document states each subsystem's own posture, and `tests/fail_safe_claims.rs` pins it to the source | no |
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
-| F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
+| F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | **FIXED** — the benchmark build failure fails the job | no |
 | F29 | The Subnet Stress Pin gate asserts against a fixed four-second sleep | P2 (CI) | **FIXED** — the script now waits for the counters to settle | no |
 | F30 | `block_ip` trusts the caller to pass a blocked fallback; the only guard is a `debug_assert!` | P3 (hardening) | **FIXED** — a clean fallback is refused and publishes nothing | no |
 | F31 | The dashboard's rate readouts read keys the SSE writer never sets | P2 (operator-visible) | **FIXED** — the rate readouts read the keys the stream writes | no |
@@ -66,8 +66,8 @@ are the ones used here.
 | F46 | The pipeline stage bars mix units | P3 (display) | **FIXED** — the pipeline stages share their units | no |
 | F47 | The quarantine table fabricates the severity and tier of every row | P3 (display) | **FIXED** — the quarantine table shows the record's reason | no |
 | F48 | `/metrics` bypasses the session auth that guards every other route | P3 (exposure) | OPEN — An unauthenticated metrics endpoint on a port the network policy opens to other namespaces. | no |
-| F49 | The backlog gate's open-row parser never matches BACKLOG.md | P3 (CI) | OPEN — The Backlog Gate's own summary misstates the open backlog: `A-038` is OPEN while the gate reports zero open P0/P1 rows. | no |
-| F50 | Three scheduled workflows can never run | P3 (CI) | OPEN — The `*/5`, `*/30` and `*/15` cron jobs are skipped on every tick and the three agent scripts never run in CI; the only signal is the absence of activity. | no |
+| F49 | The backlog gate's open-row parser never matches BACKLOG.md | P3 (CI) | **FIXED** — the gate's parser reads the table BACKLOG.md has | no |
+| F50 | Three scheduled workflows can never run | P3 (CI) | **FIXED** — the three dead scheduled workflows are deleted | no |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -1363,7 +1363,7 @@ and the script cannot delete a directory it did not create.
 
 ## F28 — The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure
 
-**Status:** OPEN
+**Status:** FIXED — the benchmark build failure fails the job
 **Files:** `.github/workflows/advanced.yml`
 **Severity:** P2 (CI)
 
@@ -1766,7 +1766,7 @@ The exemption is documented as intentional, or `/metrics` is restricted.
 
 ## F49 — The backlog gate's open-row parser never matches BACKLOG.md
 
-**Status:** OPEN
+**Status:** FIXED — the gate's parser reads the table BACKLOG.md has
 **Files:** `backlog.yml`
 **Severity:** P3 (CI)
 
@@ -1786,7 +1786,7 @@ The parser reads the priority column and the status cell of the real table forma
 
 ## F50 — Three scheduled workflows can never run
 
-**Status:** OPEN
+**Status:** FIXED — the three dead scheduled workflows are deleted
 **Files:** `helper.yml, error_healer.yml, health_dashboard.yml`
 **Severity:** P3 (CI)
 
