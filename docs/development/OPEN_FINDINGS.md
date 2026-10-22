@@ -38,8 +38,9 @@ are the ones used here.
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 54 of 62 claims fixed, 8 open: `ramshield-forecasting` 8, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config, types, storage, xdp, enforcement, protocol, metrics and analytics READMEs are now pinned by tests | no — per-file documentation edits |
+| F11 | Crate README documentation drift (62 claims) | P2 (docs) | **FIXED** — all 62 claims are fixed; every crate README the sweep covers is now pinned by a test | no |
 | F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | OPEN — `ramshield-types` and `ramshield-storage` are declared in `crates/ramshield-analytics/Cargo.toml`; no file under `crates/ramshield-analytics/src/` mentions either. The crate is self-contained | no — remove the two path dependencies, or use them |
+| F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -584,7 +585,7 @@ clients conform".
 
 ## F11 — Crate README documentation drift
 
-**Status:** OPEN — 54 of the 62 claims are fixed; 8 remain.
+**Status:** FIXED (P2) — all 62 claims are fixed; every README the sweep covers is pinned by a test.
 
 **What this is.** The I-025 sweep read every claim in the crate READMEs
 against the source and listed the ones that were false. The per-claim
@@ -604,9 +605,26 @@ and storage crates are pinned the same way:
 dependency list against `Cargo.toml`, its "read by" list against the
 workspace manifests, every type it shows against the crate's public API,
 and its test count against the tests that exist. The old READMEs failed
-the first two.
+the first two. The metrics, analytics and forecasting crates are pinned
+the same way and more: `crates/ramshield-metrics/tests/readme_claims.rs`,
+`crates/ramshield-analytics/tests/readme_claims.rs` and
+`crates/ramshield-forecasting/tests/readme_claims.rs` also check the
+Prometheus series the README names against the exporter, the block
+modules against the modules actually passed to `record_block_ip`, the
+reason tokens against `BlockReason::as_str()`, the memory sizes against
+`size_of`, the import paths against the crate's real module layout, the
+config defaults against the config crate, and the field lists against the
+structs.
 
-**What remains.** 8 claims, all in the `ramshield-forecasting` README.
+**What was fixed.** All 62 claims. The `ramshield-forecasting` README was
+the last one: an audit of all 64 claims in the file found 32 false ones,
+including a `HoltWinters` struct with the wrong field list, a period that
+defaulted to 120 ticks where the config says 3,600, "three independent
+models" where the models are chained, a `CusumState` with four public
+fields where all four are private, an `EwmAVar` described as "3 floats"
+where it is four fields, a threshold of 0.95 where the code uses 0.75, a
+dependency on `ramshield-enforcement` the crate does not have, and a
+diagram that implied the z-score alone blocks.
 
 **Closure criterion.** Every claim in the sweep is either marked fixed, or
 the README says what the code says.
@@ -872,3 +890,25 @@ removed, the README has to change with them.
 **Closure criterion.** The two path dependencies are removed from
 `crates/ramshield-analytics/Cargo.toml` and the README's dependency list
 follows, or the crate actually uses one of them.
+
+## F23 — `forecasting.min_entropy` is a config knob nothing reads
+
+**Status:** OPEN — the knob is validated and documented, and the crate
+never reads it.
+
+**Severity:** P3 (hygiene)
+
+`crates/ramshield-config/src/sections/forecasting.rs` has
+`min_entropy: f64`, defaulted to 2.0 and validated in
+`crates/ramshield-config/src/validate.rs` ("must be finite and >= 0"). No
+file under `crates/ramshield-forecasting/src/` mentions it: the entropy
+gate in `tick_hw` is a hard-coded event count (`total > 100` before the
+Shannon entropy is computed at all), and the entropy value itself is only
+an input to the Bayesian likelihood.
+
+An operator who sets `min_entropy` in the configuration gets no error and
+no effect. The forecasting README now says that `min_entropy` is
+validated but never read.
+
+**Closure criterion.** The forecaster honours `min_entropy`, or the
+config crate drops the field and its validation.

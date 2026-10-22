@@ -1,7 +1,8 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 54 fixed, 8 open.** The
-open ones are the eight `ramshield-forecasting` claims. This is the result of a read-only
+**Status:** CLOSED. **62 claims: 62 fixed, 0 open.** Every claim in this
+file is now marked fixed, and every crate README it covers is pinned by a
+test. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master was `bd417cd` at the time of the sweep).
@@ -151,6 +152,8 @@ Same defect as F6 (`src/types.rs:21-26` confirms field exists, comment enumerate
 
 **F8 (MEDIUM)** `crates/ramshield-forecasting/README.md:106`
 > "**Internal dependencies:** `ramshield-types` (`EnforceCommand`, `BlockReason::RateLimit`)."
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
 
 Code: grep `BlockReason` in `crates/ramshield-forecasting/src` → no hits. Variant `RateLimit` does not exist.
 
@@ -406,30 +409,42 @@ Code: `src/forecaster.rs:76` `interval(Duration::from_secs(1))` — **1 Hz**; `s
 **F32 (MEDIUM)** `crates/ramshield-forecasting/README.md:44` and `:110`
 > `period: usize,  // default: 120 ticks = 20 minutes` / "The Holt-Winters update is O(period) where period defaults to 120"
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
+
 Code: `src/forecaster.rs:54-59` passes `config.seasonality_period`; default **3 600** (`crates/ramshield-config/src/sections/forecasting.rs:21`). `src/models.rs:20-40` updates one seasonal slot → O(1), not O(period).
 
 **F33 (MEDIUM)** `crates/ramshield-forecasting/README.md:54` and `:56-62`
 > "operates on the *batch-level* event rate (events per 500ms window)" / `CusumState { cusum_value, baseline, warmup_samples, threshold }`
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
 
 Code: `src/models.rs:93-98` `update(&mut self, z: f64)` — "Feed a z-score (already normalized by sigma)"; called with the HW residual z (`forecaster.rs:102`). Real fields `src/lib.rs:83-88`: `s_upper, s_lower, k, h` (no warmup, no baseline, no threshold field).
 
 **F34 (MEDIUM)** `crates/ramshield-forecasting/README.md:80`
 > "exceeds a confidence threshold (default 0.95)" / "The model uses pre-computed likelihood tables"
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
+
 Code: `src/hypothesis.rs:21-23` → `threshold: 0.75`, `cold_threshold: 0.85`, `cold_ticks: 60`. Likelihoods are hand-written functions `src/hypothesis.rs:120-247` — no tables.
 
 **F35 (MEDIUM)** `crates/ramshield-forecasting/README.md:86`
 > "maintains the top-N event rates seen in the current window. Used to compute percentiles for the dashboard"
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
 
 Code: `src/forecaster.rs:96-97` pushes `residual.abs()`; `src/lib.rs:15-16` "Empirical quantile of forecast residuals (legacy, transitional)"; used as the legacy spot-alarm threshold `forecaster.rs:232-242`. Not event rates, not dashboard percentiles.
 
 **F36 (MEDIUM)** `crates/ramshield-forecasting/README.md:104`
 > "**Written to:** … `ramshield-metrics` (forecast values, z-scores, hypothesis posteriors)"
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
+
 Code: grep `posterior` in `crates/ramshield-metrics/src` → no hits. Metrics exposes only `set_forecast_hw` (`history.rs:67`) and `set_entropy` (`history.rs:75`).
 
 **F37 (MEDIUM)** `crates/ramshield-forecasting/README.md:114`
 > "CUSUM warmup period (6 samples)"
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
 
 Code: `CUSUM_WARMUP_SAMPLES = 6` is in `crates/ramshield-detection/src/rate_tracker.rs:18` (detection crate). Forecasting `CusumState` has no warmup; `src/models.rs:82-104`.
 
@@ -518,6 +533,8 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 
 
 **F52 (LOW)** `crates/ramshield-forecasting/README.md:50` + `:98` + `src/lib.rs:69` — "O(1) memory (3 floats)", "not part of the public API", "3 floats = 24 bytes". Code: `src/lib.rs:71-76` `EwmAVar { ewma: f64, var_ewma: f64, count: u64, alpha: f64 }` = 32 B; `pub struct` → public type.
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real config defaults, the real dependency and dependent lists, the chained (not independent) model chain, the /24 subnet entropy, and the honest statement that no daemon constructs a `Forecaster`. `crates/ramshield-forecasting/tests/readme_claims.rs` is the guard.
 
 **F53 (LOW)** `crates/ramshield-metrics/README.md:177` — "14 tests" → 16 static `#[test]` markers in the crate.
 
