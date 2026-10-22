@@ -1,8 +1,7 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 48 fixed, 14 open.** The
-open ones are the two crate READMEs still to rewrite:
-`ramshield-forecasting` 8 and `ramshield-analytics` 6. This is the result of a read-only
+**Status:** OPEN, partially worked. **62 claims: 54 fixed, 8 open.** The
+open ones are the eight `ramshield-forecasting` claims. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master was `bd417cd` at the time of the sweep).
@@ -308,30 +307,42 @@ passes, so the drift cannot come back unnoticed.
 **F20 (MEDIUM)** `crates/ramshield-analytics/README.md:5` and `:30`
 > "replaces unbounded `HashSet<IpAddr>` detection" / "replace unbounded `HashSet<IpAddr>` in the detection pipeline"
 
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
+
 Code: repo grep `ramshield_analytics` → only `benches/hot_paths.rs:396,405` and the crate itself; `crates/ramshield-cgnat` mentions it in comments only. No crate depends on `ramshield-analytics` except root benches; detection does not use it, and no `HashSet<IpAddr>` exists in detection.
 
 **F21 (MEDIUM)** `crates/ramshield-analytics/README.md:15` (and `src/cms.rs:3`, `src/lib.rs:4`)
 > "**Memory:** 512 KiB (4 rows × 65,536 columns × AtomicU64)"
+
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
 
 Code: `src/cms.rs:11-12` `CMS_ROWS=4`, `CMS_COLS=65_536`, `counts: Vec<AtomicU64>` → 4×65 536×8 B = **2 MiB**. Off 4×.
 
 **F22 (MEDIUM)** `crates/ramshield-analytics/README.md:19-20`
 > "Single shared instance per daemon" / "Used for identifying top-k threat sources"
 
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
+
 Code: no instance in any daemon (F20 grep); `src/cms.rs` API = `increment/estimate/decay/inserted_since_decay` only — no heavy-hitter/top-k query.
 
 **F23 (MEDIUM)** `crates/ramshield-analytics/README.md:33`
 > "**Deterministic convergence** with proper decay scheduling"
+
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
 
 Code: grep `cms.decay()` → single hit `src/cms.rs:104` (unit test). No scheduler calls decay.
 
 **F24 (MEDIUM)** `crates/ramshield-analytics/README.md:37-50` usage snippet
 > `use ramshield_analytics::{SubnetHll, DecayingCountMinSketch, Welford};` / `let hll = SubnetHll::default(); hll.insert(hash_value);` / `cms.insert(ip_hash, expiry_ms);`
 
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
+
 Code: `src/lib.rs:8-10` exposes only `pub mod cms/hll/welford` — no crate-root re-exports (import path invalid); `src/hll.rs:24` `pub fn insert(&mut self, hash: u64)` — snippet's `hll` is not `mut`; `src/cms.rs` has no `insert` (it is `increment`).
 
 **F25 (LOW)** `crates/ramshield-analytics/README.md:23`
 > "Exponentially Weighted Welford — **Memory**: 32 bytes"
+
+**Status: FIXED.** The README now matches the crate: the real memory sizes, the real API, a usage snippet that compiles, and the honest statement that no daemon uses these primitives yet. `crates/ramshield-analytics/tests/readme_claims.rs` is the guard.
 
 Code: `src/welford.rs:20-25` — `AtomicU32` + `AtomicU32` + `AtomicU64` + `f32` = 20 B → 24 B padded, not 32.
 
@@ -541,7 +552,6 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 
 - Enforcement `XdpApplier` trait signature vs `README.md:91-95`; enforcement crate dependency list vs `README.md:135`.
 - `crates/ramshield-xdp/README.md:52` fail-open/fallback wording vs `src/engine/boot.rs` XDP attach error path.
-- `crates/ramshield-analytics/README.md:55` BENCHMARK_BASELINES content (file exists; analytics entries unverified).
 - `crates/ramshield-cgnat/README.md` shared-memory table claims (publish/read parity, `ShmTableManager::publish_rule`) — not re-verified this pass.
 - `crates/ramshield-detection/README.md` doc cross-references (`docs/OPERATIONS.md`, `docs/DEFENSE_MODEL.md`) and each signal-family sentence against `crates/ramshield-detection/src/`.
 - Bench-filter names in `benches/hot_paths.rs` (README `store_insert`/`store_lookup`/`subnet_key`, `ip_network_pack`, `bounded_vec_deque`).
