@@ -126,7 +126,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | **F26** | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have. | OPEN — the global sentence contradicts the document's own fail-open section and the BPF program's `XDP_PASS` paths. |
 | **F27** | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path. | OPEN — the unblock, CIDR and TTL checks are advertised and absent; `rm -rf "$WAL_DIR"` runs on a path the environment can override. |
 | **F28** | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure. | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true`. |
-| **F29** | The Subnet Stress Pin gate asserts against a fixed four-second sleep. | FIXED — the script waits for the events to be ingested and for the counters to settle. The run on `4b88864` was red on a docs-only commit (208 IPs tracked against a threshold of 800). |
+| **F29** | The Subnet Stress Pin gate asserts against a fixed four-second sleep. | FIXED — the script waits for the counters to settle. The run on `4b88864` was red on a docs-only commit (206 IPs tracked against a threshold of 800). |
 
 **The 2026-10-22 master audit** (`35f4557`) is in this table already, item
 by item: the node-guard admission blocker is **I-027**/F15, the IPC
