@@ -1,9 +1,9 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 30 fixed, 32 open.** The
-open ones are spread over six crate READMEs: `ramshield-config` 1,
-`ramshield-storage` 8, `ramshield-metrics` 7, `ramshield-forecasting` 8,
-`ramshield-analytics` 6, `ramshield-xdp` 2. This is the result of a read-only
+**Status:** OPEN, partially worked. **62 claims: 38 fixed, 24 open.** The
+open ones are spread over five crate READMEs: `ramshield-config` 1,
+`ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6,
+`ramshield-xdp` 2. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master was `bd417cd` at the time of the sweep).
@@ -425,33 +425,47 @@ Code: `CUSUM_WARMUP_SAMPLES = 6` is in `crates/ramshield-detection/src/rate_trac
 
 **F38 (MEDIUM)** `crates/ramshield-storage/README.md:46-53` — `IpRecord { event_count, first_seen_ns, last_seen_ns, threat_score, block_state, status_history: BoundedVecDeque<u16> }`. Code `crates/ramshield-storage/src/record.rs:129-165`: `ip, request_count, ewma_rps, cusum_s, baseline_rps, prev_sample_hot, sample_count, relative_breach_streak, pulse_samples_in_window, pulse_window_start_ns, first_seen_ns, last_seen_ns, bytes_in, status_dist[5], proto_fingerprint, threat_score, block_state` — no `event_count`, no `status_history`.
 
+**Status: FIXED.** The README now shows the real 17 fields of `IpRecord`, and says that `threat_score` is written by detection and that the CUSUM accumulator is the separate `cusum_s` field.
+
 **F39 (MEDIUM)** `crates/ramshield-storage/README.md:56`
 > "IPs with fewer than 64 events store their status history in the struct itself … Above 64 events, the history spills to a `BoundedVecDeque` on the heap."
+
+**Status: FIXED.** The README now says `Entry` wraps a `Value` plus an expiry, and that the 64-byte threshold is bytes, not events.
 
 Code: `src/record.rs:96-120` — `Value::Inline`/`Value::Blob` byte threshold `INLINE_MAX`, not an event count; no `BoundedVecDeque` in the storage crate at all (F4 grep).
 
 **F40 (MEDIUM)** `crates/ramshield-storage/README.md:65`
 > "The subnet key is a `u128` that packs the network address and prefix length … `subnet_key_v4(octets)` zeros the host bits and shifts the result into the upper 32 bits"
 
+**Status: FIXED.** The README now says the key is a `u128` with IPv4 in the low 32 bits and IPv6 /64 in the upper 64, that the prefix length is not packed, and that `subnet_key_v4` masks the /24 and returns a `u32`.
+
 Code: `src/subnet.rs:9-11` `pub fn subnet_key_v4(octets: [u8;4]) -> u32` (not u128); `:29` placed in the **low** 32 bits; prefix length is not packed at all.
 
 **F41 (MEDIUM)** `crates/ramshield-storage/README.md:69-72`
 > "eviction runs in two passes: 1. Expired entries … 2. **LRU eviction** — if still over limit, the least-recently-seen entries are removed in batches of 1024."
+
+**Status: FIXED.** The README now says the store refuses a net-new key that would pass the budget, and that the only removals are a passed TTL and an explicit removal. The LRU pass is gone.
 
 Code: grep `fn evict` in `crates/ramshield-storage/src` → `store/capacity.rs:23 evict_batch(&self, keys: &[IpAddr])` (caller-supplied keys) and `store/capacity.rs:58 evict_expired(&self)` (TTL-expired only). No LRU pass, no 1024-batch eviction in the crate.
 
 **F42 (MEDIUM)** `crates/ramshield-storage/README.md:84` and `:93-96`
 > `durability: Durability,  // NoSync | Fsync | Fdatasync` / "The WAL supports three durability modes"
 
+**Status: FIXED.** The README now names the four durability modes and what each does, and says the configuration default is `Flush`.
+
 Code: `crates/ramshield-types/src/error.rs:73-80` → `None | Flush | Fsync | GroupCommit` (four).
 
 **F43 (MEDIUM)** `crates/ramshield-storage/README.md:103-113`
 > `TrafficCounters { ram_limit_mb, ram_bytes, total_events, unique_ips, uptime_secs, threat_samples: Mutex<Vec<(IpAddr,f32)>> }` / "No locks in the hot path … `threat_samples` mutex is only touched during batch flush (every 500ms)."
 
+**Status: FIXED.** The README now lists the eight real counters, and says the threat-sample queue is a lock-free `SegQueue` rather than a mutex.
+
 Code: `src/record.rs:5-24` → `events_last_second, unique_ips_window, promoted_ips, subnet_window[AtomicU64;256], threat_sample: SegQueue<(IpAddr,f32)>, ram_limit_mb, used_bytes, uptime_secs`. No `ram_bytes`, no `total_events`, no mutex; flush cadence is `detection.batch_window_ms`, not 500 ms.
 
 **F44 (MEDIUM)** `crates/ramshield-storage/README.md:141`
 > "RAM limit enforcement (insert until limit hit, **verify eviction**)"
+
+**Status: FIXED.** The README now says the RAM limit refuses the insert and leaves no phantom entry, instead of claiming an eviction to verify.
 
 Code: same as F41 — the store has no LRU eviction to verify (see F41 grep). (Insert-path rejection behaviour not independently re-verified this pass.)
 
@@ -482,6 +496,8 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 **F53 (LOW)** `crates/ramshield-metrics/README.md:177` — "14 tests" → 16 static `#[test]` markers in the crate.
 
 **F54 (LOW)** `crates/ramshield-storage/README.md:141` — "38 tests" → 42 static `#[test]` markers in the crate.
+
+**Status: FIXED.** The README says 48 tests, which is the count in the crate on this tree. `crates/ramshield-storage/tests/readme_claims.rs` checks it against the tests that exist.
 
 ---
 
