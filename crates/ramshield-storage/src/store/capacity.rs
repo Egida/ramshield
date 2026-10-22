@@ -28,13 +28,18 @@ impl Store {
             {
                 let was_blocked = e.get().value.is_blocked();
                 let had_ttl = e.get().expires_at.is_some();
-                let (_, removed) = e.remove_entry();
+                let freed = std::mem::size_of::<IpAddr>()
+                    + std::mem::size_of::<Entry>()
+                    + e.get().value.heap_bytes();
+                // The bookkeeping lands under the shard lock, before the
+                // record leaves the map. `remove_entry` releases the lock
+                // when it returns, and a concurrent `block_ip` landing in
+                // that window would publish a blocked record for this key
+                // and index it - and this bookkeeping would then drop the
+                // index entry of a record that is blocked.
                 if had_ttl {
                     self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
                 }
-                let freed = std::mem::size_of::<IpAddr>()
-                    + std::mem::size_of::<Entry>()
-                    + removed.value.heap_bytes();
                 self.ram_bytes.fetch_sub(freed, Ordering::Relaxed);
                 self.traffic
                     .used_bytes
@@ -44,6 +49,7 @@ impl Store {
                     self.blocked_count.fetch_sub(1, Ordering::Relaxed);
                     self.blocked_set.remove(key);
                 }
+                e.remove_entry();
                 // P0 fix: stale subnet_index entries leaked forever.
                 self.update_subnet_index(*key, subnet_key_u128(*key), true);
             }
