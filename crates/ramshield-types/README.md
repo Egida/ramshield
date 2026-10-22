@@ -29,11 +29,11 @@ by. It is not the whole boundary vocabulary - `ConnectionReport` lives in
 
 ## Why it exists
 
-Eight crates in the workspace - `ramshield-detection`,
+Seven crates in the workspace - `ramshield-detection`,
 `ramshield-storage`, `ramshield-enforcement`, `ramshield-forecasting`,
-`ramshield-protocol`, `ramshield-analytics`, `ramshield-config` and the
-root `ramshield` package - need the same data structures: connection
-events, enforcement commands, error types, IP network abstractions.
+`ramshield-protocol`, `ramshield-config` and the root `ramshield`
+package - need the same data structures: connection events, enforcement
+commands, error types, IP network abstractions.
 Without a shared type crate, each would define its own versions, and the
 conversion boilerplate and the drift come with that.
 
@@ -271,7 +271,7 @@ enables it.
 reason-string mapping, the CIDR normalisation and the ring buffer are
 all in it.
 
-**Read by:** `ramshield`, `ramshield-analytics`, `ramshield-config`, `ramshield-detection`, `ramshield-enforcement`, `ramshield-forecasting`, `ramshield-protocol`, `ramshield-storage`.
+**Read by:** `ramshield`, `ramshield-config`, `ramshield-detection`, `ramshield-enforcement`, `ramshield-forecasting`, `ramshield-protocol`, `ramshield-storage`.
 
 ## Testing
 

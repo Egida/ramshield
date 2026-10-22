@@ -62,13 +62,12 @@ fn listed_names(text: &str, prefix: &str) -> BTreeSet<String> {
 #[test]
 fn the_readme_dependency_list_is_the_crate_dependency_list() {
     let toml = read("crates/ramshield-analytics/Cargo.toml");
+    // A crate with no dependencies has no [dependencies] section.
     let deps_section = toml
         .split("[dependencies]")
         .nth(1)
-        .expect("Cargo.toml has a [dependencies] section")
-        .split("\n[")
-        .next()
-        .unwrap();
+        .map(|s| s.split("\n[").next().unwrap())
+        .unwrap_or("");
     let mut actual = BTreeSet::new();
     for line in deps_section.lines() {
         let line = line.trim();
@@ -79,11 +78,6 @@ fn the_readme_dependency_list_is_the_crate_dependency_list() {
             actual.insert(name.trim().to_string());
         }
     }
-    assert!(
-        !actual.is_empty(),
-        "no dependencies were parsed from Cargo.toml"
-    );
-
     let claimed = listed_names(&readme(), "Declared:");
     assert_eq!(
         claimed, actual,
