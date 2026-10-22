@@ -1,6 +1,6 @@
 # RamShield Production-Essential Audit Backlog
 
-**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD at assessment:** `1be1318` · **master HEAD now:** `35f4557`
+**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD at assessment:** `1be1318` · **master HEAD now:** `15e0551`
 
 `2adc966` is the parent of `bd417cd`; the rows below were assessed
 against `2adc966`, and `bd417cd` rebuilt this file's tables without
@@ -12,6 +12,8 @@ changing the code. The rows whose fixes have since landed on `master`
 **CI on `bd417cd`:** CI 39589296986 · Review Pipeline 39589297074 · lint-no-unwrap 39589297157 · Subnet Stress Pin 39589297129 · Agent Flow Contract 39617102370 — all success.
 
 **CI on `35f4557`:** CI 39714123651 · Review Pipeline 39714123719 · lint-no-unwrap 39714123629 · Subnet Stress Pin 39714123723 — all success.
+
+**CI on `15e0551`:** CI 39718566288 · Review Pipeline 39718566326 · lint-no-unwrap 39718566295 · Subnet Stress Pin 39718566414 — all success.
 
 **Where the truth lives.** This file is the **status of each row**. The other two answers are elsewhere:
 
@@ -113,7 +115,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | id | item | state |
 |---|---|---|
 | **F1a** | **A /0 rule is unexpressable in the SHM rule table.** | OPEN — owner decision. See the note below. |
-| **F2** | Native capture worker lifecycle. | FIXED — the code is `80fa333` on `fix/f2-native-capture-lifecycle`. The owner decided the policy half: degrade, keep serving. A dead capture shows as `Degraded` with the health reason `native capture stopped`, and the four `ramshield_native_capture_*` series say what happened. |
+| **F2** | Native capture worker lifecycle. | CLOSED — on `master` as `15e0551` (PR #58). The owner decided the policy half: degrade, keep serving. A dead capture shows as `Degraded` with the health reason `native capture stopped`, and the four `ramshield_native_capture_*` series say what happened. |
 | **F7** | Performance and memory claims need workload evidence. | OPEN — process item. One instance closed by measurement (`5a8a32f`, the SHM lookup cost). |
 | **F8** | The 21 Oct audit was not locally reproduced. | OPEN — not actionable against the code; it caps the confidence of every severity label the audit carries. |
 | **F9** | Enforcement's block path is a lost update against detection. | CLOSED — on `master` as `682435a` (PR #43). |
