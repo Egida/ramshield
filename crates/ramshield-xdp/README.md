@@ -74,4 +74,12 @@ No benchmarks — this crate has no runtime code. Kernel-side packet processing 
 
 ## Testing
 
-No unit tests — the crate's correctness is verified by `ramshield-enforcement` integration tests that load the BPF program and verify block/unblock behavior through the `AyaXdpApplier`.
+19 unit tests: the v4 and v6 key layouts (zero, broadcast, loopback and
+all-ones addresses), the key octet order against the C `saddr` layout,
+the split between v4 and v6 keys, the map routing round-trip, the wire
+contract against the C key layout, the VLAN tag documentation, and the
+separation of the BLOCKLIST and BLOCKLIST6 maps. Three more need root
+and are `#[ignore]`d by default: loading the BPF program with `aya`, and
+the insert/lookup round-trips against a live map. The enforcement crate's
+integration tests then load the BPF program and verify block/unblock
+behavior through the `AyaXdpApplier`.
