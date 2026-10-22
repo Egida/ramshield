@@ -17,10 +17,11 @@ store.traffic ──→ Forecaster::run()  (1 Hz)
               H3       ──→ no block
 ```
 
-**The daemon does not run this crate.** `Forecaster` is exported from
-`ramshield`'s lib, but the boot pipeline never constructs one, so
-nothing in the running daemon produces an `EnforceCommand` from a
-forecast. The diagram above is the crate's own loop, not the daemon's.
+**The daemon runs this crate.** `Forecaster` is exported from
+`ramshield`'s lib, and `boot_pipeline()` constructs one when
+`forecasting.enabled` is set, so the running daemon produces
+`EnforceCommand`s from a forecast. The diagram above is the crate's own
+loop, which the daemon's task runs.
 
 ## Why it exists
 
@@ -196,7 +197,7 @@ The crate emits the wire string reason `"forecast_anomaly"`, not a
 the injected `mpsc::Sender<EnforceCommand>`.
 
 **Read by:** the root `ramshield` package, which re-exports `Forecaster`
-and never constructs one.
+and constructs one in `boot_pipeline()` when `forecasting.enabled` is set.
 
 ## Configuration
 
@@ -204,8 +205,10 @@ and never constructs one.
 `hw_beta` 0.1, `hw_gamma` 0.1, `seasonality_period` 3,600,
 `anomaly_zscore` 2.5, `min_entropy` 2.0. The EWMA span (120 ticks) and
 the CUSUM slack and boundary (0.5 and 4.0) are hard-coded in the
-forecaster, not configurable. `min_entropy` is validated by the config
-crate but never read here.
+forecaster, not configurable. `min_entropy` is the entropy floor: below
+it the traffic is concentrated on a few subnets, so an entropy drop is
+an anomaly (a narrowing) rather than a flash crowd (a legitimate
+spread-out surge). The forecaster reports the two cases differently.
 
 ## Benchmarks
 
