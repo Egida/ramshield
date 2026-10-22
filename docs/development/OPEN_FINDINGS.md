@@ -1754,21 +1754,21 @@ The severity column shows the record's reason, and the tier column no longer cla
 
 ## F48 — `/metrics` bypasses the session auth that guards every other route
 
-**Status:** OPEN
+**Status:** FIXED — `/metrics` now requires session auth like every other route
 **Files:** `src/dashboard/auth.rs`
 **Severity:** P3 (exposure)
 
-Found by the 2026-10-22 full-codebase audit.
+Found by the 2026-10-22 full-codebase audit. FIXED 2026-10-22.
 
 ### What it is
 
-`src/dashboard/auth.rs:334` exempts `/metrics` from `require_auth` together with `/healthz`, `/livez` and `/login`. The exporter emits no per-IP data, so the exposure is operational counters only, but `deploy/k8s/networkpolicy.yaml` admits 9999 from selected namespaces.
+`src/dashboard/auth.rs:334` exempted `/metrics` from `require_auth` together with `/healthz`, `/livez` and `/login`. `/metrics` now passes through `require_auth`; only the liveness probes and the login flow are exempt. A test asserts an unauthenticated `/metrics` request is redirected to the login page.
 
 **Why it matters.** An unauthenticated metrics endpoint on a port the network policy opens to other namespaces.
 
 ### Closure criterion
 
-The exemption is documented as intentional, or `/metrics` is restricted.
+`/metrics` is restricted. Met.
 
 ---
 

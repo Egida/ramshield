@@ -120,7 +120,9 @@ A thin HTTP server on `:9999` serving:
 - `GET /login` — serves the login page.
 - `POST /login` — validates credentials against Argon2 hash.
 - `GET /api/snapshot` — returns `DashboardSnapshot` as JSON (requires auth).
-- `GET /metrics` — returns Prometheus text format (no auth, for scraping).
+- `GET /metrics` — returns Prometheus text format. Requires a valid
+  session like every other route (F-48: the endpoint is not exempt from
+  the auth middleware; a scraper must authenticate).
 - `GET /api/history/blocks` — returns block history ring buffer.
 
 Session management uses HMAC-signed cookies — no database, no server-side session store.
