@@ -12,8 +12,8 @@
 //! runtime exit, a shutdown and a retry exhaustion are all produced
 //! without a NIC, a capability or a race.
 
-use super::native::{MAX_CAPTURE_ATTEMPTS, SlotOutcome, capture_slot, join_workers, start_workers};
 use super::Engine;
+use super::native::{MAX_CAPTURE_ATTEMPTS, SlotOutcome, capture_slot, join_workers, start_workers};
 use crate::Config;
 use crate::metrics::{Metrics, ProtectionState};
 use crate::storage::Store;
@@ -196,11 +196,7 @@ fn a_dead_native_capture_degrades_the_service_without_refusing_readiness() {
 fn a_capture_path_that_has_not_started_is_not_degraded() {
     let mut cfg = Config::default();
     cfg.native_ingest.enabled = true;
-    let engine = Engine::new(
-        cfg,
-        Arc::new(Store::new(16)),
-        Arc::new(Metrics::new()),
-    );
+    let engine = Engine::new(cfg, Arc::new(Store::new(16)), Arc::new(Metrics::new()));
     engine.mark_pipeline_ready_for_test();
 
     let snapshot = engine.dashboard_snapshot();
