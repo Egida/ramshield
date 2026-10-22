@@ -206,9 +206,9 @@ This is a follow-up, not a defect in the shipped behaviour.
 
 ## F2 — Native capture worker lifecycle
 
-**Status:** FIXED (P2) — the code is on `fix/f2-native-capture-lifecycle`
-(PR #58); the policy half is the owner's and it is decided: **degrade,
-keep serving**.
+**Status:** FIXED (P2) — the code is `80fa333` on
+`fix/f2-native-capture-lifecycle`; the policy half is the owner's and it
+is decided: **degrade, keep serving**.
 
 **Files:** `src/engine/native.rs`, `src/engine/boot.rs`,
 `src/engine/mod.rs`, `src/dashboard/mod.rs`,

@@ -113,7 +113,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | id | item | state |
 |---|---|---|
 | **F1a** | **A /0 rule is unexpressable in the SHM rule table.** | OPEN — owner decision. See the note below. |
-| **F2** | Native capture worker lifecycle. | FIXED — the code is on `fix/f2-native-capture-lifecycle` (PR #58). The owner decided the policy half: degrade, keep serving. A dead capture shows as `Degraded` with the health reason `native capture stopped`, and the four `ramshield_native_capture_*` series say what happened. |
+| **F2** | Native capture worker lifecycle. | FIXED — the code is `80fa333` on `fix/f2-native-capture-lifecycle`. The owner decided the policy half: degrade, keep serving. A dead capture shows as `Degraded` with the health reason `native capture stopped`, and the four `ramshield_native_capture_*` series say what happened. |
 | **F7** | Performance and memory claims need workload evidence. | OPEN — process item. One instance closed by measurement (`5a8a32f`, the SHM lookup cost). |
 | **F8** | The 21 Oct audit was not locally reproduced. | OPEN — not actionable against the code; it caps the confidence of every severity label the audit carries. |
 | **F9** | Enforcement's block path is a lost update against detection. | CLOSED — on `master` as `682435a` (PR #43). |
