@@ -1,6 +1,6 @@
 # RamShield Production-Essential Audit Backlog
 
-**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD at assessment:** `1be1318` · **master HEAD now:** `15e0551`
+**Target branch:** `master` · **Assessed at:** `2adc966` · **master HEAD at assessment:** `1be1318` · **master HEAD now:** `f1eacf9`
 
 `2adc966` is the parent of `bd417cd`; the rows below were assessed
 against `2adc966`, and `bd417cd` rebuilt this file's tables without
@@ -13,7 +13,7 @@ changing the code. The rows whose fixes have since landed on `master`
 
 **CI on `35f4557`:** CI 39714123651 · Review Pipeline 39714123719 · lint-no-unwrap 39714123629 · Subnet Stress Pin 39714123723 — all success.
 
-**CI on `15e0551`:** CI 39718566288 · Review Pipeline 39718566326 · lint-no-unwrap 39718566295 · Subnet Stress Pin 39718566414 — all success.
+**CI on `f1eacf9`:** CI 39724446000 · Review Pipeline 39724445978 · lint-no-unwrap 39724445986 · Subnet Stress Pin 39724446022 — all success.
 
 **Where the truth lives.** This file is the **status of each row**. The other two answers are elsewhere:
 
@@ -66,7 +66,7 @@ Every row still to be done. The *Required work* column is what done looks like; 
 
 | I-012 | P1 | Host-network Kubernetes capability review | Review `deploy/k8s/daemonset.yaml` capabilities against the exact XDP/capture operations required. Minimize capabilities and document why each retained capability is required; validate manifests and deployment smoke tests. Do not remove capabilities blindly if it breaks enforcement. | OPEN — verified still present: `deploy/k8s/daemonset.yaml` still runs with `hostNetwork: true` and a `NET_ADMIN` capability, and nothing in the master records documents why each retained capability is required. The row's own acceptance ask is unmet. |
 
-| I-013 | P1 | SYNPROXY fixture parity | Compare `tests/fixtures/synproxy.nft` with `config.baseline.toml` and actual generator behavior; align ports and prove port 80 coverage if discrepancy remains. | CLOSED — on `master` as `f900664` (PR #37). The fixture was a hand-maintained copy that had drifted from the ruleset the daemon installs: it declared `tcp dport { 22, 443 }` while the shipped baseline and the code default both configure `[22, 53, 80, 443]`, so the `nft -c -f` gate was proving syntax for a ruleset production never loads. The fixture is now the generator's own output, compared knob by knob against the shipped baseline config, and a port value that is not a TCP port fails loudly instead of being truncated. The check now runs in CI, in its own job. |
+| I-013 | P1 | SYNPROXY fixture parity | Compare `tests/fixtures/synproxy.nft` with `config.baseline.toml` and actual generator behavior; align ports and prove port 80 coverage if discrepancy remains. | CLOSED — on `master` as `f900664` (PR #37). The fixture was a hand-maintained copy that had drifted from the ruleset the daemon installs: it declared `tcp dport { 22, 443 }` while the shipped baseline and the code default both configure `[22, 53, 80, 443]`, so the `nft -c -f` gate was proving syntax for a ruleset production never loads. The fixture is now the generator's own output, compared knob by knob against the shipped baseline config, and a port value that is not a TCP port fails loudly instead of being truncated. The check now runs in CI, in the `nft-fixture` job, though the nft syntax step self-skips on runners without the `nft_synproxy` module (`.github/workflows/ci.yml:176-177`). |
 
 | A-036 | P2 | Core docs and claims | Replace stale code-health notes; document supported core deployment commands and operational assumptions. Add/update README files for analytics and CGNAT; verify enforcement and detection documentation against code. Mesh threat model, deployment, and module docs are tracked in the separate mesh feature plan. | IN PROGRESS — the documentation it describes was refreshed, but `DOCS COMPLETE` is not a status in this file's vocabulary, and the row's own acceptance ask (exact-SHA gates and review) is still open. The master record set is now far larger than this row describes. |
 
@@ -76,7 +76,7 @@ Every row still to be done. The *Required work* column is what done looks like; 
 
 | A-039 | P2 | Final acceptance report | Attach exact SHA, compare-to-master, workflow URLs/job conclusions, fmt result, test counts, known limitations, module scores with evidence, and a prioritized residual-risk statement. No blanket 100/100 without this evidence. | IN PROGRESS — the acceptance evidence now exists in a newer, per-SHA form: the gate ledger and CI run table in `docs/development/OWNER_DECISION_PACKAGE.md`. It is not attached here as a single final report. |
 
-| I-020 | P2 | Dashboard quarantine search | Confirm whether `#tableSearch` has an input listener in `src/dashboard/static/index.html`. If absent, connect it to the existing filter function and test filtering by IP, CIDR and module. | CLOSED — on `master` as `f900664` (PR #37). The input had no event binding, and the 5-second row rebuild destroyed any filter state; the input now calls `filterTable()` on input and the rebuild re-applies the filter. The placeholder said CIDR, which the filter does not do: block rows carry a plain `IpAddr`, so a CIDR query matches zero rows. |
+| I-020 | P2 | Dashboard quarantine search | Confirm whether `#tableSearch` has an input listener in `src/dashboard/static/index.html`. If absent, connect it to the existing filter function and test filtering by IP, CIDR and module. | CLOSED — on `master` as `f900664` (PR #37). The input had no event binding, and the 10-second row rebuild destroyed any filter state; the input now calls `filterTable()` on input and the rebuild re-applies the filter. The placeholder said CIDR, which the filter does not do: block rows carry a plain `IpAddr`, so a CIDR query matches zero rows. |
 
 | I-022 | P2 | Systemd portability | Search systemd unit templates (including backlog dispatcher) for developer-specific absolute paths. Replace with package-relative or configurable paths and verify service working-directory/user behavior. | CLOSED — on `master` as `f900664` (PR #37). The dispatcher unit hard-coded a developer path for both `WorkingDirectory` and `ExecStart`; it now reads the checkout from `EnvironmentFile` (`RS_DISPATCHER_SCRIPT`), uses `%h` for PATH, and fails with a readable message when the variable is unset. Verified on a live user manager: unset exits 1 with the message; a set value whose path contains a space reaches ExecStart as one argument. The same path was removed from `scripts/backup_project.sh`, `scripts/run_xdp_tests.sh`, the `ddos_stress.rs` header and `deployment_cli.rs`. |
 
@@ -98,7 +98,7 @@ Every row still to be done. The *Required work* column is what done looks like; 
 
 | I-031 | P3 | The integration runners read a config example that no longer exists | `scripts/auth_e2e.py` and `scripts/final_integration.py` read `config.prod.toml.example`, which was deleted in `af3f465`, so both crash with `FileNotFoundError`. | CLOSED (`1416a60`, PR #49) — the dead read is gone and the other runner reads the shipped baseline. |
 
-| I-032 | P3 | `network_create.py`'s `dual` family produces IPv4 only | The `family != "v6"` test sends the `dual` case down the IPv4 branch, so no IPv6 network is generated. | CLOSED (`1416a60`, PR #49) — `dual` now emits a /24 and a /64 per index. |
+| I-032 | P3 | `network_create.py`'s `dual` family produces IPv4 only | The `family != "v6"` test sends the `dual` case down the IPv4 branch, so no IPv6 network is generated. | CLOSED (`1416a60`, PR #49) — `build_plan` now expands `dual` into a /24 and a /64 per index. One gap remains and is not the row's subject: the CLI still builds v4 only (`scripts/network_create.py:72` calls `build_plan(args.count, "v4", 24, 32, 7)`), so `dual` is reachable only through the module. |
 
 | I-033 | P3 | `xdp_netns_sim.py` ignores `--dashboard` in its pre-flight check | The pre-flight snapshot request is hardcoded to `127.0.0.1:9999`, so a run against another dashboard address fails with a traceback instead of the intended message. | CLOSED (`1416a60`, PR #49) — the pre-flight check uses the parsed dashboard URL. |
 
@@ -209,7 +209,7 @@ Done. Kept here so the tables above answer one question only: **what is still to
 
 | A-005 | Replay-store security | PASS (historical) — not re-verified on current master. No commit since `a9a3bf1` touched the replay store, and the master scan lists the replay store as a sound, refuted lead. |
 
-| A-015 | Detection construction | PASS (historical) — not re-verified on current master. The row's own caveat is unresolved: PR #6's `#[cfg(test)]` removal of the public wrapper is a downstream API break and needs an explicit breaking-release decision. |
+| A-015 | Detection construction | PASS (historical) — not re-verified on current master. The caveat as written was inaccurate: PR #6's `#[cfg(test)]` removal of the public wrapper never landed. Master keeps `pub fn new` as a deprecated wrapper and adds `try_new` / `try_new_with_shm_path` (`crates/ramshield-detection/src/lib.rs:162-202`), so there is no downstream API break. |
 
 | A-016 | Native packet ingest | PASS (historical) — not re-stamped. Changed since this pin: the native capture path now counts drops and documents `max_events_per_sec` as an admission cap rather than a delivery guarantee (`60ce0f1`, `d18535b`). |
 
