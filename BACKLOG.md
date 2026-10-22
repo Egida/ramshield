@@ -123,7 +123,7 @@ These are the items tracked as findings rather than as rows: the open items from
 | **F11** | Crate README documentation drift. | CLOSED — all 62 claims are fixed; every crate README the sweep covers is pinned by a test. |
 | **F23** | `forecasting.min_entropy` is a config knob nothing reads. | OPEN — the config crate validates it and the forecasting crate never reads it. |
 | **F25** | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses. | FIXED — the dependency is out of `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types`. |
-| **F26** | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have. | OPEN — the global sentence contradicts the document's own fail-open section and the BPF program's `XDP_PASS` paths. |
+| **F26** | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have. | FIXED — the document states each subsystem's own posture, and `tests/fail_safe_claims.rs` pins it to the source. |
 | **F27** | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path. | OPEN — the unblock, CIDR and TTL checks are advertised and absent; `rm -rf "$WAL_DIR"` runs on a path the environment can override. |
 | **F28** | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure. | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true`. |
 | **F29** | The Subnet Stress Pin gate asserts against a fixed four-second sleep. | FIXED — the script waits for the counters to settle. The run on `4b88864` was red on a docs-only commit (206 IPs tracked against a threshold of 800). |
