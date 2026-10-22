@@ -71,17 +71,9 @@ def wait_health(port: int, deadline: float = 20.0) -> bool:
 
 
 def write_cfg(path: str, *, auth_keys: list[str] | None, require_auth: bool) -> None:
-    src = open(os.path.join(REPO, "config.prod.toml.example")).read()
-    src = src.replace('tcp_addr = "0.0.0.0:7890"', f'tcp_addr = "{IPC_HOST}:{IPC_PORT}"')
-    src = src.replace('http_addr = "0.0.0.0:9999"', f'http_addr = "127.0.0.1:{DASH_PORT}"')
-    src = src.replace('dir = "/var/lib/ramshield/wal"', f'dir = "{path}-wal"')
-    # strip production public-bind secrets requirements by using loopback
-    if auth_keys:
-        keys_toml = ", ".join(f'"{k}"' for k in auth_keys)
-        if "auth_keys" in src and "auth_keys =" in src:
-            pass
-        src += f"\n[ipc]\n"  # may duplicate — binary uses last wins only if merged; safer replace
-    # rebuild minimal safe cfg
+    # The config is built from scratch below. There is no template file to
+    # read: the one this used to open does not exist, and the result was
+    # never used anyway.
     cfg = f"""
 [engine]
 shard_count = 256
