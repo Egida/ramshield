@@ -66,7 +66,7 @@ pub struct HoltWinters {
 // ── EWMA Variance ─────────────────────────────────────────────────────────────
 
 /// Exponentially weighted moving average variance tracker.
-/// O(1) memory (3 floats = 24 bytes).
+/// O(1) memory (4 fields = 32 bytes).
 /// Adapts to traffic phase changes within ~2 minutes (span=120).
 pub struct EwmAVar {
     ewma: f64,
