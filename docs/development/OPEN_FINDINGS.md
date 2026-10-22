@@ -32,7 +32,7 @@ are the ones used here.
 | F4 | XDP LRU eviction residual not stated | P3 (doc) | **CLOSED** — `79f4eac` | no |
 | **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — `d1f4a81`, see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
 | **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | yes — retain the representation, change it, or use a separate mechanism |
-| **F2** | **Native capture worker lifecycle** | **P2** | **FIXED** — the workers are started where their outcome is known, a failed capture is retried a bounded number of times, and a dead capture is visible in the metrics, the dashboard and the health reason | no — the owner decided: degrade, keep serving |
+| **F2** | **Native capture worker lifecycle** | **P2** | **FIXED** — on `master` as `15e0551` (PR #58): the workers are started where their outcome is known, a failed capture is retried a bounded number of times, and a dead capture is visible in the metrics, the dashboard and the health reason | no — the owner decided: degrade, keep serving |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
@@ -209,9 +209,9 @@ This is a follow-up, not a defect in the shipped behaviour.
 
 ## F2 — Native capture worker lifecycle
 
-**Status:** FIXED (P2) — the code is `80fa333` on
-`fix/f2-native-capture-lifecycle`; the policy half is the owner's and it
-is decided: **degrade, keep serving**.
+**Status:** FIXED (P2) — on `master` as `15e0551` (PR #58, the code
+commit `80fa333`); the policy half is the owner's and it is decided:
+**degrade, keep serving**.
 
 **Files:** `src/engine/native.rs`, `src/engine/boot.rs`,
 `src/engine/mod.rs`, `src/dashboard/mod.rs`,
