@@ -216,7 +216,7 @@ echo '{"version":1,"body":{"Request":{"Connection":{"ip":"10.0.0.1","status":200
 
 **Reads from:** `ramshield-types` (`IpAddr`, `IpNetwork`, `BlockReason`), `hmac`, `sha2`, `hex` (HMAC computation), `ahash` (the replay store's `AHashMap`).
 
-**Written by:** `ramshield-ipc` (parses messages, sends responses), `ramshield-dashboard` (IPC stats endpoint).
+**Written by:** the root `ramshield` package - its IPC server parses the messages and sends the responses, and its dashboard module serves the IPC stats endpoint. Neither is a crate of its own.
 
 **Read by:** external clients (Nginx modules, scripts, custom proxies).
 

@@ -1,9 +1,8 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 38 fixed, 24 open.** The
-open ones are spread over five crate READMEs: `ramshield-config` 1,
-`ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6,
-`ramshield-xdp` 2. This is the result of a read-only
+**Status:** OPEN, partially worked. **62 claims: 40 fixed, 22 open.** The
+open ones are spread over four crate READMEs: `ramshield-config` 1,
+`ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master was `bd417cd` at the time of the sweep).
@@ -374,6 +373,8 @@ address is absent from the flat map.
 **F29 (MEDIUM)** `crates/ramshield-xdp/README.md:68`
 > "No unit tests — the crate's correctness is verified by `ramshield-enforcement` integration tests that load the BPF program"
 
+**Status: FIXED.** The README now describes the 19 unit tests the crate has, and names the three that need root and are `#[ignore]`d by default.
+
 Code: `crates/ramshield-xdp/src/lib.rs` has **19** unit tests (v4/v6 key layout, wire-contract v4/v6, split/routing, VLAN, BLOCKLIST/BLOCKLIST6 separation) plus `#[ignore]`-marked root-required tests: `aya_load_verifies_maps_and_program` (`:376-378`) and `insert_lookup_roundtrip_v4` (`:395-396`) — these are exactly the live-kernel/hardware tests the backlog item asks to be identified. (Root-required test set: these two + `insert_lookup_roundtrip_v6`; `crates/ramshield-xdp/tests/ddos_stress.rs` also needs root.)
 
 **F30 (MEDIUM)** `crates/ramshield-xdp/README.md:5` — "compiles a BPF program (written in C or Rust)": build.rs compiles `ramshield-xdp-bpf/src/main.rs` (Rust/aya-ebpf). `bpf/main.rs` is a 7-line stub not built; no C source in the tree. Low impact, folded here. **Status: FIXED** — the README now says the BPF program is Rust.
@@ -485,7 +486,7 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 
 **F49 (MEDIUM)** `crates/ramshield-metrics/README.md:25-32` — `Metrics { requests, blocks, ingested, rejected, batch_history, block_log }`. Code `crates/ramshield-metrics/src/lib.rs:28-30`: `requests_total`, `blocks_total`, `events_ingested`, `events_rejected` (plus ~40 more fields).
 
-**F50 (MEDIUM)** Phantom-crate callers across READMEs: `crates/ramshield-config/README.md:232-238` (`ramshield-engine`, `ramshield-ipc`, `ramshield-wal`, `ramshield-dashboard`), `crates/ramshield-metrics/README.md:167,169` (`ramshield-engine`, `ramshield-dashboard`, `ramshield-ipc`), `crates/ramshield-storage/README.md:129` (`ramshield-dashboard`), `crates/ramshield-enforcement/README.md:139` (`ramshield-dashboard`, `ramshield-metrics`). Code: workspace members `Cargo.toml:2-16` = root + config, detection, enforcement, forecasting, metrics, protocol, storage, types, xdp, cgnat, analytics, mesh, ramwal — **no** engine/ipc/wal/dashboard crates exist.
+**F50 (MEDIUM)** Phantom-crate callers across READMEs: `crates/ramshield-metrics/README.md:167,169` (`ramshield-engine`, `ramshield-dashboard`, `ramshield-ipc`) still name crates that do not exist. The `ramshield-config`, `ramshield-storage`, `ramshield-enforcement` and `ramshield-protocol` mentions are fixed: the dashboard and the IPC server are modules of the root package, not crates of their own.
 
 **F51 (LOW)** `crates/ramshield-types/README.md:24` — "Nine workspace crates need to share" → 7 crates actually depend on `ramshield-types` (F2 grep).
 **Status: FIXED.** The README now says eight crates - seven plus the root package - and names them.
@@ -578,5 +579,7 @@ Code: the real struct has a public `cap: usize` and a private `inner`.
 
 
 **F62 (P2)** `crates/ramshield-xdp/README.md:7` — the claim that the BPF build degrades gracefully.
+
+**Status: FIXED.** The README now says the build **fails** when `bpf-linker` is missing, and that `build.rs` panics with the install step and writes no placeholder ELF.
 
 Code: `crates/ramshield-xdp/build.rs:26-31` — `build.rs` **panics** when `bpf-linker` is missing ("XDP BPF build failed: bpf-linker missing ... No placeholder ELF is written."). The README must not promise a soft skip the build does not do.
