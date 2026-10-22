@@ -43,7 +43,7 @@ are the ones used here.
 | F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
 | F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | **FIXED** — the dependency is gone from `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types` | no |
-| F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | OPEN — the global claim contradicts the document's own section 1 and the BPF program | no — restate the claim per subsystem |
+| F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | **FIXED** — the document states each subsystem's own posture, and `tests/fail_safe_claims.rs` pins it to the source | no |
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
 | F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
 | F29 | The Subnet Stress Pin gate asserts against a fixed four-second sleep | P2 (CI) | **FIXED** — the script now waits for the counters to settle | no |
@@ -1222,8 +1222,10 @@ The gate asserts on a settled daemon, not on a sleep.
 
 ## F26 — `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have
 
-**Status:** OPEN
-**Files:** `FAIL_SAFE_BEHAVIOR.md`, `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs`
+**Status:** FIXED (P2) — the document states each subsystem's own
+posture, and `tests/fail_safe_claims.rs` pins it to the source.
+**Files:** `FAIL_SAFE_BEHAVIOR.md`, `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs`,
+`tests/fail_safe_claims.rs`
 **Severity:** P2 (doc)
 
 Found by the 2026-10-22 master audit.
@@ -1259,6 +1261,29 @@ the current dataplane.
    map failure, a worker failure, a storage failure and a shutdown.
 2. Delete the global "never allowing it through" sentence.
 3. Re-point the document at the current code, not the 2026-10-13 audit.
+
+### What landed
+
+The summary now says there is no single fail-closed posture and lists what
+each subsystem does: the XDP dataplane fails open on packets it cannot
+parse or classify, a *map update* failure still returns `Err` and keeps
+the caller's in-band state, the authentication path rejects a wrong
+signature, an out-of-skew timestamp and a replayed frame, the store
+refuses a net-new key under the RAM budget rather than evicting a live
+one, and the native capture path degrades the service and keeps serving.
+
+The document's provenance line ("based on the code audit performed on
+2026-10-13") now says it was last checked against the source on
+2026-10-22, the dead `.hermes/plans/...` link points at the current
+independent review, the gate table says the dataplane is fail-open by
+design, and the cross-crate action item says the check is that each
+subsystem states its own behaviour, not that they agree.
+
+`tests/fail_safe_claims.rs` pins the four claims to the source: the BPF
+program's `XDP_PASS` and `XDP_DROP` paths, the auth module's three
+rejections, the store's `CapacityExceeded`, and the capture path's
+degraded health reason and exported gauge. It fails if the global
+sentence comes back.
 
 ### Closure criterion
 
