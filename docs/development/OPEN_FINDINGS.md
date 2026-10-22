@@ -46,6 +46,7 @@ are the ones used here.
 | F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | OPEN — the global claim contradicts the document's own section 1 and the BPF program | no — restate the claim per subsystem |
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
 | F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
+| F29 | The Subnet Stress Pin gate asserts against a fixed four-second sleep | P2 (CI) | **FIXED** — the script now waits for the events to be ingested and for the counters to settle | no |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -1112,6 +1113,43 @@ readme guards (`crates/ramshield-storage/tests/readme_claims.rs` and
 `crates/ramshield-protocol/tests/readme_claims.rs`) keep them in step.
 
 **Closure criterion.** The dependency is gone, or the crate uses it.
+
+
+## F29 — The Subnet Stress Pin gate asserts against a fixed four-second sleep
+
+**Status:** FIXED (P2) — the script waits for the drain instead of racing it.
+**Files:** `scripts/subnet_stress.py`
+**Severity:** P2 (CI)
+
+Found when the master workflow was checked after the F-2 merge: the
+Subnet Stress Pin run on `4b88864` was red, and the commit it ran was
+docs only.
+
+### The defect
+
+`scripts/subnet_stress.py` sent 4,800 events, slept four seconds, and
+then asserted `ips_tracked >= 800`. The daemon flushes the detection
+aggregates on a 250 ms tick and scans the subnet table on a ~500 ms tick,
+so the four seconds is a race against the runner, not a bound on the
+work. On the failing run the daemon had ingested 308 of the 4,800 events
+in one batch and had tracked 206 IPs, against the threshold of 800; the
+run before it on the same tree had ingested all 4,800 and tracked 2,395.
+
+The same script is the "Subnet Stress Pin" job on every master push and
+on the nightly schedule, so a busy runner can turn the master red for a
+reason that has nothing to do with the change under test.
+
+### Required fix
+
+1. Wait for the events to be ingested, with a deadline, instead of
+   sleeping a fixed interval.
+2. Wait for the counters to settle before asserting on them.
+
+### Closure criterion
+
+The gate asserts on a drained daemon, not on a sleep.
+
+---
 
 ## F26 — `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have
 

@@ -76,8 +76,25 @@ elapsed = time.monotonic() - t0
 print(f"sent {sent}/{total} events in {elapsed:.2f}s "
       f"({sent / elapsed:,.0f} events/s)")
 
-# The subnet loop scans on a ~500ms tick; give it a few ticks to fire.
-time.sleep(4)
+# The detection pipeline flushes on a 1s tick and the subnet scan on a
+# ~500ms tick, and on a loaded runner both fall behind: a fixed sleep is a
+# race, and this gate has lost that race (ips_tracked 206 against a
+# threshold of 800, one batch flushed instead of ten). Wait for the
+# events to be ingested and for the counters to settle instead.
+deadline = time.monotonic() + 90
+settled = 0
+prev = None
+while time.monotonic() < deadline:
+    cur = counters()
+    ingested = (cur["events_ingested"] or 0) - (before["events_ingested"] or 0)
+    if ingested >= total and cur == prev:
+        settled += 1
+        if settled >= 2:
+            break
+    else:
+        settled = 0
+    prev = cur
+    time.sleep(1)
 after = counters()
 # NOTE: a *block* is NOT expected at this load. classify_subnet blocks only
 # at >64 hosts AND >50k events (CGNAT/AFNAT tier). 60 hosts x 120 events =
