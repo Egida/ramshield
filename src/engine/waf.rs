@@ -12,21 +12,34 @@
 //! smuggling primitive, so this gate accepts only the one spelling of each
 //! construct and rejects everything else. The rules, in one place:
 //!
-//! - **Request line** (RFC 9112 3): `method SP request-target SP
-//!   HTTP-version`. Exactly one SP between the components, no tab, no
-//!   empty component, and no control character in the target.
+//! - **Request line** (RFC 9112 3, RFC 9110 5.6.2): `method SP
+//!   request-target SP HTTP-version`. Exactly one SP between the
+//!   components, no tab, no empty component, and no control character in
+//!   the target. The method is an RFC 9110 token (alphanumeric plus
+//!   `!#$%&'*+-.^_`|~`), at most 16 bytes; the version is exactly
+//!   `HTTP/1.1` or `HTTP/1.0`. A target is a URI reference: bytes below
+//!   0x21 are control characters, SP, or HTAB, none of which may appear
+//!   in it (DEL and non-ASCII are currently admitted — lenient, but not
+//!   framing-relevant).
 //! - **Transfer-Encoding** (RFC 9112 6.1, RFC 9110 5.6.1): the only
 //!   accepted coding is `chunked`, exactly once across all Transfer-Encoding
 //!   header fields, and it may not appear with Content-Length. A coding
-//!   token carries no interior whitespace.
+//!   token carries no interior whitespace. Empty list elements are
+//!   ignored per RFC 9110 5.6.1.2. Transfer-Encoding on an HTTP/1.0
+//!   message is rejected outright.
 //! - **Chunked body** (RFC 9112 7.1): the last chunk is followed by an
 //!   optional trailer section of well-formed field lines and a final empty
 //!   line, and the request ends there. Bytes after that are a second
-//!   request in the same buffer, not part of this one.
+//!   request in the same buffer, not part of this one. Chunk-size is
+//!   `1*HEXDIG` only: no sign, no whitespace. Trailer values are
+//!   validated exactly like header values, and framing fields
+//!   (Content-Length, Transfer-Encoding) may not appear as trailers.
 //!
 //! The input is one request per buffer, which is what the Content-Length
 //! path already assumes: a body that does not exactly fill the buffer is
-//! rejected. The chunked path now assumes the same thing.
+//! rejected. The chunked path assumes the same thing, and so does the
+//! path with neither Content-Length nor Transfer-Encoding, where RFC
+//! 9112 6.3 (7) fixes the body length at zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Finding {
     SqlInjection,
@@ -50,6 +63,29 @@ const MAX_HEADERS: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_TARGET_BYTES: usize = 8192;
 const MAX_HEADER_VALUE_BYTES: usize = 16 * 1024;
+
+/// RFC 9110 5.6.2 tchar: the characters allowed in a token, and therefore
+/// in a field name.
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
 
 fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, Finding> {
     if request.len() > max_bytes {
@@ -87,8 +123,10 @@ fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, F
     {
         return Err(Finding::Malformed);
     }
-    // A request target is a URI reference: no control character, no tab.
-    if !method.iter().all(|b| b.is_ascii_alphabetic()) || target.iter().any(|b| *b < 0x21) {
+    // A request method is a token (RFC 9110 5.6.2, RFC 9112 3.1):
+    // tchar excludes control characters and separators, so bytes that
+    // are neither tchar nor >= 0x80 are invalid here.
+    if !method.iter().all(|b| is_tchar(*b)) || target.iter().any(|b| *b < 0x21) {
         return Err(Finding::Malformed);
     }
 
@@ -128,7 +166,7 @@ fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, F
             .unwrap_or(&line[colon + 1..]);
         if name.is_empty()
             || name.len() > 128
-            || !name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+            || !name.iter().all(|b| is_tchar(*b))
             || value.len() > MAX_HEADER_VALUE_BYTES
         {
             return Err(Finding::Malformed);
@@ -155,6 +193,12 @@ fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, F
             // Only `chunked` is accepted, and exactly once across all
             // Transfer-Encoding header fields.
             //
+            // Transfer-Encoding does not exist in HTTP/1.0 (RFC 9112 6.1):
+            // a 1.0 message carrying it was likely forwarded without the
+            // coding being handled in transit.
+            if version == b"HTTP/1.0" {
+                return Err(Finding::HeaderSmuggling);
+            }
             // A coding is a token (RFC 9110 5.6.1). Whitespace around a
             // comma is legal; whitespace *inside* a token is not, so the
             // token is trimmed at its ends only and the interior is
@@ -171,7 +215,9 @@ fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, F
             for token in value.split(|b| *b == b',') {
                 let token = trim_ows(token);
                 if token.is_empty() {
-                    return Err(Finding::Malformed);
+                    // RFC 9110 5.6.1.2: a recipient MUST parse and ignore
+                    // a reasonable number of empty list elements.
+                    continue;
                 }
                 token_count += 1;
                 if !eq_ci(token, b"chunked") {
@@ -199,9 +245,15 @@ fn parse_request(request: &[u8], max_bytes: usize) -> Result<RequestParts<'_>, F
         }
         body
     } else {
-        if let Some(len) = content_length
-            && (len != raw_body.len() || len > max_bytes)
-        {
+        if let Some(len) = content_length {
+            if len != raw_body.len() || len > max_bytes {
+                return Err(Finding::Malformed);
+            }
+        } else if !raw_body.is_empty() {
+            // RFC 9112 6.3 (7): with neither Content-Length nor
+            // Transfer-Encoding, a request has no message body. Bytes
+            // after the header section are a second request in the same
+            // buffer, not part of this one.
             return Err(Finding::Malformed);
         }
         raw_body.to_vec()
@@ -230,13 +282,14 @@ fn decode_chunked(raw: &[u8], max_bytes: usize) -> Result<(Vec<u8>, usize), Find
         let end = pos + rel;
         let line = &raw[pos..end];
         let size_text = line.split(|b| *b == b';').next().unwrap_or(line);
-        let size = usize::from_str_radix(
-            std::str::from_utf8(size_text)
-                .map_err(|_| Finding::Malformed)?
-                .trim(),
-            16,
-        )
-        .map_err(|_| Finding::Malformed)?;
+        // RFC 9112 7.1: chunk-size = 1*HEXDIG. No sign, no whitespace:
+        // a lenient parse here disagrees with a stricter downstream
+        // parser about where the body starts.
+        let size_text = std::str::from_utf8(size_text).map_err(|_| Finding::Malformed)?;
+        if size_text.is_empty() || !size_text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Finding::Malformed);
+        }
+        let size = usize::from_str_radix(size_text, 16).map_err(|_| Finding::Malformed)?;
         pos = end + 2;
         if size == 0 {
             // The last chunk is followed by an optional trailer section
@@ -293,9 +346,26 @@ fn parse_chunk_trailers(raw: &[u8], start: usize) -> Result<usize, Finding> {
             .position(|b| *b == b':')
             .ok_or(Finding::Malformed)?;
         let name = &line[..colon];
-        if name.is_empty()
-            || name.len() > 128
-            || !name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        if name.is_empty() || name.len() > 128 || !name.iter().all(|b| is_tchar(*b)) {
+            return Err(Finding::Malformed);
+        }
+        // RFC 9110 6.5.1: fields that describe message framing cannot be
+        // processed outside the header section. A trailer carrying them
+        // would be treated as harmless metadata here and as framing
+        // semantics by a downstream that merges trailers.
+        if eq_ci(name, b"content-length") || eq_ci(name, b"transfer-encoding") {
+            return Err(Finding::HeaderSmuggling);
+        }
+        let value = &line[colon + 1..];
+        // A trailer field value is validated exactly like a header field
+        // value: the trailer path may not be looser than the header path
+        // in the same parser.
+        if value.len() > MAX_HEADER_VALUE_BYTES {
+            return Err(Finding::Malformed);
+        }
+        if value
+            .iter()
+            .any(|b| *b == 0 || *b == b'\r' || *b == b'\n' || (*b < 0x20 && *b != b'\t'))
         {
             return Err(Finding::Malformed);
         }
@@ -637,6 +707,146 @@ mod tests {
                 65536
             ),
             None
+        );
+    }
+
+    #[test]
+    fn rejects_a_trailer_value_containing_a_nul() {
+        // RFC 9110 5.5: field-value excludes CTLs.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-A: a\x00b\r\n\r\n",
+                65536
+            ),
+            Some(Finding::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_a_trailer_value_containing_bare_cr() {
+        // RFC 9112 2.2: a bare CR makes the element invalid.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-A: a\rb\r\n\r\n",
+                65536
+            ),
+            Some(Finding::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_an_oversized_trailer_value() {
+        let mut req = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-A: ".to_vec();
+        req.extend(std::iter::repeat(b'a').take(20 * 1024));
+        req.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(inspect(&req, 65536), Some(Finding::Malformed));
+    }
+
+    #[test]
+    fn rejects_a_second_request_when_no_body_framing_is_present() {
+        // RFC 9112 6.3 (7): no Content-Length, no Transfer-Encoding means
+        // the body length is zero. Bytes after the header section are a
+        // second request in the same buffer.
+        assert_eq!(
+            inspect(
+                b"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /evil HTTP/1.1\r\nX: <script>alert(1)</script>\r\n\r\n",
+                65536
+            ),
+            Some(Finding::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_a_signed_chunk_size() {
+        // RFC 9112 7.1: chunk-size = 1*HEXDIG. No sign.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nabcde\r\n0\r\n\r\n",
+                65536
+            ),
+            Some(Finding::Malformed)
+        );
+    }
+
+    #[test]
+    fn rejects_a_whitespace_padded_chunk_size() {
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n 5\r\nabcde\r\n0\r\n\r\n",
+                65536
+            ),
+            Some(Finding::Malformed)
+        );
+    }
+
+    #[test]
+    fn accepts_an_empty_list_element_before_the_coding() {
+        // RFC 9110 5.6.1.2: a recipient MUST parse and ignore empty list
+        // elements.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: ,chunked\r\n\r\n0\r\n\r\n",
+                65536
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_an_empty_list_element_after_the_coding() {
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked,\r\n\r\n0\r\n\r\n",
+                65536
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_a_token_method() {
+        // M-SEARCH is a valid RFC 9110 token (RFC 9112 3.1) and must not
+        // be rejected as malformed.
+        assert_eq!(
+            inspect(b"M-SEARCH * HTTP/1.1\r\nHost: x\r\n\r\n", 65536),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_a_tchar_trailer_name() {
+        // Content_MD5 is a valid RFC 9110 token.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nContent_MD5: v\r\n\r\n",
+                65536
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_a_framing_field_as_a_trailer() {
+        // RFC 9110 6.5.1: framing fields cannot be processed outside the
+        // header section.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nContent-Length: 5\r\n\r\n",
+                65536
+            ),
+            Some(Finding::HeaderSmuggling)
+        );
+    }
+
+    #[test]
+    fn rejects_transfer_encoding_on_http_1_0() {
+        // RFC 9112 6.1: Transfer-Encoding does not exist in HTTP/1.0.
+        assert_eq!(
+            inspect(
+                b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                65536
+            ),
+            Some(Finding::HeaderSmuggling)
         );
     }
 }
