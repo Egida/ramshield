@@ -723,6 +723,40 @@ fn update_ip_vacant_and_capacity() {
     assert_eq!(store.len(), 1);
 }
 
+/// The vacant branch of `update_ip` publishes the caller's record. If that
+/// record is blocked, the blocked index and the counter have to know about
+/// it: the store's own invariant is that every blocked record is in
+/// `blocked_set` and every entry in `blocked_set` is a blocked record.
+///
+/// F-14: the vacant branch published the record and then updated the
+/// index outside the shard lock, and it never updated it at all - the
+/// published record's block state never reached the index.
+#[test]
+fn an_update_that_publishes_a_blocked_record_indexes_it() {
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 96, 0, 1));
+    let ram_lim = 64 * 1024 * 1024;
+
+    let mut blocked = blank_record(ip);
+    blocked.block_state = BlockState::Blocked {
+        reason: BlockReason::HighRps,
+        since_ns: 1_000,
+    };
+    let (_, stored) = store.update_ip(ip, blocked, ram_lim, |_| ());
+    assert!(stored, "the record was not published");
+    assert_eq!(
+        store.blocked_count.load(Ordering::Relaxed),
+        1,
+        "the blocked record was not counted"
+    );
+    assert!(
+        store.blocked_set.get(&ip).is_some(),
+        "the blocked record was not indexed"
+    );
+    assert_store_invariants(&store);
+}
+
 /// Check all secondary indexes are consistent with the authoritative store state.
 /// Panics with a diagnostic on the first divergence.
 fn assert_store_invariants(store: &Store) {

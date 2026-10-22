@@ -127,11 +127,15 @@ impl Store {
                         Err(observed) => current = observed,
                     }
                 }
-                v.insert(new_entry);
-                if new_blocked {
-                    self.blocked_count.fetch_add(1, Ordering::Relaxed);
-                    self.blocked_set.insert(key, ());
-                }
+                // `insert_entry` keeps the shard lock until the guard is
+                // dropped, so the publication, the blocked index and the
+                // size accounting land in one critical section. `insert`
+                // releases the lock here, and a concurrent unblock or
+                // remove landing in that window would decrement a counter
+                // that is still zero - the same defect F-9 removed from
+                // `block_ip`, one function over.
+                let entry = v.insert_entry(new_entry);
+                self.sync_blocked_index(key, false, new_blocked);
                 if new_has_ttl {
                     self.ttl_entries.fetch_add(1, Ordering::Relaxed);
                 }
@@ -148,6 +152,7 @@ impl Store {
                         "store insert accounted"
                     );
                 }
+                drop(entry); // release the shard lock after all bookkeeping
                 Ok(())
             }
         }
@@ -373,6 +378,7 @@ impl Store {
                 };
                 let mut rec = default;
                 let out = f(&mut rec);
+                let new_blocked = rec.block_state != BlockState::Clean;
                 let old_had_ttl = e.expires_at.is_some();
                 e.value = Value::IpRecord(rec);
                 e.expires_at = None;
@@ -381,13 +387,14 @@ impl Store {
                     self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
                 }
                 // Blocked index update while still holding shard lock.
-                if was_blocked {
-                    self.blocked_count.fetch_sub(1, Ordering::Relaxed);
-                    self.blocked_set.remove(&key);
-                }
+                self.sync_blocked_index(key, was_blocked, new_blocked);
                 let new_size = std::mem::size_of::<Entry>() + std::mem::size_of::<IpAddr>();
-                drop(o); // release shard lock after all bookkeeping
+                // The size accounting belongs inside the lock, like
+                // `insert` and `block_ip` do it: outside the lock the
+                // capacity gate can be momentarily exceeded by a
+                // concurrent insert.
                 self.apply_growth_size_only(old_size, new_size);
+                drop(o); // release shard lock after all bookkeeping
                 (out, true)
             }
             dashmap::Entry::Vacant(v) => {
@@ -411,14 +418,24 @@ impl Store {
                         Err(observed) => current = observed,
                     }
                 }
-                v.insert(Entry {
+                // The publication, the blocked index and the size
+                // accounting share one critical section. `insert` would
+                // release the shard lock before the index was updated -
+                // and the published record's block state would never
+                // reach the index at all, so a blocked record the caller
+                // published would be invisible to every reader that asks
+                // the index.
+                let new_blocked = rec.block_state != BlockState::Clean;
+                let entry = v.insert_entry(Entry {
                     value: Value::IpRecord(rec),
                     expires_at: None,
                 });
+                self.sync_blocked_index(key, false, new_blocked);
                 self.traffic
                     .used_bytes
                     .fetch_add(entry_size as u64, Ordering::Relaxed);
                 self.total_inserts.fetch_add(1, Ordering::Relaxed);
+                drop(entry); // release the shard lock after all bookkeeping
                 (out, true)
             }
         }
