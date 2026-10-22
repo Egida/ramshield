@@ -230,7 +230,7 @@ lives in `ramshield-metrics`, which does not depend on this crate.
 `update_subnet_index`, `evict_expired`), `ramshield-enforcement`
 (`block_ip`, `unblock_ip`, and the WAL appends).
 
-**Read by:** `ramshield`, `ramshield-detection`, `ramshield-enforcement`, `ramshield-forecasting`, `ramshield-protocol`. `ramshield-protocol` declares the dependency without using it in source; the others are `ramshield-enforcement` (`get`, `get_all_blocked_ips`, `is_blocked_by_cidr`, `active_cidrs`), `ramshield-forecasting` (the traffic counters) and the root package's IPC handlers (`get`, `get_stats`).
+**Read by:** `ramshield`, `ramshield-detection`, `ramshield-enforcement`, `ramshield-forecasting`. The others are `ramshield-enforcement` (`get`, `get_all_blocked_ips`, `is_blocked_by_cidr`, `active_cidrs`), `ramshield-forecasting` (the traffic counters) and the root package's IPC handlers (`get`, `get_stats`).
 
 ## Benchmarks
 

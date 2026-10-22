@@ -42,7 +42,7 @@ are the ones used here.
 | F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | **FIXED** — `ramshield-types` and `ramshield-storage` are gone from `crates/ramshield-analytics/Cargo.toml`; the crate has no workspace dependency at all | no |
 | F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
-| F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | OPEN — no file under `crates/ramshield-protocol/src/` mentions `ramshield_storage` | no — remove the path dependency, or use it |
+| F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | **FIXED** — the dependency is gone from `crates/ramshield-protocol/Cargo.toml`; the crate declares only `ramshield-types` | no |
 | F26 | `FAIL_SAFE_BEHAVIOR.md` claims a global fail-closed posture the dataplane does not have | P2 (doc) | OPEN — the global claim contradicts the document's own section 1 and the BPF program | no — restate the claim per subsystem |
 | F27 | `scripts/prod_smoke.sh` claims checks it does not perform, and it deletes an env-overridable path | P1 (data loss) | OPEN — the unblock, CIDR and TTL checks are advertised and absent, and `rm -rf "$WAL_DIR"` runs on a path the environment can override | no — the cleanup needs a guard, the checks need to exist |
 | F28 | The advanced CI workflow runs the benchmarks as tests and masks the benchmark build failure | P2 (CI) | OPEN — `cargo test --all-targets` and `cargo bench --no-run || true` | no |
@@ -1088,8 +1088,10 @@ all green).
 
 ## F25 — `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses
 
-**Status:** OPEN (P3) — found while fixing F22, which was the same defect
-in the analytics crate.
+**Status:** FIXED (P3) — the dependency is out of
+`crates/ramshield-protocol/Cargo.toml`; the crate declares only
+`ramshield-types`. Found while fixing F22, which was the same defect in
+the analytics crate.
 
 **What it is.** `crates/ramshield-protocol/Cargo.toml` declares
 `ramshield-storage` as a path dependency. No file under
@@ -1107,12 +1109,14 @@ storage crate into the protocol crate's dependency graph. It also makes
 the storage README's "read by" list lie in the other direction: it claims
 a reader that does not exist.
 
-**What would close it.** The same change F22 got: drop the path
-dependency, update the storage README's "read by" list, and let the two
-readme guards (`crates/ramshield-storage/tests/readme_claims.rs` and
-`crates/ramshield-protocol/tests/readme_claims.rs`) keep them in step.
+**What closed it.** The same change F22 got: the path dependency is
+dropped, the storage README's "read by" list loses `ramshield-protocol`,
+and the two readme guards (`crates/ramshield-storage/tests/readme_claims.rs`
+and `crates/ramshield-protocol/tests/readme_protocol.rs`) keep them in
+step - the storage guard fails if the README's list and the manifests
+disagree, which is exactly how the stale entry was caught.
 
-**Closure criterion.** The dependency is gone, or the crate uses it.
+**Closure criterion.** The dependency is gone, or the crate uses it. **Met.**
 
 
 ## F29 — The Subnet Stress Pin gate asserts against a fixed four-second sleep
