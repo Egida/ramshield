@@ -29,8 +29,8 @@ centralized metrics store, each subsystem would maintain its own counters.
 ### Atomic counters
 
 Every hot-path counter is an `Arc<AtomicU64>`; the increment is a
-`fetch_add`, so the event path never takes a lock. `Metrics` has 81 public
-fields — 76 counters plus the two ring buffers and their cap. One flag
+`fetch_add`, so the event path never takes a lock. `Metrics` has 85 public
+fields — 80 counters plus the two ring buffers and their cap. One flag
 (`xdp_projection_active`) is an `AtomicBool`, and three caches are behind
 `Mutex`.
 
@@ -139,6 +139,8 @@ pub struct DashboardSnapshot {
     pub xdp_projection_stale: bool,
     pub xdp_configured: bool,
     pub protection_state: ProtectionState,
+    pub native_capture_workers_running: u64,
+    pub native_capture_worker_failures: u64,
 }
 ```
 
@@ -190,6 +192,16 @@ Queue pressure comes in two gauges:
 |---|---|
 | `ramshield_ingest_channel_depth` | Current buffered events in the bounded ingest queue. |
 | `ramshield_ingest_channel_depth_peak` | High-water mark since process start. |
+
+The native capture worker counters say whether the capture path is
+actually running:
+
+| Metric | Meaning |
+|---|---|
+| `ramshield_native_capture_workers_expected` | Worker slots the capture path plans to run. |
+| `ramshield_native_capture_workers_started` | Slots that were actually started — a spawn failure is a real loss of capture capacity. |
+| `ramshield_native_capture_workers_running` | Slots alive right now. A slot between two capture attempts still counts as alive. |
+| `ramshield_native_capture_worker_failures_total` | Capture attempts that failed. |
 
 The instantaneous depth says how full the queue is right now; the peak says
 how close it has ever come to saturation. Read together with the drop
@@ -260,9 +272,9 @@ Measured in the workspace `hot_paths` bench (see `docs/BENCHMARKS.md`):
 
 ## Testing
 
-16 tests: JSON-cache invalidation for the block log and the batch history,
+17 tests: JSON-cache invalidation for the block log and the batch history,
 the 1-second Prometheus render cache, the ingest depth and peak gauges,
 the IPC rejection breakdown series, the bloom series and the k=2
 false-positive formula, the XDP staleness and apply-failure counters, the
-native-ingest drop counters, and block-log ring eviction at the configured
-cap.
+native-ingest drop counters, the native capture worker counters, and
+block-log ring eviction at the configured cap.

@@ -32,7 +32,7 @@ are the ones used here.
 | F4 | XDP LRU eviction residual not stated | P3 (doc) | **CLOSED** — `79f4eac` | no |
 | **F1** | **CGNAT shared-memory lookup semantics** | **P1/P2** | **CLOSED** — `d1f4a81`, see `docs/development/CGNAT_SHM_LOOKUP_FIXES.md` | no — the ABI question dissolved (see below) |
 | **F1a** | **A /0 rule is not representable in the SHM table** | **P2** | **OPEN** — a design decision for the owner, not a defect | yes — retain the representation, change it, or use a separate mechanism |
-| **F2** | **Native capture worker lifecycle** | **P2** | **OPEN** | **yes — restart vs. degrade vs. refuse readiness** |
+| **F2** | **Native capture worker lifecycle** | **P2** | **FIXED** — the workers are started where their outcome is known, a failed capture is retried a bounded number of times, and a dead capture is visible in the metrics, the dashboard and the health reason | no — the owner decided: degrade, keep serving |
 | F6 | `BACKLOG.md` is not a reliable master ledger | P2 (doc) | CLOSED — the owner lifted the fence and the file was re-pointed at `master` | no — the fence was lifted by the owner on 2026-10-21 |
 | F7 | Performance/RSS claims need workload evidence | P2 (process) | OPEN | yes — the release-claims policy |
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
@@ -206,8 +206,13 @@ This is a follow-up, not a defect in the shipped behaviour.
 
 ## F2 — Native capture worker lifecycle
 
-**Status:** OPEN
-**Files:** `src/engine/native.rs`, `src/engine/boot.rs`
+**Status:** FIXED (P2) — the code is on `fix/f2-native-capture-lifecycle`
+(PR #58); the policy half is the owner's and it is decided: **degrade,
+keep serving**.
+
+**Files:** `src/engine/native.rs`, `src/engine/boot.rs`,
+`src/engine/mod.rs`, `src/dashboard/mod.rs`,
+`crates/ramshield-metrics/src/`
 **Severity:** P2
 
 ### The defect
@@ -235,19 +240,49 @@ assurance. That asymmetry is the defect.
 
 ### Required fix
 
-1. Handle every worker-spawn result explicitly.
-2. Track expected, started, running and failed workers.
-3. Define bounded restart behavior or a clear failure policy.
-4. Expose native capture status through existing health/metrics mechanisms.
-5. Decide whether total capture failure should refuse readiness or mark the
-   service degraded.
-6. Test partial startup failure, total failure, runtime exit, shutdown and
-   restart exhaustion.
+1. **Handle every worker-spawn result explicitly.** Done. The workers are
+   now created in `spawn()` instead of inside the supervisor thread, so
+   the spawn result is known before the daemon is told the capture path
+   started. `start_workers` counts the starts and the failures; a run in
+   which no worker started returns an error instead of a supervisor that
+   looks healthy.
+2. **Track expected, started, running and failed workers.** Done.
+   `ramshield_native_capture_workers_expected`,
+   `ramshield_native_capture_workers_started`,
+   `ramshield_native_capture_workers_running` and
+   `ramshield_native_capture_worker_failures_total`, plus the same
+   numbers in the dashboard snapshot and in `/api/healthz`.
+3. **Define bounded restart behavior or a clear failure policy.** Done.
+   `capture_slot` makes at most three capture attempts, a second apart,
+   and stops at once when the daemon is shutting down.
+4. **Expose native capture status through existing health/metrics
+   mechanisms.** Done: the four Prometheus series, the dashboard snapshot
+   and `/api/healthz`.
+5. **Decide whether total capture failure should refuse readiness or mark
+   the service degraded.** Done — the owner decided on 2026-10-22:
+   **degrade, keep serving.** Capture is observation, not enforcement:
+   the detection pipeline has a second event source (the IPC path feeds
+   the same channel) and XDP/netfilter remain the enforcement layers, so
+   a telemetry fault must not become an enforcement outage. The daemon
+   reports `Degraded` with the health reason `native capture stopped`,
+   keeps `is_healthy` true and keeps serving. The node DaemonSet enables
+   capture and the systemd unit has `Restart=on-failure`, so refusing
+   readiness at runtime would have turned a telemetry fault into a crash
+   loop.
+6. **Test partial startup failure, total failure, runtime exit, shutdown
+   and restart exhaustion.** Done — `src/engine/tests/native_capture.rs`,
+   eleven tests. The spawner and the capture attempt are parameters, so
+   every case is produced deterministically, without a NIC and without a
+   race.
 
 ### Closure criterion
 
 Capture cannot silently disappear while the service continues to imply that
 the configured subsystem is functioning.
+
+**Met.** A capture that never started, or that died, is visible in the
+metrics, in the dashboard snapshot and in the health reason, and the
+service says `Degraded`.
 
 ### Notes for whoever picks it up
 
@@ -256,11 +291,11 @@ the configured subsystem is functioning.
   `native_ingest.enabled` defaults to `false`, so the blast radius is limited
   to deployments that enable it.
 - It should be prioritized **after** the CGNAT fix (F1).
-- Item 5 is a **policy decision for the owner**: restart the worker, fail the
-  feature, or degrade the service. The in-repo precedent is the detection
-  path, which refuses readiness when its workers fail to start — following
-  that precedent is a defensible default, but it changes the daemon's startup
-  contract and so is worth an explicit decision rather than an inference.
+- Item 5 was a **policy decision for the owner**: restart the worker, fail
+  the feature, or degrade the service. The in-repo precedent is the
+  detection path, which refuses readiness when its workers fail to start.
+  The owner decided on 2026-10-22 that the capture path **degrades the
+  service and keeps serving**; the reasoning is in the section above.
 - The metrics surface added by `60ce0f1` (`ramshield_native_ingest_drops_*`)
   is the natural place to hang a capture-health gauge.
 

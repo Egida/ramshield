@@ -96,6 +96,50 @@ fn native_ingest_drop_counters_are_exported() {
 }
 
 #[test]
+fn the_capture_worker_counters_are_exported() {
+    // F-2: the native capture path used to lose its workers without a
+    // word. The counters are how an operator sees it.
+    let m = Metrics::new();
+    let rendered = m.render_prometheus();
+    for series in [
+        "ramshield_native_capture_workers_expected 0",
+        "ramshield_native_capture_workers_started 0",
+        "ramshield_native_capture_workers_running 0",
+        "ramshield_native_capture_worker_failures_total 0",
+    ] {
+        assert!(
+            rendered.contains(series),
+            "the capture counter `{series}` must be exported:\n{rendered}"
+        );
+    }
+
+    m.set_native_capture_workers_expected(8);
+    m.set_native_capture_workers_started(7);
+    m.inc_native_capture_workers_running();
+    m.inc_native_capture_worker_failure();
+    let rendered = m.render_prometheus();
+    assert!(
+        rendered.contains("ramshield_native_capture_workers_expected 8"),
+        "the planned worker count must be exported:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_native_capture_workers_started 7"),
+        "the started worker count must be exported:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_native_capture_workers_running 1"),
+        "the running worker count must be exported:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("ramshield_native_capture_worker_failures_total 1"),
+        "the failure counter must be exported:\n{rendered}"
+    );
+
+    m.dec_native_capture_workers_running();
+    assert_eq!(m.native_capture_workers_running.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn ingest_channel_depth_peak_is_monotonic_and_exported() {
     let m = Metrics::new();
     m.set_channel_depth(10);

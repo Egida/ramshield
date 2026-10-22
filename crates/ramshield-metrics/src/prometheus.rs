@@ -98,6 +98,30 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_native_capture_workers_expected",
+            self.native_capture_workers_expected.load(Ordering::Relaxed),
+            "Capture worker slots the native capture path plans to run.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_workers_started",
+            self.native_capture_workers_started.load(Ordering::Relaxed),
+            "Capture worker slots that were actually started.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_workers_running",
+            self.native_capture_workers_running.load(Ordering::Relaxed),
+            "Capture worker slots alive right now.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_worker_failures_total",
+            self.native_capture_worker_failures.load(Ordering::Relaxed),
+            "Capture attempts that failed.",
+            "counter"
+        ));
+        out.push_str(&emit!(
             "ramshield_ingest_channel_depth",
             self.ingest_channel_depth.load(Ordering::Relaxed),
             "Current buffered events in the bounded ingest queue.",
