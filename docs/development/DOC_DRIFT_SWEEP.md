@@ -1,8 +1,8 @@
 # I-025 — documentation drift sweep across the crate READMEs
 
-**Status:** OPEN, partially worked. **62 claims: 40 fixed, 22 open.** The
-open ones are spread over four crate READMEs: `ramshield-config` 1,
-`ramshield-metrics` 7, `ramshield-forecasting` 8, `ramshield-analytics` 6. This is the result of a read-only
+**Status:** OPEN, partially worked. **62 claims: 48 fixed, 14 open.** The
+open ones are the two crate READMEs still to rewrite:
+`ramshield-forecasting` 8 and `ramshield-analytics` 6. This is the result of a read-only
 sweep of the claims in backlog row I-025 ("Dependency/documentation
 drift"), carried out on branch `fix/i-013-synproxy-fixture-parity` at
 `bf01372` (origin/master was `bd417cd` at the time of the sweep).
@@ -145,6 +145,8 @@ tokens `as_str()` returns.
 
 **F7 (MEDIUM)** `crates/ramshield-metrics/README.md:61`
 > `pub reason: String,    // "rate_limit", "subnet_burst", "pulse_wave", "manual"`
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
 
 Same defect as F6 (`src/types.rs:21-26` confirms field exists, comment enumerates wrong tokens).
 
@@ -473,20 +475,32 @@ Code: same as F41 — the store has no LRU eviction to verify (see F41 grep). (I
 **F45 (MEDIUM)** `crates/ramshield-metrics/README.md:30`
 > `batch_history: Mutex<VecDeque<BatchRecord>>,  // last 120 batch stats`
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
+
 Code: `crates/ramshield-metrics/src/lib.rs:25` `const HISTORY: usize = 80;`.
 
 **F46 (MEDIUM)** `crates/ramshield-metrics/README.md:39`
 > "The forecaster reads these to compute Holt-Winters forecasts"
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
+
 Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffic` counters, never `Metrics::get_batch_history` (`history.rs:84`).
 
 **F47 (MEDIUM)** `crates/ramshield-metrics/README.md:41-50` — `BatchRecord { timestamp_ms, total_events, unique_ips, rps_estimate, blocked_new, subnet_blocked, cold_skip_pct }`. Code `crates/ramshield-metrics/src/types.rs:4-18`: `ts_ms, events, unique_ips, promoted, cold_skipped, promoted_events, cold_skipped_events, blocks, hot_subnets`.
 
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
+
 **F48 (MEDIUM)** `crates/ramshield-metrics/README.md:71-85` — `DashboardSnapshot` field list. Code `crates/ramshield-metrics/src/types.rs:48-88`: `ts_ms, uptime_secs, ips_tracked, blocked_total, ram_bytes, ram_limit_mb, ram_pct, cpu_usage, memory_usage_mb, total_ram_mb, ipc_requests, events_ingested, events_rejected, frames_rejected_total, channel_depth, events_shed, batches_total, promotions, cold_skipped, blocks_applied, pipeline, is_healthy, health_reason, xdp_active, wal_lsn, pending_expirations, xdp_apply_failures, xdp_projection_stale, xdp_configured, protection_state`. No `total_events`, `blocked_ips`, `rps_current`, `forecast_hw`, `forecast_z`, `entropy`, `batch_history`, `block_log`, `subnets`, `modules`.
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
 
 **F49 (MEDIUM)** `crates/ramshield-metrics/README.md:25-32` — `Metrics { requests, blocks, ingested, rejected, batch_history, block_log }`. Code `crates/ramshield-metrics/src/lib.rs:28-30`: `requests_total`, `blocks_total`, `events_ingested`, `events_rejected` (plus ~40 more fields).
 
-**F50 (MEDIUM)** Phantom-crate callers across READMEs: `crates/ramshield-metrics/README.md:167,169` (`ramshield-engine`, `ramshield-dashboard`, `ramshield-ipc`) still name crates that do not exist. The `ramshield-config`, `ramshield-storage`, `ramshield-enforcement` and `ramshield-protocol` mentions are fixed: the dashboard and the IPC server are modules of the root package, not crates of their own.
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
+
+**F50 (MEDIUM)** Phantom-crate callers across READMEs — FIXED. The `ramshield-config`, `ramshield-storage`, `ramshield-enforcement`, `ramshield-protocol` and `ramshield-metrics` READMEs no longer name `ramshield-engine`, `ramshield-ipc`, `ramshield-wal` or `ramshield-dashboard`: the dashboard and the IPC server are modules of the root package, and there is no engine crate.
+
+**Status: FIXED.** All five READMEs that named a phantom crate now name the real ones.
 
 **F51 (LOW)** `crates/ramshield-types/README.md:24` — "Nine workspace crates need to share" → 7 crates actually depend on `ramshield-types` (F2 grep).
 **Status: FIXED.** The README now says eight crates - seven plus the root package - and names them.
@@ -495,6 +509,8 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 **F52 (LOW)** `crates/ramshield-forecasting/README.md:50` + `:98` + `src/lib.rs:69` — "O(1) memory (3 floats)", "not part of the public API", "3 floats = 24 bytes". Code: `src/lib.rs:71-76` `EwmAVar { ewma: f64, var_ewma: f64, count: u64, alpha: f64 }` = 32 B; `pub struct` → public type.
 
 **F53 (LOW)** `crates/ramshield-metrics/README.md:177` — "14 tests" → 16 static `#[test]` markers in the crate.
+
+**Status: FIXED.** The README now matches the crate: the real field lists, the real test count, the real dependency and dependent lists, the real Prometheus series names and the real system-usage signature. `crates/ramshield-metrics/tests/readme_claims.rs` is the guard.
 
 **F54 (LOW)** `crates/ramshield-storage/README.md:141` — "38 tests" → 42 static `#[test]` markers in the crate.
 
@@ -525,7 +541,6 @@ Code: `crates/ramshield-forecasting/src/forecaster.rs:85-87` reads `store.traffi
 
 - Enforcement `XdpApplier` trait signature vs `README.md:91-95`; enforcement crate dependency list vs `README.md:135`.
 - `crates/ramshield-xdp/README.md:52` fail-open/fallback wording vs `src/engine/boot.rs` XDP attach error path.
-- `crates/ramshield-metrics/README.md:155` `get_system_usage()` return tuple / `/proc` claim (src/system.rs not re-read this pass).
 - `crates/ramshield-analytics/README.md:55` BENCHMARK_BASELINES content (file exists; analytics entries unverified).
 - `crates/ramshield-cgnat/README.md` shared-memory table claims (publish/read parity, `ShmTableManager::publish_rule`) — not re-verified this pass.
 - `crates/ramshield-detection/README.md` doc cross-references (`docs/OPERATIONS.md`, `docs/DEFENSE_MODEL.md`) and each signal-family sentence against `crates/ramshield-detection/src/`.
