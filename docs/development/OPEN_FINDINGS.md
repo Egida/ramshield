@@ -1034,7 +1034,6 @@ the dependency was dropped.
 ## F23 — `forecasting.min_entropy` is a config knob nothing reads
 
 **Status:** FIXED — the daemon constructs the forecaster and the forecaster reads the knob.
-never reads it.
 
 **Severity:** P3 (hygiene)
 
