@@ -1380,8 +1380,6 @@ name = "ramshield-analytics"
 version = "0.1.0"
 dependencies = [
  "criterion 0.5.1",
- "ramshield-storage",
- "ramshield-types",
 ]
 
 [[package]]

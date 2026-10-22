@@ -80,9 +80,8 @@ and `SubnetHll::insert`.
 
 ## Dependencies
 
-Declared: `ramshield-types` and `ramshield-storage`. Neither is used in
-the crate's source today — the crate is self-contained. `criterion` is a
-dev-dependency.
+Declared: none. The crate is self-contained — `hll.rs`, `cms.rs` and
+`welford.rs` use no workspace crate. `criterion` is a dev-dependency.
 
 ## Tests
 

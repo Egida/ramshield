@@ -39,9 +39,10 @@ are the ones used here.
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
 | F11 | Crate README documentation drift (62 claims) | P2 (docs) | **FIXED** — all 62 claims are fixed; every crate README the sweep covers is now pinned by a test | no |
-| F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | OPEN — `ramshield-types` and `ramshield-storage` are declared in `crates/ramshield-analytics/Cargo.toml`; no file under `crates/ramshield-analytics/src/` mentions either. The crate is self-contained | no — remove the two path dependencies, or use them |
+| F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | **FIXED** — `ramshield-types` and `ramshield-storage` are gone from `crates/ramshield-analytics/Cargo.toml`; the crate has no workspace dependency at all | no |
 | F24 | The removal paths drop the blocked index entry after the shard lock is released | P3 (latent, narrow) | **FIXED** — `Store::remove` and `evict_batch` now book under the shard lock, through the entry API | no |
 | F23 | `forecasting.min_entropy` is a config knob nothing reads | P3 (hygiene) | OPEN — the config crate validates it (finite, >= 0) and the forecasting crate never reads it; the entropy gate is a hard-coded event count | no — use it, or drop it from the config |
+| F25 | `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses | P3 (hygiene) | OPEN — no file under `crates/ramshield-protocol/src/` mentions `ramshield_storage` | no — remove the path dependency, or use it |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **FIXED** — the vacant branch of `insert()` and of `update_ip()` now publish with `insert_entry`, which keeps the shard lock until the guard is dropped, and the index and the size accounting land in that critical section | no |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -931,26 +932,26 @@ counters.
 
 ## F22 — the analytics crate declares two dependencies it never uses
 
-**Status:** OPEN — the dependencies are declared and unused; nothing has been
-removed yet.
+**Status:** FIXED (P3) — both path dependencies are gone.
 
-**Severity:** P3 (hygiene)
-
-`crates/ramshield-analytics/Cargo.toml` declares `ramshield-types` and
-`ramshield-storage` as path dependencies. No file under
-`crates/ramshield-analytics/src/` mentions either: the crate is
+**What it was.** `crates/ramshield-analytics/Cargo.toml` declared
+`ramshield-types` and `ramshield-storage` as path dependencies. No file
+under `crates/ramshield-analytics/src/` mentions either: the crate is
 `hll.rs`, `cms.rs`, `welford.rs` and a `lib.rs` that only declares the
-three modules. The two dependencies cost build time and mislead a reader
+three modules. The two dependencies cost build time and misled a reader
 into thinking the crate is wired to the store or to the shared types.
 
-The README rewrite that came with this finding states the fact rather
-than hiding it, and `crates/ramshield-analytics/tests/readme_claims.rs`
-pins the declared list against `Cargo.toml` — so if the dependencies are
-removed, the README has to change with them.
+**What changed.** The `[dependencies]` section is empty. The README's
+dependency paragraph now says so, and
+`crates/ramshield-analytics/tests/readme_claims.rs` pins the declared
+list against `Cargo.toml` - so the two cannot drift apart again. The
+guard had to learn one thing: a crate with no dependencies has no
+`[dependencies]` section at all, and the old parse asserted one existed.
 
-**Closure criterion.** The two path dependencies are removed from
-`crates/ramshield-analytics/Cargo.toml` and the README's dependency list
-follows, or the crate actually uses one of them.
+`Cargo.lock` loses the two edges with it, and the storage crate's README
+follows: its "read by" list named `ramshield-analytics` as a reader, and
+it no longer is one. The storage crate's own guard caught that the moment
+the dependency was dropped.
 
 ## F23 — `forecasting.min_entropy` is a config knob nothing reads
 
@@ -1045,3 +1046,31 @@ path only ever adds one, so the check is not racy in the thread that runs
 it. **It is a race, not a proof:** with 200,000 iterations it caught the
 old code in 2 runs out of 5, and it never fails on the fixed code (5 runs,
 all green).
+
+## F25 — `ramshield-protocol` declares a dependency on `ramshield-storage` it never uses
+
+**Status:** OPEN (P3) — found while fixing F22, which was the same defect
+in the analytics crate.
+
+**What it is.** `crates/ramshield-protocol/Cargo.toml` declares
+`ramshield-storage` as a path dependency. No file under
+`crates/ramshield-protocol/src/` mentions `ramshield_storage`: the crate
+is the wire protocol - `auth.rs`, the message types and the replay store -
+and it uses `ramshield-types`, `serde`, `serde_json`, `hmac`, `sha2`,
+`hex` and `ahash`.
+
+The storage crate's own README says so: its "read by" list names
+`ramshield-protocol` and notes that the dependency is declared without
+being used in source. The same sentence, the same defect.
+
+**Why it matters.** The dependency costs build time and drags the whole
+storage crate into the protocol crate's dependency graph. It also makes
+the storage README's "read by" list lie in the other direction: it claims
+a reader that does not exist.
+
+**What would close it.** The same change F22 got: drop the path
+dependency, update the storage README's "read by" list, and let the two
+readme guards (`crates/ramshield-storage/tests/readme_claims.rs` and
+`crates/ramshield-protocol/tests/readme_claims.rs`) keep them in step.
+
+**Closure criterion.** The dependency is gone, or the crate uses it.

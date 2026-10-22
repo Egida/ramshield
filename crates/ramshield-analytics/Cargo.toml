@@ -8,8 +8,9 @@ license = "MIT"
 name = "ramshield_analytics"
 
 [dependencies]
-ramshield-types = { path = "../ramshield-types", version = "0.1.0" }
-ramshield-storage = { path = "../ramshield-storage", version = "0.1.0" }
+# The crate is self-contained: hll.rs, cms.rs and welford.rs use no
+# workspace crate. F-22 removed the two path dependencies that were
+# declared and never used.
 
 [dev-dependencies]
 criterion = "0.5"
