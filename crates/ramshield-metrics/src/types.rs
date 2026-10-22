@@ -85,6 +85,11 @@ pub struct DashboardSnapshot {
     pub xdp_projection_stale: bool,
     pub xdp_configured: bool,
     pub protection_state: ProtectionState,
+    /// Capture worker slots alive right now. Zero when the native capture
+    /// path is not running - and non-zero only while it is.
+    pub native_capture_workers_running: u64,
+    /// Capture attempts that have failed since the daemon started.
+    pub native_capture_worker_failures: u64,
 }
 
 impl Default for DashboardSnapshot {
@@ -127,6 +132,8 @@ impl Default for DashboardSnapshot {
             xdp_projection_stale: false,
             xdp_configured: false,
             protection_state: ProtectionState::Starting,
+            native_capture_workers_running: 0,
+            native_capture_worker_failures: 0,
         }
     }
 }

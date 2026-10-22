@@ -115,6 +115,11 @@ async fn api_healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_j
             "xdp_active": snapshot.xdp_active,
             "xdp_configured": snapshot.xdp_configured,
             "protection_state": snapshot.protection_state,
+            // The native capture path is observation, not enforcement: a
+            // dead capture leaves the service degraded, not unready, and
+            // this is where an operator sees that.
+            "native_capture_workers_running": snapshot.native_capture_workers_running,
+            "native_capture_worker_failures": snapshot.native_capture_worker_failures,
         })),
     )
 }
@@ -536,7 +541,9 @@ async fn api_stream(
                 "health_reason": snapshot.health_reason,
                 "xdp_active": snapshot.xdp_active,
                 "xdp_configured": snapshot.xdp_configured,
-                "protection_state": snapshot.protection_state
+                "protection_state": snapshot.protection_state,
+                "native_capture_workers_running": snapshot.native_capture_workers_running,
+                "native_capture_worker_failures": snapshot.native_capture_worker_failures
             },
             "pipeline": pipeline_stages
         });

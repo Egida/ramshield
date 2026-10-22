@@ -84,6 +84,39 @@ impl Metrics {
             .fetch_add(n, Ordering::Relaxed);
     }
 
+    /// The native capture path plans this many worker slots (gauge). Set
+    /// once, when the capture path starts.
+    pub fn set_native_capture_workers_expected(&self, n: u64) {
+        self.native_capture_workers_expected
+            .store(n, Ordering::Relaxed);
+    }
+
+    /// This many capture worker slots were actually started (gauge). A
+    /// spawn failure is a real loss of capture capacity, so it is
+    /// counted here rather than swallowed.
+    pub fn set_native_capture_workers_started(&self, n: u64) {
+        self.native_capture_workers_started
+            .store(n, Ordering::Relaxed);
+    }
+
+    /// A capture worker slot became alive (gauge).
+    pub fn inc_native_capture_workers_running(&self) {
+        self.native_capture_workers_running
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A capture worker slot exited (gauge).
+    pub fn dec_native_capture_workers_running(&self) {
+        self.native_capture_workers_running
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// A capture attempt failed (counter, monotonic).
+    pub fn inc_native_capture_worker_failure(&self) {
+        self.native_capture_worker_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Patch A: total bloom capacity in bits (gauge). Written once at
     /// detection construction; `bloom_fp_ppm` is derived from it at render.
     pub fn set_bloom_bits(&self, bits: u64) {

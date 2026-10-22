@@ -67,6 +67,19 @@ pub struct Metrics {
     /// detection pipeline is gone, not merely busy — a strictly more serious
     /// condition, and it is broken out so an operator can tell the two apart.
     pub native_ingest_drops_disconnected: Arc<AtomicU64>,
+    /// How many capture worker slots the native path plans to run (gauge).
+    /// Set once, when the capture path starts.
+    pub native_capture_workers_expected: Arc<AtomicU64>,
+    /// How many of those slots were actually started (gauge). A spawn
+    /// failure is a real loss of capture capacity, so it is counted here
+    /// rather than swallowed.
+    pub native_capture_workers_started: Arc<AtomicU64>,
+    /// How many capture worker slots are alive right now (gauge). A slot
+    /// that is between two capture attempts is still alive, so a retry
+    /// does not read as "capture gone".
+    pub native_capture_workers_running: Arc<AtomicU64>,
+    /// How many capture attempts have failed (counter, monotonic).
+    pub native_capture_worker_failures: Arc<AtomicU64>,
     /// Instantaneous bounded ingest-queue occupancy (gauge; written by the
     /// engine snapshot path — see Engine::dashboard_snapshot / get_module_stats).
     pub ingest_channel_depth: Arc<AtomicU64>,
@@ -225,6 +238,10 @@ impl Metrics {
             events_shed: Arc::new(AtomicU64::new(0)),
             native_ingest_drops: Arc::new(AtomicU64::new(0)),
             native_ingest_drops_disconnected: Arc::new(AtomicU64::new(0)),
+            native_capture_workers_expected: Arc::new(AtomicU64::new(0)),
+            native_capture_workers_started: Arc::new(AtomicU64::new(0)),
+            native_capture_workers_running: Arc::new(AtomicU64::new(0)),
+            native_capture_worker_failures: Arc::new(AtomicU64::new(0)),
             ingest_channel_depth: Arc::new(AtomicU64::new(0)),
             ingest_channel_depth_peak: Arc::new(AtomicU64::new(0)),
             active_cidr_blocks: Arc::new(AtomicU64::new(0)),
