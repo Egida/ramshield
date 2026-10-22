@@ -38,7 +38,8 @@ are the ones used here.
 | **F9** | **Enforcement's block path is a lost update against detection** | **P1** | **FIXED** — `682435a`, merged from PR #43: the store has two block-only mutators under one shard lock, each touching only `block_state`, and the blocked index is updated under that same lock. PR #39 was closed unmerged | no |
 | F8 | The audit was not locally reproduced | n/a (method) | not actionable | no |
 | **F10** | **The IPC server MACs a key-sorted payload, not the client's bytes** | **P1** | **OPEN** — found by independent review while re-verifying I-024; the README is corrected, the server behaviour is not | yes — the fix shape is a canonicalisation decision, and it changes the wire contract |
-| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 48 of 62 claims fixed, 14 open: `ramshield-forecasting` 8, `ramshield-analytics` 6, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config, types, storage, xdp, enforcement, protocol and metrics READMEs are now pinned by tests | no — per-file documentation edits |
+| F11 | Crate README documentation drift (62 claims) | P2 (docs) | OPEN — 54 of 62 claims fixed, 8 open: `ramshield-forecasting` 8, listed per claim in `docs/development/DOC_DRIFT_SWEEP.md`. The config, types, storage, xdp, enforcement, protocol, metrics and analytics READMEs are now pinned by tests | no — per-file documentation edits |
+| F22 | `ramshield-analytics` declares two dependencies it never uses | P3 (hygiene) | OPEN — `ramshield-types` and `ramshield-storage` are declared in `crates/ramshield-analytics/Cargo.toml`; no file under `crates/ramshield-analytics/src/` mentions either. The crate is self-contained | no — remove the two path dependencies, or use them |
 | F12 | Two stray compiled binaries tracked at the repository root | P2 (hygiene) | **CLOSED** — removed and gitignored in `f900664` | no |
 | F14 | The store's `insert()` publishes a record and then updates the blocked index, with the shard lock released in between | P2 (latent) | **OPEN** — the same shape as the defect F9 just fixed, but every path that reaches it runs during startup recovery, so it is not live today | no — the fix is the same change, when a path that blocks concurrently appears |
 | F15 | The Kubernetes DaemonSet asks for a `Bidirectional` mount propagation without `privileged` | P1 | **OPEN** — the API server rejects the manifest: bidirectional propagation is only available to privileged containers, so `kubectl apply` fails | yes — privileged and host-visible BPF pins, or a pin model that does not need them |
@@ -583,7 +584,7 @@ clients conform".
 
 ## F11 — Crate README documentation drift
 
-**Status:** OPEN — 48 of the 62 claims are fixed; 14 remain.
+**Status:** OPEN — 54 of the 62 claims are fixed; 8 remain.
 
 **What this is.** The I-025 sweep read every claim in the crate READMEs
 against the source and listed the ones that were false. The per-claim
@@ -605,8 +606,7 @@ workspace manifests, every type it shows against the crate's public API,
 and its test count against the tests that exist. The old READMEs failed
 the first two.
 
-**What remains.** 14 claims in two READMEs: `ramshield-forecasting` (8)
-and `ramshield-analytics` (6).
+**What remains.** 8 claims, all in the `ramshield-forecasting` README.
 
 **Closure criterion.** Every claim in the sweep is either marked fixed, or
 the README says what the code says.
@@ -849,3 +849,26 @@ non-default `--dashboard` is used for the snapshot as well as for the
 counters.
 
 ---
+
+## F22 — the analytics crate declares two dependencies it never uses
+
+**Status:** OPEN — the dependencies are declared and unused; nothing has been
+removed yet.
+
+**Severity:** P3 (hygiene)
+
+`crates/ramshield-analytics/Cargo.toml` declares `ramshield-types` and
+`ramshield-storage` as path dependencies. No file under
+`crates/ramshield-analytics/src/` mentions either: the crate is
+`hll.rs`, `cms.rs`, `welford.rs` and a `lib.rs` that only declares the
+three modules. The two dependencies cost build time and mislead a reader
+into thinking the crate is wired to the store or to the shared types.
+
+The README rewrite that came with this finding states the fact rather
+than hiding it, and `crates/ramshield-analytics/tests/readme_claims.rs`
+pins the declared list against `Cargo.toml` — so if the dependencies are
+removed, the README has to change with them.
+
+**Closure criterion.** The two path dependencies are removed from
+`crates/ramshield-analytics/Cargo.toml` and the README's dependency list
+follows, or the crate actually uses one of them.
