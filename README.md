@@ -15,7 +15,9 @@ The basic loop is simple:
 
 **observe → detect → decide → block → expire**
 
-Run it:
+## Quick Start
+
+### Build
 
 ```bash
 git clone https://github.com/grep999/ramshield.git
@@ -23,27 +25,38 @@ cd ramshield
 cargo build --release --locked --features full
 ```
 
-Start locally:
+### Run — No XDP (userspace proxy, dev / CI)
 
 ```bash
 cp config.baseline.toml config.toml
-# The tracked baseline uses a public dev-only loopback HMAC key; replace it before production.
 RAMSHIELD_AUTONOMOUS__ENABLED=false \
 RAMSHIELD_NATIVE_INGEST__ENABLED=false \
 RAMSHIELD_SYNPROXY__ENABLED=false \
-./target/release/ramshield \
-  --config config.toml \
-  --no-xdp
+./target/release/ramshield --config config.toml --no-xdp
 ```
 
-Check that it is running:
-
+Verify:
 ```bash
-curl http://127.0.0.1:9999/healthz
+curl -fsS http://127.0.0.1:9999/healthz
 ./target/release/ramshield-cli status
 ```
 
-See the [Quickstart](docs/QUICKSTART.md) for the full setup.
+### Run — With XDP (kernel eBPF dataplane, production)
+
+```bash
+cp config.baseline.toml config.toml
+# edit config.toml: xdp.enabled = true, xdp.interface = "eth0", xdp.mode = "drv"
+sudo setcap cap_net_admin,cap_perfmon,cap_bpf=eip ./target/release/ramshield
+./target/release/ramshield --config config.toml
+```
+
+Verify:
+```bash
+curl -fsS http://127.0.0.1:9999/healthz
+./target/release/ramshield-cli status
+```
+
+See [Quickstart](docs/QUICKSTART.md) for full setup and [Configuration](docs/CONFIGURATION.md) for XDP tuning.
 
 ## What happens when traffic turns bad
 
