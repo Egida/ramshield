@@ -381,13 +381,6 @@ impl Wal {
             let _ = self.run_retention(self.ckpt_lsn.load(Ordering::SeqCst));
         }
 
-
-
-
-
-
-
-
         Ok(lsn_obj)
     }
 
