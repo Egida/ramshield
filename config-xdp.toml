@@ -7,11 +7,11 @@ ram_limit_mb = 1024
 shard_count = 256
 
 [detection]
-rps_threshold = 50
-rate_window_secs = 1
-promote_min_events = 2
-subnet_batch_threshold = 8
-subnet_batch_min_events = 40
+rps_threshold = 500
+rate_window_secs = 10
+promote_min_events = 4
+subnet_batch_threshold = 64
+subnet_batch_min_events = 500
 batch_block_enabled = true
 block_ttl_secs = 60
 pulse_window_secs = 5
