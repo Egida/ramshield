@@ -91,7 +91,7 @@ while time.monotonic() < deadline:
     cur = counters()
     if cur == prev:
         quiet += 1
-        if quiet >= 3:
+        if quiet >= 3 and (cur["ips_tracked"] or 0) >= 800:
             break
     else:
         quiet = 0
