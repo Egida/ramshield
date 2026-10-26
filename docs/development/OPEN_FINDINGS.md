@@ -132,64 +132,14 @@ has passing C/Rust regression tests plus independent review.
 
 ## F1a — a /0 rule is not representable in the SHM table (residual of F1)
 
-**Status:** OPEN — a design gap, deliberately not fixed in F1.
+**Status:** CLOSED — owner decision, option 1: retain restriction.
 
-**"Unexpressible", defined.** A rule the policy language can state but the
-SHM rule table has no representation for. It is a *representational*
-limitation of one data structure — not a missing feature, not a bug in the
-enforcement path, and not something the reader can work around.
-
-**What the table is.** A 262 144-slot open-addressed table in shared
-memory, 64 bytes per slot, 4-slot probe window. A slot holds a rule:
-`client_hash`, `expires_at_ms`, two challenge-seed words, `max_rps`,
-`tier`, `flags`. The slot index is
-`subnet_key(masked_network, prefix_len) & (CAPACITY-1)`. The Rust crate
-only writes; the C header in `crates/ramshield-cgnat/include/ramshield_shm.h`
-is the only reader, and its consumer is an out-of-repo native reverse
-proxy. It is a side channel: in-repo enforcement goes through the XDP LPM
-map and is unaffected by anything in this table.
-
-**Why a /0 is unexpressable.** Key `0` is the **empty-slot sentinel** — a
-slot whose `client_hash == 0` is free, and the publisher picks the first
-such slot. But the slot-key mixer is 0-preserving, so
-`subnet_key(N, p) == 0` exactly when the masked network `N` equals the
-prefix length `p`. The key that would mean "the default route" is the
-same key that means "no rule here". There is no spare bit in the slot to
-tell them apart: `client_hash` is the only discriminator, and `0` is
-taken. Every `/0` masks to network 0, so every `/0` lands on the sentinel.
-So does `0.0.0.32/32`, and so can an IPv6 subnet whose u128 key truncates
-to 0 in u64.
-
-**What F1 did.** F1 closed the lookup contract, and with it the
-reserved-key hazard: the publisher refuses `client_hash == 0` and the
-reader rejects it with `INVALID`. The consequence is that **a /0 rule is
-now inexpressible end to end** — the table says so instead of storing
-something invisible.
-
-**What it does NOT affect.** The in-repo enforcement path: a /0 CIDR block
-is still enforced through the normal channel, and the userspace path
-remains authoritative.
-
-**Why it was not fixed here:** supporting /0 needs a different key
-derivation, not a patch. The reserved sentinel and the key space are
-coupled in the on-disk layout, so changing the derivation is a format
-decision, and the format is shared with an out-of-repo consumer.
-
-**The three options, with their consequences.** This is a format decision
-for the owner, not a patch:
-
-| option | what it means | consequence |
-|---|---|---|
-| **Retain the restriction** | `/0` stays unsupported in this side-channel format | nothing changes in the format; the cheapest and the safest. The consumers must be told, and the in-repo enforcement path keeps covering `/0`. Cheapest and safest. |
-| **Change the representation** | give `/0` an explicit encoding that does not collide with the reserved key | the key derivation changes on both sides and the parity vectors are re-pinned. The format is shared with an out-of-repo consumer, so this needs **coordinated compatibility work** — the consumer must be updated in the same release, or it will look up the wrong slot. |
-| **Use a separate representation** | carry a default-route rule in its own field or mechanism rather than in the table | the table format stays frozen, but a second mechanism has to be defined, published, read and enforced by the consumer. More moving parts, no compatibility break. |
-
-What must not happen is silently reinterpreting the reserved key: a
-consumer outside this repository would keep using the old key space.
-
-**Required fix, when it is wanted:** the owner picks an option, then the C
-and Rust derivations change together and the parity vectors are re-pinned.
-This is a follow-up, not a defect in the shipped behaviour.
+`/0` stays unsupported in this side-channel SHM format. Nothing changes in
+the format: key `0` remains the empty-slot sentinel, `/0` rules are refused
+by the publisher and rejected as `INVALID` by the reader. Consumers are told
+the table simply does not hold `/0`. The in-repo enforcement path covers
+`/0` through the XDP LPM map; the userspace path remains authoritative.
+No coordinated release with an out-of-repo consumer is needed.
 
 ---
 

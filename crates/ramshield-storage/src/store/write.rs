@@ -250,4 +250,133 @@ impl Store {
             }
         }
     }
+
+    /// Single-shard-lock mutate of only `block_state` — mirrors `update_ip`'s
+    /// contract for the enforcement block path.
+    ///
+    /// The enforcement block path previously did `store.get()` -> mutate
+    /// `block_state` -> `store.insert()`, two lock acquisitions. Between them a
+    /// concurrent detection flush could advance `cusum_s`, `sample_count` and
+    /// pulse counters via `update_ip`, only for enforcement's stale `insert()`
+    /// to roll those counters back. `update_block_state` holds one shard lock
+    /// for the whole read-modify-write and touches only `block_state`, leaving
+    /// stat fields untouched.
+    ///
+    /// Returns `true` if the record was created or mutated; `false` when a
+    /// net-new key was refused by the RAM budget.
+    pub fn update_block_state(
+        &self,
+        key: IpAddr,
+        new_state: BlockState,
+        ram_limit_bytes: usize,
+    ) -> bool {
+        match self.inner.entry(key) {
+            dashmap::Entry::Occupied(mut o) => {
+                let e = o.get_mut();
+                // Live IpRecord: mutate only block_state in place.
+                // `if let` can't be hoisted into the condition (no let chains in Rust 2015),
+                // so the nesting is intentional.
+                #[allow(clippy::collapsible_if)]
+                if !e.is_expired() {
+                    if let Value::IpRecord(rec) = &mut e.value {
+                        rec.block_state = new_state;
+                        return true;
+                    }
+                }
+                // Occupied but expired / wrong variant: replace in place,
+                // preserving bookkeeping (TTL counter, blocked index, size).
+                let (was_blocked, old_size) = {
+                    let old_value = std::mem::replace(&mut e.value, Value::Counter(0));
+                    let wb = old_value.is_blocked();
+                    let os = std::mem::size_of::<Entry>()
+                        + old_value.heap_bytes()
+                        + std::mem::size_of::<IpAddr>();
+                    (wb, os)
+                };
+                let rec = IpRecord {
+                    ip: key,
+                    request_count: 0,
+                    ewma_rps: 0.0,
+                    cusum_s: 0.0,
+                    baseline_rps: 0.0,
+                    prev_sample_hot: false,
+                    sample_count: 0,
+                    relative_breach_streak: 0,
+                    pulse_samples_in_window: 0,
+                    pulse_window_start_ns: 0,
+                    first_seen_ns: 0,
+                    last_seen_ns: 0,
+                    bytes_in: 0,
+                    status_dist: [0; 5],
+                    proto_fingerprint: 0,
+                    threat_score: 0.0,
+                    block_state: new_state,
+                };
+                let old_had_ttl = e.expires_at.is_some();
+                e.value = Value::IpRecord(rec.clone());
+                e.expires_at = None;
+                if old_had_ttl {
+                    self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
+                }
+                if was_blocked {
+                    self.blocked_count.fetch_sub(1, Ordering::Relaxed);
+                    self.blocked_set.remove(&key);
+                }
+                let new_size = std::mem::size_of::<Entry>() + std::mem::size_of::<IpAddr>();
+                drop(o);
+                self.apply_growth_size_only(old_size, new_size);
+                true
+            }
+            dashmap::Entry::Vacant(v) => {
+                let rec = IpRecord {
+                    ip: key,
+                    request_count: 0,
+                    ewma_rps: 0.0,
+                    cusum_s: 0.0,
+                    baseline_rps: 0.0,
+                    prev_sample_hot: false,
+                    sample_count: 0,
+                    relative_breach_streak: 0,
+                    pulse_samples_in_window: 0,
+                    pulse_window_start_ns: 0,
+                    first_seen_ns: 0,
+                    last_seen_ns: 0,
+                    bytes_in: 0,
+                    status_dist: [0; 5],
+                    proto_fingerprint: 0,
+                    threat_score: 0.0,
+                    block_state: new_state,
+                };
+                let entry_size = std::mem::size_of::<IpAddr>() + std::mem::size_of::<Entry>();
+                let mut current = self.ram_bytes.load(Ordering::Relaxed);
+                loop {
+                    if current + entry_size > ram_limit_bytes {
+                        tracing::warn!(
+                            "Store::update_block_state - CapacityExceeded for key: {}",
+                            key
+                        );
+                        return false;
+                    }
+                    match self.ram_bytes.compare_exchange_weak(
+                        current,
+                        current + entry_size,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(observed) => current = observed,
+                    }
+                }
+                v.insert(Entry {
+                    value: Value::IpRecord(rec),
+                    expires_at: None,
+                });
+                self.traffic
+                    .used_bytes
+                    .fetch_add(entry_size as u64, Ordering::Relaxed);
+                self.total_inserts.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+        }
+    }
 }

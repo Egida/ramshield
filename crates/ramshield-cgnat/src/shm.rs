@@ -114,10 +114,28 @@ pub struct ShmTableManager {
 
 impl ShmTableManager {
     /// Selects /dev/shm if available (Linux), falling back to temp_dir (macOS/Windows/CI)
+    /// but avoids /dev/shm when a stale file there (owned by another user) would
+    /// cause an SHM init PermissionDenied. In CI or restricted containers, temp_dir
+    /// is always used.
     pub fn default_path() -> PathBuf {
         let dev_shm = Path::new("/dev/shm");
         if dev_shm.exists() && dev_shm.is_dir() {
-            dev_shm.join("ramshield_rules")
+            let dev_path = dev_shm.join("ramshield_rules");
+            // If /dev/shm/ramshield_rules exists and is not writable (e.g. owned by
+            // another user, as in package installations), fall back to temp_dir so
+            // benchmarks and tests do not hang on PermissionDenied.
+            if dev_path.exists() {
+                // Quick writability check: attempt open(O_WRONLY) — this also guards
+                // against the symlink‑plant attack when /dev/shm has the sticky bit.
+                if std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&dev_path)
+                    .is_err()
+                {
+                    return std::env::temp_dir().join("ramshield_rules");
+                }
+            }
+            dev_path
         } else {
             std::env::temp_dir().join("ramshield_rules")
         }

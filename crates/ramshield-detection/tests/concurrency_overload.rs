@@ -37,7 +37,8 @@ fn build_engine() -> Arc<DetectionEngine> {
             tx,
             Arc::new(Metrics::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        ).expect("SHM init")
+        )
+        .expect("SHM init"),
     )
 }
 
@@ -45,7 +46,9 @@ fn build_engine() -> Arc<DetectionEngine> {
 fn gen_events(ips: &[IpAddr], per_ip: u64, base_ts: u64) -> Vec<ConnectionEvent> {
     let mut out = Vec::with_capacity(ips.len() * per_ip as usize);
     for (idx, &ip) in ips.iter().cycle().enumerate() {
-        if idx >= ips.len() * per_ip as usize { break; }
+        if idx >= ips.len() * per_ip as usize {
+            break;
+        }
         out.push(ConnectionEvent {
             ip,
             timestamp_ns: base_ts + (idx as u64 * 1_000_000),
@@ -119,9 +122,14 @@ impl LoadMetrics {
         let d = depth as u64;
         loop {
             let current = self.peak_queue_depth.load(Ordering::Relaxed);
-            if current >= d { break; }
+            if current >= d {
+                break;
+            }
             match self.peak_queue_depth.compare_exchange_weak(
-                current, d, Ordering::Relaxed, Ordering::Relaxed
+                current,
+                d,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(_) => continue,
@@ -136,7 +144,9 @@ impl LoadMetrics {
         let rejected = self.events_rejected.load(Ordering::Relaxed);
         let rejection_rate = if produced > 0 {
             (rejected as f64 / produced as f64) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         println!(
             "\n=== {} ===\n\
@@ -170,14 +180,30 @@ struct LatencyCollector {
 }
 
 impl LatencyCollector {
-    fn new() -> Self { Self { samples: Vec::with_capacity(100_000) } }
-    fn record(&mut self, ns: u64) { self.samples.push(ns); }
-    fn p50(&self) -> u64 { self.percentile(50) }
-    fn p90(&self) -> u64 { self.percentile(90) }
-    fn p99(&self) -> u64 { self.percentile(99) }
-    fn max(&self) -> u64 { *self.samples.iter().max().unwrap_or(&0) }
+    fn new() -> Self {
+        Self {
+            samples: Vec::with_capacity(100_000),
+        }
+    }
+    fn record(&mut self, ns: u64) {
+        self.samples.push(ns);
+    }
+    fn p50(&self) -> u64 {
+        self.percentile(50)
+    }
+    fn p90(&self) -> u64 {
+        self.percentile(90)
+    }
+    fn p99(&self) -> u64 {
+        self.percentile(99)
+    }
+    fn max(&self) -> u64 {
+        *self.samples.iter().max().unwrap_or(&0)
+    }
     fn percentile(&self, p: u8) -> u64 {
-        if self.samples.is_empty() { return 0; }
+        if self.samples.is_empty() {
+            return 0;
+        }
         let mut s = self.samples.clone();
         s.sort_unstable();
         let idx = ((p as usize * s.len()) / 100).min(s.len() - 1);
@@ -202,7 +228,10 @@ fn hot_key_sustained_load() {
     for ev in events {
         metrics.record_produced(1);
         match sender.try_send(ev) {
-            Ok(()) => { metrics.record_accepted(1); sent += 1; }
+            Ok(()) => {
+                metrics.record_accepted(1);
+                sent += 1;
+            }
             Err(_) => metrics.record_rejected(1),
         }
     }
@@ -225,9 +254,13 @@ fn high_cardinality_load() {
     spawn(&eng, 4);
 
     // 50k unique IPs, 1 event each = cold-skip path
-    let ips: Vec<IpAddr> = (0..50_000).map(|i| {
-        format!("10.{}.{}.{}", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF).parse().unwrap()
-    }).collect();
+    let ips: Vec<IpAddr> = (0..50_000)
+        .map(|i| {
+            format!("10.{}.{}.{}", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF)
+                .parse()
+                .unwrap()
+        })
+        .collect();
 
     let events = gen_events(&ips, 1, 1_000_000_000);
     let sender = eng.event_sender();
@@ -271,7 +304,10 @@ fn burst_overload_rejection() {
     }
 
     let produce_elapsed = start.elapsed();
-    println!("Produced 200k events in {:.2}ms", produce_elapsed.as_millis());
+    println!(
+        "Produced 200k events in {:.2}ms",
+        produce_elapsed.as_millis()
+    );
 
     // Let workers drain
     std::thread::sleep(Duration::from_millis(2000));
@@ -283,7 +319,10 @@ fn burst_overload_rejection() {
     let accepted = metrics.events_accepted.load(Ordering::Relaxed);
     // In fast-consumer environments, 0 rejections is valid - system handles the load
     // Just ensure accepted events are bounded by channel capacity + some headroom
-    assert!(accepted <= CHANNEL_CAPACITY as u64 * 10, "Accepted should be bounded");
+    assert!(
+        accepted <= CHANNEL_CAPACITY as u64 * 10,
+        "Accepted should be bounded"
+    );
 }
 
 /// TEST 4: Recovery after overload — backlog drainage.
@@ -314,12 +353,21 @@ fn recovery_after_overload() {
         ts += 10_000;
         metrics.record_produced(1);
         match sender.try_send(ev) {
-            Ok(()) => { metrics.record_accepted(1); overload_accepted += 1; }
-            Err(_) => { metrics.record_rejected(1); overload_rejected += 1; }
+            Ok(()) => {
+                metrics.record_accepted(1);
+                overload_accepted += 1;
+            }
+            Err(_) => {
+                metrics.record_rejected(1);
+                overload_rejected += 1;
+            }
         }
         std::thread::sleep(Duration::from_micros(10));
     }
-    println!("Overload phase: accepted={}, rejected={}", overload_accepted, overload_rejected);
+    println!(
+        "Overload phase: accepted={}, rejected={}",
+        overload_accepted, overload_rejected
+    );
 
     // Phase 2: Stop producing, measure drain time
     let drain_start = Instant::now();
@@ -338,13 +386,17 @@ fn recovery_after_overload() {
                 l7: None,
             };
             ts += 10_000;
-            if sender.try_send(ev).is_ok() { clean_sends += 1; }
+            if sender.try_send(ev).is_ok() {
+                clean_sends += 1;
+            }
         }
         if clean_sends == 100 {
             queue_drained = true;
         }
         std::thread::sleep(Duration::from_millis(10));
-        if drain_start.elapsed() > Duration::from_secs(30) { break; }
+        if drain_start.elapsed() > Duration::from_secs(30) {
+            break;
+        }
     }
     let drain_time = drain_start.elapsed();
     println!("Queue drained in {:.2}s", drain_time.as_secs_f64());
@@ -365,7 +417,9 @@ fn merge_lock_contention() {
     spawn(&eng, 8);
 
     // Multiple IPs each with moderate events to trigger merges
-    let ips: Vec<IpAddr> = (0..100).map(|i| format!("10.3.{}.{}", i / 256, i % 256).parse().unwrap()).collect();
+    let ips: Vec<IpAddr> = (0..100)
+        .map(|i| format!("10.3.{}.{}", i / 256, i % 256).parse().unwrap())
+        .collect();
     let events = gen_events(&ips, 500, 1_000_000_000);
     let sender = eng.event_sender();
 
@@ -434,21 +488,29 @@ fn worker_scaling_throughput() {
         let sender = eng.event_sender();
 
         // Generate 5k events for this worker count
-        let ips: Vec<IpAddr> = (0..500).map(|i| format!("10.5.{}.{}", i / 256, i % 256).parse().unwrap()).collect();
+        let ips: Vec<IpAddr> = (0..500)
+            .map(|i| format!("10.5.{}.{}", i / 256, i % 256).parse().unwrap())
+            .collect();
         let events = gen_events(&ips, 100, 1_000_000_000);
 
         let start = Instant::now();
         let mut accepted = 0;
         for ev in &events {
-            if sender.try_send(ev.clone()).is_ok() { accepted += 1; }
+            if sender.try_send(ev.clone()).is_ok() {
+                accepted += 1;
+            }
         }
 
         std::thread::sleep(Duration::from_millis(1000));
         eng.join_workers(Duration::from_secs(10));
 
         let elapsed = start.elapsed().as_secs_f64();
-        println!("Workers: {}, Throughput: {:.0} events/s, Accepted: {}",
-                 workers, accepted as f64 / elapsed.max(0.001), accepted);
+        println!(
+            "Workers: {}, Throughput: {:.0} events/s, Accepted: {}",
+            workers,
+            accepted as f64 / elapsed.max(0.001),
+            accepted
+        );
     }
 }
 
@@ -462,7 +524,13 @@ fn rss_bound_high_cardinality() {
     let sender = eng.event_sender();
 
     // Generate 100k unique IPs with multiple events each
-    let ips: Vec<IpAddr> = (0..100_000).map(|i| format!("10.6.{}.{}", (i >> 8) & 0xFF, i & 0xFF).parse().unwrap()).collect();
+    let ips: Vec<IpAddr> = (0..100_000)
+        .map(|i| {
+            format!("10.6.{}.{}", (i >> 8) & 0xFF, i & 0xFF)
+                .parse()
+                .unwrap()
+        })
+        .collect();
     let events = gen_events(&ips, 10, 1_000_000_000);
 
     for ev in events {

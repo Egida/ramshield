@@ -239,70 +239,38 @@ impl EnforcementService {
                 }
             }
         } else {
-            // Explicit IP detention.
-            let rec = self
-                .store
-                .get(&cmd.ip)
-                .and_then(|v| match v {
-                    Value::IpRecord(r) => Some(r),
-                    _ => None,
-                })
-                .unwrap_or(IpRecord {
-                    ip: cmd.ip,
-                    request_count: 0,
-                    ewma_rps: 0.0,
-                    cusum_s: 0.0,
-                    baseline_rps: 0.0,
-                    prev_sample_hot: false,
-                    sample_count: 0,
-                    relative_breach_streak: 0,
-                    pulse_samples_in_window: 0,
-                    pulse_window_start_ns: 0,
-                    first_seen_ns: now_ns,
-                    last_seen_ns: now_ns,
-                    bytes_in: 0,
-                    status_dist: [0; 5],
-                    proto_fingerprint: 0,
-                    threat_score: 0.0,
-                    block_state: BlockState::Clean,
-                });
-            let mut updated = rec;
-            updated.block_state = BlockState::Blocked {
-                reason,
-                since_ns: now_ns,
-            };
+            // Explicit IP detention — single shard lock, touches only block_state.
+            // Replaces the old `store.get()` -> mutate -> `store.insert()`
+            // read-modify-write that let a concurrent detection flush's stat
+            // updates be rolled back by enforcement's stale insert (F9).
+            let now_unix_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let at = Instant::now()
+                .checked_add(Duration::from_secs(cmd.ttl_seconds))
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS));
 
-            // Do not let Store's passive expiry hide a still-blocked record.
             self.store
-                .insert(
+                .update_block_state(
                     cmd.ip,
-                    Value::IpRecord(updated),
-                    None,
+                    BlockState::Blocked {
+                        reason,
+                        since_ns: now_ns,
+                    },
                     self.store.traffic.ram_limit_mb.load(Ordering::Relaxed) * 1024 * 1024,
                 )
-                .map_err(|e| EnforcementError::Storage(e.to_string()))?;
+                .then_some(())
+                .ok_or(EnforcementError::Storage(
+                    "store update_block_state: capacity exceeded".to_string(),
+                ))?;
 
             self.blocked_ips.insert(cmd.ip);
             // Re-block resets attribution — a new block is a new epoch.
             self.drops_by_blocked.remove(&cmd.ip);
             // Invariant: at most one expiration per IP. A re-block must not
             // inherit a stale TTL from a previous block/unblock cycle.
-            // Ring schedule/detach are both O(1) — TTL refresh moves the
-            // card between buckets instead of appending a duplicate.
             if cmd.ttl_seconds > 0 {
-                // TTL is clamped at every entry point (IPC boundary,
-                // config validate) — checked_add is the belt-and-suspenders
-                // guard so a future path can never overflow into a panic
-                // and kill the enforcement task (blocks silently die).
-                let at = Instant::now()
-                    .checked_add(Duration::from_secs(cmd.ttl_seconds))
-                    .unwrap_or_else(|| {
-                        Instant::now() + Duration::from_secs(MAX_EXPIRY_FALLBACK_SECS)
-                    });
-                let now_unix_ns = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0);
                 self.schedule_expiration(cmd.ip, at);
                 if let Some(shared) = &self.checkpoint_shared {
                     shared.set_ip_expiration(cmd.ip, unix_ns_from_instant(at, now_unix_ns));

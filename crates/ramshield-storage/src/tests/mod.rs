@@ -698,6 +698,84 @@ fn update_ip_preserves_block_state() {
     }
 }
 
+/// F9 regression: enforcement's block path must not roll back detection stat
+/// fields (cusum_s, sample_count, pulse counters) that a concurrent
+/// `update_ip` flush advanced between enforcement's `get()` and `insert()`.
+///
+/// `update_block_state` holds one shard lock and touches only `block_state`,
+/// so stat fields are never clobbered by a stale enforcement snapshot.
+#[test]
+fn update_block_state_preserves_stat_fields() {
+    use std::net::Ipv4Addr;
+    let store = Store::new(16);
+    let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 96, 0, 1));
+    let ram_lim = 64 * 1024 * 1024;
+
+    // Insert a record with detection state already accumulated.
+    let mut rec = blank_record(ip);
+    rec.cusum_s = 12.5;
+    rec.sample_count = 6;
+    rec.relative_breach_streak = 3;
+    rec.pulse_samples_in_window = 4;
+    rec.request_count = 100;
+    store
+        .insert(ip, Value::IpRecord(rec), None, ram_lim)
+        .unwrap();
+
+    // Enforcement blocks the IP — only block_state should change.
+    assert!(store.update_block_state(
+        ip,
+        BlockState::Blocked {
+            reason: ramshield_types::BlockReason::HighRps,
+            since_ns: 42,
+        },
+        ram_lim,
+    ));
+
+    match store.get(&ip) {
+        Some(Value::IpRecord(r)) => {
+            assert!(
+                matches!(r.block_state, BlockState::Blocked { .. }),
+                "update_block_state must set block_state"
+            );
+            // Stat fields must be preserved, not rolled back:
+            assert_eq!(r.cusum_s, 12.5, "cusum_s rolled back by stale block insert");
+            assert_eq!(
+                r.sample_count, 6,
+                "sample_count rolled back by stale block insert"
+            );
+            assert_eq!(
+                r.relative_breach_streak, 3,
+                "relative_breach_streak rolled back by stale block insert"
+            );
+            assert_eq!(
+                r.pulse_samples_in_window, 4,
+                "pulse_samples_in_window rolled back by stale block insert"
+            );
+            assert_eq!(
+                r.request_count, 100,
+                "request_count rolled back by stale block insert"
+            );
+        }
+        other => panic!("expected IpRecord, got {other:?}"),
+    }
+
+    // Vacant path: net-new key refused by RAM budget returns false, no leak.
+    let ip2: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 96, 0, 2));
+    assert!(
+        !store.update_block_state(
+            ip2,
+            BlockState::Blocked {
+                reason: ramshield_types::BlockReason::HighRps,
+                since_ns: 0,
+            },
+            1
+        ),
+        "must refuse net-new blocked state when budget exhausted"
+    );
+    assert_eq!(store.len(), 1);
+}
+
 /// Vacant path: creates the record, bumps accounting; capacity-exceeded
 /// path must refuse (stored=false) and leave ram_bytes untouched.
 #[test]
