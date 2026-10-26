@@ -126,19 +126,22 @@ pub fn default_batch_max_events() -> usize {
     4096
 }
 pub fn default_batch_window_ms() -> u64 {
-    50
+    25
 }
 pub fn default_promote_min() -> u32 {
-    8
+    4
+}
+pub fn default_subnet_batch_threshold() -> usize {
+    64
 }
 pub fn default_subnet_batch_min_events() -> u64 {
-    100
+    500
 }
 pub fn default_pulse_window_secs() -> u64 {
-    6
+    5
 }
 pub fn default_pulse_threshold_samples() -> u8 {
-    2
+    3
 }
 pub fn default_subnet_burst_ttl_secs() -> u64 {
     120
@@ -150,7 +153,7 @@ pub fn default_pre_aggs_max_size() -> usize {
     1_000_000
 }
 pub fn default_pre_aggs_flush_interval_ms() -> u64 {
-    1000
+    250
 }
 pub fn default_emergency_burst_threshold() -> u32 {
     500
@@ -189,12 +192,12 @@ pub fn default_l7_block_ttl_secs() -> u64 {
 impl Default for DetectionConfig {
     fn default() -> Self {
         Self {
-            rps_threshold: 1_000,
+            rps_threshold: 500,
             rate_window_secs: 10,
-            subnet_batch_threshold: 50,
+            subnet_batch_threshold: default_subnet_batch_threshold(),
             subnet_batch_min_events: default_subnet_batch_min_events(),
             batch_block_enabled: true,
-            block_ttl_secs: 3_600,
+            block_ttl_secs: 300,
             pulse_window_secs: default_pulse_window_secs(),
             pulse_threshold_samples: default_pulse_threshold_samples(),
             subnet_burst_ttl_secs: default_subnet_burst_ttl_secs(),
