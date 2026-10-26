@@ -136,7 +136,7 @@ in the kernel.
 
 **Written by:** `ramshield-detection` (sends `EnforceCommand` via channel), `ramshield-forecasting` (sends `EnforceCommand` via channel).
 
-**Read by:** `ramshield-dashboard` (block log), `ramshield-metrics` (block counters).
+**Read by:** the root `ramshield` package - the engine, the IPC server and the dashboard module. Those are modules of the root crate, not crates of their own, and `ramshield-metrics` does not depend on this crate.
 
 ## Benchmarks
 

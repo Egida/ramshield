@@ -94,6 +94,135 @@ struct Tpacket3Hdr {
     tp_padding2: [u8; 8],
 }
 
+/// How many capture attempts a worker slot makes before it gives up.
+///
+/// Capture setup failures are overwhelmingly persistent - a bad
+/// interface name, a missing `CAP_NET_RAW`, an `mmap` the kernel
+/// refuses. A persistent fault must not spin, but a genuinely transient
+/// one (an interface flap, `ENOMEM` under pressure) clears within a
+/// second or two. Three attempts a second apart covers the transient
+/// case and fails fast on the persistent one.
+pub(super) const MAX_CAPTURE_ATTEMPTS: u32 = 3;
+
+/// The pause between two capture attempts of the same worker slot.
+pub(super) const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a worker slot did before it returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SlotOutcome {
+    /// How many capture attempts were made.
+    pub attempts: u32,
+    /// How many of them failed.
+    pub failures: u32,
+    /// Whether the daemon's shutdown flag stopped the slot.
+    pub stopped_by_shutdown: bool,
+}
+
+/// Run one capture worker slot: at most `attempts_limit` capture
+/// attempts, `backoff` apart, stopping early when the daemon shuts down.
+///
+/// The capture attempt is a parameter so the retry policy can be tested
+/// without a NIC, a capability or a race.
+pub(super) fn capture_slot(
+    attempts_limit: u32,
+    backoff: std::time::Duration,
+    shutdown: &AtomicBool,
+    mut attempt: impl FnMut(u32) -> std::io::Result<()>,
+) -> SlotOutcome {
+    let mut outcome = SlotOutcome {
+        attempts: 0,
+        failures: 0,
+        stopped_by_shutdown: false,
+    };
+    while outcome.attempts < attempts_limit {
+        if shutdown.load(Ordering::Acquire) {
+            outcome.stopped_by_shutdown = true;
+            break;
+        }
+        outcome.attempts += 1;
+        match attempt(outcome.attempts) {
+            // A clean return means the capture loop saw the shutdown
+            // flag. The slot is done.
+            Ok(()) => break,
+            Err(err) => {
+                outcome.failures += 1;
+                if outcome.attempts >= attempts_limit {
+                    error!(
+                        attempts = outcome.attempts,
+                        error = %err,
+                        "native capture worker failed; giving up"
+                    );
+                    break;
+                }
+                // Shutdown wins over a retry: a slot must not re-open an
+                // AF_PACKET socket after the daemon was asked to stop.
+                if shutdown.load(Ordering::Acquire) {
+                    outcome.stopped_by_shutdown = true;
+                    break;
+                }
+                warn!(
+                    attempts = outcome.attempts,
+                    error = %err,
+                    "native capture worker attempt failed; retrying"
+                );
+                std::thread::sleep(backoff);
+            }
+        }
+    }
+    outcome
+}
+
+/// Join the capture worker threads, reporting the ones that panicked.
+///
+/// Returns how many workers panicked. The old code dropped the join
+/// result with `let _ = handle.join()`, so a worker that panicked was
+/// indistinguishable from one that exited cleanly.
+pub(super) fn join_workers(handles: Vec<std::thread::JoinHandle<()>>) -> usize {
+    let mut panicked = 0usize;
+    for handle in handles {
+        if handle.join().is_err() {
+            panicked += 1;
+            error!("native capture worker panicked");
+        }
+    }
+    panicked
+}
+
+/// Start the capture worker slots.
+///
+/// Returns the handles of the workers that started, how many started and
+/// how many failed to start. The spawner is a parameter so a partial or
+/// total startup failure can be produced deterministically, without a
+/// NIC and without a race.
+pub(super) fn start_workers<F>(
+    expected: usize,
+    mut spawn_one: F,
+) -> (Vec<std::thread::JoinHandle<()>>, usize, usize)
+where
+    F: FnMut(usize) -> std::io::Result<std::thread::JoinHandle<()>>,
+{
+    let mut handles = Vec::with_capacity(expected);
+    let mut started = 0usize;
+    let mut failed = 0usize;
+    for worker in 0..expected {
+        match spawn_one(worker) {
+            Ok(handle) => {
+                started += 1;
+                handles.push(handle);
+            }
+            Err(err) => {
+                failed += 1;
+                error!(
+                    worker,
+                    error = %err,
+                    "native capture worker did not spawn; running with fewer workers"
+                );
+            }
+        }
+    }
+    (handles, started, failed)
+}
+
 pub fn spawn(
     interface: String,
     max_events_per_sec: u64,
@@ -108,58 +237,87 @@ pub fn spawn(
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
             .unwrap_or(1);
+        // The worker threads are created HERE, not inside the supervisor.
+        // The supervisor used to create them, so their spawn results were
+        // swallowed with `handles.into_iter().flatten()` and the daemon
+        // reached ready state with zero capture workers running, without
+        // a word about it. Creating them here means the outcome is known
+        // before the daemon is told the capture path started.
+        let budget = Arc::new(AtomicU64::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let epoch_base = std::time::Instant::now();
+        // Counts how many times the "downstream channel is closed"
+        // error was actually EMITTED, shared by every worker so the
+        // daemon logs it once. A closed channel rejects every
+        // subsequent event, so an error log per event would be a
+        // log flood; the drop counter records the volume and this
+        // counter records that the error was raised exactly once.
+        let disconnect_log_emissions = Arc::new(AtomicU64::new(0));
+        metrics.set_native_capture_workers_expected(workers as u64);
+        let (handles, started, failed) = start_workers(workers, |worker| {
+            let iface = interface.clone();
+            let txc = tx.clone();
+            let stop = shutdown.clone();
+            let trusted = trusted_overlay_cidrs.clone();
+            let b = budget.clone();
+            let e = epoch.clone();
+            let base = epoch_base;
+            // Clone outside the `move` closure: the closure takes
+            // ownership of what it captures, so cloning inside it
+            // would move the handle on the first iteration.
+            let m = metrics.clone();
+            let dl = disconnect_log_emissions.clone();
+            let mc = metrics.clone();
+            std::thread::Builder::new()
+                .name(format!("rs-native-{worker}"))
+                .spawn(move || {
+                    // The slot is alive from here to the end of the
+                    // thread, including between two capture attempts: a
+                    // retry must not read as "capture gone".
+                    mc.inc_native_capture_workers_running();
+                    let outcome =
+                        capture_slot(MAX_CAPTURE_ATTEMPTS, RETRY_BACKOFF, &stop, |_attempt| {
+                            let result = run_linux(
+                                iface.clone(),
+                                max_events_per_sec,
+                                trusted.clone(),
+                                txc.clone(),
+                                stop.clone(),
+                                b.clone(),
+                                e.clone(),
+                                base,
+                                worker,
+                                m.clone(),
+                                dl.clone(),
+                            );
+                            if result.is_err() {
+                                m.inc_native_capture_worker_failure();
+                            }
+                            result
+                        });
+                    mc.dec_native_capture_workers_running();
+                    if outcome.failures > 0 {
+                        error!(
+                            worker,
+                            attempts = outcome.attempts,
+                            failures = outcome.failures,
+                            "native capture worker stopped"
+                        );
+                    }
+                })
+        });
+        metrics.set_native_capture_workers_started(started as u64);
+        if started == 0 {
+            return Err(std::io::Error::other(format!(
+                "native capture: no worker thread could be started ({failed} of {workers} failed)"
+            )));
+        }
+        // The supervisor only joins now. Every worker is accounted for,
+        // and a worker that panicked is reported instead of dropped.
         std::thread::Builder::new()
             .name("rs-native-ingest-supervisor".into())
             .spawn(move || {
-                let budget = Arc::new(AtomicU64::new(0));
-                let epoch = Arc::new(AtomicU64::new(0));
-                let epoch_base = std::time::Instant::now();
-                // Counts how many times the "downstream channel is closed"
-                // error was actually EMITTED, shared by every worker so the
-                // daemon logs it once. A closed channel rejects every
-                // subsequent event, so an error log per event would be a
-                // log flood; the drop counter records the volume and this
-                // counter records that the error was raised exactly once.
-                let disconnect_log_emissions = Arc::new(AtomicU64::new(0));
-                let mut handles = Vec::with_capacity(workers);
-                for worker in 0..workers {
-                    let iface = interface.clone();
-                    let txc = tx.clone();
-                    let stop = shutdown.clone();
-                    let trusted = trusted_overlay_cidrs.clone();
-                    let b = budget.clone();
-                    let e = epoch.clone();
-                    let base = epoch_base;
-                    // Clone outside the `move` closure: the closure takes
-                    // ownership of what it captures, so cloning inside it
-                    // would move the handle on the first iteration.
-                    let m = metrics.clone();
-                    let dl = disconnect_log_emissions.clone();
-                    handles.push(
-                        std::thread::Builder::new()
-                            .name(format!("rs-native-{worker}"))
-                            .spawn(move || {
-                                if let Err(err) = run_linux(
-                                    iface,
-                                    max_events_per_sec,
-                                    trusted,
-                                    txc,
-                                    stop,
-                                    b,
-                                    e,
-                                    base,
-                                    worker,
-                                    m,
-                                    dl,
-                                ) {
-                                    warn!(worker, error=%err, "native packet capture stopped");
-                                }
-                            }),
-                    );
-                }
-                for handle in handles.into_iter().flatten() {
-                    let _ = handle.join();
-                }
+                join_workers(handles);
             })
     }
     #[cfg(not(target_os = "linux"))]

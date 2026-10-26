@@ -1,6 +1,6 @@
 //! Decaying Count-Min Sketch for heavy-hitter frequency tracking
 //!
-//! 4 rows × 65,536 columns of AtomicU64 buckets = 512 KiB, allocated
+//! 4 rows × 65,536 columns of AtomicU64 buckets = 2 MiB, allocated
 //! directly on the heap via flat Vec (no stack-array boxing that would
 //! overflow musl's 128 KiB thread stacks).
 //!

@@ -27,27 +27,48 @@ impl Store {
             .find(|net| net.contains(*ip))
     }
 
+    /// Remove a record, keeping the blocked index and the size accounting
+    /// in step with it.
+    ///
+    /// The removal takes the shard lock through the entry API, and the
+    /// bookkeeping lands before the record leaves the map. `inner.remove`
+    /// releases the lock when it returns the value, and a concurrent
+    /// `block_ip` landing in that window would publish a blocked record
+    /// for this key and index it - and this bookkeeping would then drop
+    /// the index entry of a record that is blocked.
     pub fn remove(&self, key: &IpAddr) -> Option<Value> {
-        self.inner.remove(key).map(|(_k, e)| {
-            if e.expires_at.is_some() {
-                self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
+        match self.inner.entry(*key) {
+            dashmap::Entry::Occupied(mut o) => {
+                let (had_ttl, freed, was_blocked) = {
+                    let e = o.get_mut();
+                    (
+                        e.expires_at.is_some(),
+                        std::mem::size_of::<IpAddr>()
+                            + std::mem::size_of::<Entry>()
+                            + e.value.heap_bytes(),
+                        e.value.is_blocked(),
+                    )
+                };
+                if had_ttl {
+                    self.ttl_entries.fetch_sub(1, Ordering::Relaxed);
+                }
+                self.ram_bytes.fetch_sub(freed, Ordering::Relaxed);
+                self.traffic
+                    .used_bytes
+                    .fetch_sub(freed as u64, Ordering::Relaxed);
+                self.total_evictions.fetch_add(1, Ordering::Relaxed);
+                if was_blocked {
+                    self.blocked_count.fetch_sub(1, Ordering::Relaxed);
+                    self.blocked_set.remove(key);
+                }
+                let value = o.remove().value;
+                // P0 fix: subnet_index must be cleaned here too, same reason
+                // as evict_batch — stale entries leak without this.
+                self.update_subnet_index(*key, subnet_key_u128(*key), true);
+                Some(value)
             }
-            let freed =
-                std::mem::size_of::<IpAddr>() + std::mem::size_of::<Entry>() + e.value.heap_bytes();
-            self.ram_bytes.fetch_sub(freed, Ordering::Relaxed);
-            self.traffic
-                .used_bytes
-                .fetch_sub(freed as u64, Ordering::Relaxed);
-            self.total_evictions.fetch_add(1, Ordering::Relaxed);
-            if e.value.is_blocked() {
-                self.blocked_count.fetch_sub(1, Ordering::Relaxed);
-                self.blocked_set.remove(key);
-            }
-            // P0 fix: subnet_index must be cleaned here too, same reason
-            // as evict_batch — stale entries leak without this.
-            self.update_subnet_index(*key, subnet_key_u128(*key), true);
-            e.value
-        })
+            dashmap::Entry::Vacant(_) => None,
+        }
     }
 
     pub fn len(&self) -> usize {

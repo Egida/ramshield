@@ -76,8 +76,30 @@ elapsed = time.monotonic() - t0
 print(f"sent {sent}/{total} events in {elapsed:.2f}s "
       f"({sent / elapsed:,.0f} events/s)")
 
-# The subnet loop scans on a ~500ms tick; give it a few ticks to fire.
-time.sleep(4)
+# The detection pipeline flushes on a 250ms tick and the subnet scan on a
+# ~500ms tick, and on a loaded runner both fall behind: a fixed sleep is a
+# race, and this gate has lost that race (206 IPs tracked against a
+# threshold of 800, one batch flushed instead of ten). Wait for the
+# counters to settle instead: three identical snapshots in a row means the
+# pipeline has nothing left to do. The event count is NOT the target - the
+# daemon drops events under pressure, so "ingested == sent" is not
+# reachable on a loaded runner.
+deadline = time.monotonic() + 90
+quiet = 0
+prev = None
+while time.monotonic() < deadline:
+    cur = counters()
+    if cur == prev:
+        quiet += 1
+        if quiet >= 3 and (cur["ips_tracked"] or 0) >= 800:
+            break
+    else:
+        quiet = 0
+    prev = cur
+    time.sleep(1)
+else:
+    print("WARN: the counters never settled within 90s; "
+          "asserting on the state as it is")
 after = counters()
 # NOTE: a *block* is NOT expected at this load. classify_subnet blocks only
 # at >64 hosts AND >50k events (CGNAT/AFNAT tier). 60 hosts x 120 events =

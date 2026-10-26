@@ -1,93 +1,155 @@
 # ramshield-metrics
 
 ```text
-Detection ──→ record_batch(BatchRecord) ──┐
-Enforcement ──→ record_block(BlockRecord) ─┤
-Forecaster ──→ set_forecast_hw(rps, z) ───┤──→ Metrics
-                                           │     │
-                              ┌────────────┘     │
-                              ↓                  ↓
-                    DashboardSnapshot      Prometheus
-                    (JSON, /api/snapshot)  (text, /metrics)
+Detection   ──→ record_batch(BatchRecord) ─────┐
+Detection   ──→ record_block_ip(ip, reason, …) ─┤
+Forecasting ──→ record_block_ip(ip, reason, …) ─┤
+IPC handler ──→ record_block_ip(ip, reason, …) ─┤
+Forecasting ──→ set_forecast_hw(rps, z, f) ─────┤──→ Metrics
+Forecasting ──→ set_entropy(h) ────────────────┤      │
+Enforcement ──→ inc_blocks(), set_wal_lsn(…) ──┤      │
+IPC server  ──→ inc_requests(), inc_rejected(…)┘      │
+                                                      ↓
+                             ┌────────────────────────┴────────────┐
+                             ↓                                     ↓
+                    DashboardSnapshot                       Prometheus text
+                    (JSON, /api/snapshot)                   (text, /metrics)
+                    assembled by the root crate
 ```
 
 ## Why it exists
 
-Operators need to know what RamShield is doing right now: how many events per second, how many IPs are blocked, which subsystem triggered the blocks, and whether the forecast models are tracking normal traffic. Without a centralized metrics store, each subsystem would maintain its own counters, and the dashboard would need to poll seven different sources.
+Operators need to know what RamShield is doing right now: how many events
+per second, how many IPs are blocked, which subsystem triggered the blocks,
+and whether the forecast models are tracking normal traffic. Without a
+centralized metrics store, each subsystem would maintain its own counters.
 
 ## How it works
 
-### Atomic Counters
+### Atomic counters
 
-All hot-path counters use `AtomicU64` or `AtomicUsize` — no locks, no contention:
+Every hot-path counter is an `Arc<AtomicU64>`; the increment is a
+`fetch_add`, so the event path never takes a lock. `Metrics` has 85 public
+fields — 80 counters plus the two ring buffers and their cap. One flag
+(`xdp_projection_active`) is an `AtomicBool`, and three caches are behind
+`Mutex`.
 
 ```rust
 pub struct Metrics {
-    requests: AtomicU64,       // total IPC requests received
-    blocks: AtomicU64,         // total block decisions applied
-    ingested: AtomicU64,       // total events ingested
-    rejected: AtomicU64,       // events rejected (channel full, parse error)
-    batch_history: Mutex<VecDeque<BatchRecord>>,  // last 120 batch stats
-    block_log: Mutex<VecDeque<BlockRecord>>,       // last 1000 block events
+    pub requests_total: Arc<AtomicU64>,   // total IPC requests received
+    pub blocks_total: Arc<AtomicU64>,     // total block decisions applied
+    pub events_ingested: Arc<AtomicU64>,  // total events ingested
+    pub events_rejected: Arc<AtomicU64>,  // events rejected
+    // … 72 more counters …
+    pub batch_history: Arc<Mutex<VecDeque<Arc<BatchRecord>>>>, // last 80 batch stats
+    pub block_log: Arc<Mutex<VecDeque<BlockRecord>>>,          // last N block events
+    pub block_log_cap: usize,
 }
 ```
 
-The `batch_history` and `block_log` use `Mutex<VecDeque>` — but these are only touched at batch flush boundaries (every 500ms for batches, at block/unblock events for blocks). The hot path — counting events — never touches a lock.
+`batch_history` keeps the last **80** records (`HISTORY` in `src/lib.rs`);
+`block_log` keeps the last `block_log_size` records, which comes from
+`[dashboard] block_log_size` and defaults to 1000. The `batch_history` and
+`block_log` rings are written at batch flush boundaries — every
+`detection.batch_window_ms` (default 50 ms, maximum 500 ms) for the batch
+history, and on a block decision for the block log. The hot path — counting
+events — never touches a lock.
 
 ### BatchRecord
 
-Recorded at every detection flush. The forecaster reads these to compute Holt-Winters forecasts:
+Recorded at every detection flush. The forecaster does **not** read this
+ring: it reads the store's live traffic counters
+(`store.traffic.events_last_second` and `store.traffic.unique_ips_window`).
 
 ```rust
 pub struct BatchRecord {
-    pub timestamp_ms: u64,
-    pub total_events: u64,
-    pub unique_ips: u64,
-    pub rps_estimate: f64,
-    pub blocked_new: u64,
-    pub subnet_blocked: u64,
-    pub cold_skip_pct: f64,    // % of events that hit existing records (no new allocation)
+    pub ts_ms: u64,
+    pub events: u32,
+    pub unique_ips: u32,
+    pub promoted: u32,             // unique IPs promoted to full tracking
+    pub cold_skipped: u32,         // unique IPs skipped (below the promotion threshold)
+    pub promoted_events: u32,      // connection events in promoted IPs
+    pub cold_skipped_events: u32,  // connection events in cold-skipped IPs
+    pub blocks: u32,
+    pub hot_subnets: u32,
 }
 ```
 
 ### BlockRecord
 
-Recorded at every enforcement decision. Serves the dashboard block history and Prometheus counters:
+Recorded by the detection, forecasting and IPC paths when they issue a
+block. The enforcement service does **not** write the block log — it counts
+with `inc_blocks()` and `inc_xdp_apply_failures()`.
 
 ```rust
 pub struct BlockRecord {
-    pub timestamp_ms: u64,
+    pub ts_ms: u64,
     pub ip: String,
-    pub reason: String,    // "rate_limit", "subnet_burst", "pulse_wave", "manual"
-    pub module: String,    // "detection", "forecasting", "manual"
+    pub reason: String,    // a BlockReason::as_str() token
+    pub module: String,    // "detection" | "forecasting" | "ipc"
 }
 ```
 
-### Dashboard Snapshot
+The `reason` is normally one of the stable wire tokens from
+`ramshield-types::BlockReason::as_str()` — except that the subnet-scan path
+writes `subnet_batch`, which is not one of those tokens:
 
-`get_dashboard_snapshot()` assembles a point-in-time view from all internal state:
+`high_rps`, `subnet_burst`, `forecast_anomaly`, `entropy_anomaly`, `manual`,
+`l7_high_rps`, `l7_cost`, `http2_stream_abuse`.
+
+The `module` is the subsystem that issued the block: `detection` (the flush,
+mitigation and subnet-scan paths), `forecasting` or `ipc`.
+
+### Dashboard snapshot
+
+`DashboardSnapshot` is a plain data type in this crate. The snapshot is
+assembled by the **root** crate — `Engine::dashboard_snapshot()` in
+`src/engine/mod.rs` — from the store and these counters; there is no
+`get_dashboard_snapshot()` here.
 
 ```rust
 pub struct DashboardSnapshot {
+    pub ts_ms: u64,
     pub uptime_secs: u64,
-    pub total_events: u64,
-    pub blocked_ips: u64,
-    pub rps_current: f64,
-    pub forecast_hw: f64,      // Holt-Winters one-step forecast
-    pub forecast_z: f64,       // current z-score
-    pub entropy: f64,          // Shannon entropy of source IPs
+    pub ips_tracked: usize,
+    pub blocked_total: u64,
     pub ram_bytes: usize,
-    pub batch_history: Vec<BatchRecord>,
-    pub block_log: Vec<BlockRecord>,
-    pub subnets: Vec<SubnetRow>,
-    pub pipeline: PipelineFlow, // flow diagram data
-    pub modules: Vec<ModuleStats>,
+    pub ram_limit_mb: usize,
+    pub ram_pct: f64,
+    pub cpu_usage: f32,
+    pub memory_usage_mb: usize,
+    pub total_ram_mb: usize,
+    pub ipc_requests: u64,
+    pub events_ingested: u64,
+    pub events_rejected: u64,
+    pub frames_rejected_total: u64,
+    pub channel_depth: usize,
+    pub events_shed: u64,
+    pub batches_total: u64,
+    pub promotions: u64,
+    pub cold_skipped: u64,
+    pub blocks_applied: u64,
+    pub pipeline: PipelineFlow,   // ingest / queued / batched / promoted / merged / blocked
+    pub is_healthy: bool,
+    pub health_reason: String,
+    pub xdp_active: bool,          // the kernel dataplane is loaded and attached
+    pub wal_lsn: u64,
+    pub pending_expirations: u64,
+    pub xdp_apply_failures: u64,
+    pub xdp_projection_stale: bool,
+    pub xdp_configured: bool,
+    pub protection_state: ProtectionState,
+    pub native_capture_workers_running: u64,
+    pub native_capture_worker_failures: u64,
 }
 ```
 
-The dashboard HTTP endpoint (`/api/snapshot`) serves this as JSON. The IPC `Stats` response uses the same data.
+The dashboard serves it as JSON at `/api/snapshot`. The IPC `Stats`
+response is a **separate, smaller** view built from `store.get_stats()`
+(`ips_tracked`, `blocked`, `ram_bytes`, `ram_limit_mb`, `uptime_secs`,
+`evictions`) — it does not read this crate.
 
-### Prometheus Export
+### Prometheus export
 
 `render_prometheus()` produces standard Prometheus text format:
 
@@ -96,14 +158,16 @@ The dashboard HTTP endpoint (`/api/snapshot`) serves this as JSON. The IPC `Stat
 # TYPE ramshield_uptime_seconds gauge
 ramshield_uptime_seconds 342
 
-# HELP ramshield_events_total Total connection events processed.
-# TYPE ramshield_events_total counter
-ramshield_events_total 5490000
+# HELP ramshield_events_ingested_total Total events ingested.
+# TYPE ramshield_events_ingested_total counter
+ramshield_events_ingested_total 5490000
 
 # HELP ramshield_blocks_total Total blocks issued.
 # TYPE ramshield_blocks_total counter
 ramshield_blocks_total 47
 ```
+
+The counter for ingested events is `ramshield_events_ingested_total`.
 
 ### Native ingest drops
 
@@ -129,6 +193,16 @@ Queue pressure comes in two gauges:
 | `ramshield_ingest_channel_depth` | Current buffered events in the bounded ingest queue. |
 | `ramshield_ingest_channel_depth_peak` | High-water mark since process start. |
 
+The native capture worker counters say whether the capture path is
+actually running:
+
+| Metric | Meaning |
+|---|---|
+| `ramshield_native_capture_workers_expected` | Worker slots the capture path plans to run. |
+| `ramshield_native_capture_workers_started` | Slots that were actually started — a spawn failure is a real loss of capture capacity. |
+| `ramshield_native_capture_workers_running` | Slots alive right now. A slot between two capture attempts still counts as alive. |
+| `ramshield_native_capture_worker_failures_total` | Capture attempts that failed. |
+
 The instantaneous depth says how full the queue is right now; the peak says
 how close it has ever come to saturation. Read together with the drop
 counter, the peak distinguishes "the queue is genuinely too small for this
@@ -144,34 +218,63 @@ will not see this loss.
 `ramshield_blocks_total` counts block **decisions issued** — it matches the
 `HELP` text the exporter emits. A block whose kernel (XDP) projection failed
 is still counted here, because the decision was issued; those failures are
-counted separately by `ramshield_xdp_apply_failures_total`. Blocks actually
-projected into the kernel map are therefore
-`ramshield_blocks_total - ramshield_xdp_apply_failures_total`.
+counted separately by `ramshield_xdp_apply_failures_total`. The two
+counters have different populations — `inc_blocks` counts enforcement
+decisions, while the block log counts detection-side blocks — so their
+difference is not the number of blocks in the kernel map.
 
-`render_prometheus_cached()` caches the output for 1 second — preventing re-rendering on every scrape request. Prometheus typically scrapes every 15–30 seconds, so the cache hit rate is >95%.
+`render_prometheus_cached()` caches the output for 1 second. The cache
+absorbs bursts of scrapes inside the same second; a typical 15–30 second
+scrape interval is longer than the TTL, so each scrape re-renders the text.
 
-### System Usage
+### System usage
 
-`get_system_usage()` reads `/proc/self/stat` for CPU time and `/proc/self/status` for RSS — returning `(cpu_percent, rss_bytes, vm_bytes)`. Called once per second by the dashboard uptime ticker.
+`get_system_usage()` uses the `sysinfo` crate and returns
+`(cpu_usage: f32, total_ram_mb: usize, own_process_rss_mb: usize)`. The
+second element is the machine's total RAM and the third is this process's
+RSS, both in megabytes. It is called from `Engine::dashboard_snapshot()`
+and from `get_module_stats_data()`; an internal 1-second cache keeps it
+cheap.
 
 ## Uniqueness
 
-**Lock-free hot path.** Every counter that increments on every event uses atomics. The `Mutex`-protected structures (`batch_history`, `block_log`) are only written at flush boundaries — not per-event. This keeps the metrics overhead under 1% of total CPU even at 150K events/second.
+**Lock-free hot path.** Every counter that increments on every event uses
+atomics. The `Mutex`-protected rings are only written at flush boundaries —
+not per-event.
 
-**Cached Prometheus export.** Re-rendering Prometheus text on every scrape wastes CPU. The 1-second cache means the metrics string is built once per second regardless of scrape frequency.
+**Cached Prometheus export.** Re-rendering Prometheus text on every scrape
+wastes CPU. The 1-second cache means a burst of scrapes inside the same
+second renders the text once.
 
 ## Dependencies
 
-**Reads from:** `ramshield-storage` (`Store::traffic` for RAM usage, uptime).
+**Depends on:** `serde`, `serde_json`, `sysinfo`. This crate has **no**
+workspace-crate dependency — it never touches `Store`.
 
-**Written by:** `ramshield-detection` (`record_batch`), `ramshield-enforcement` (`record_block`), `ramshield-forecasting` (`set_forecast_hw`, `set_entropy`), `ramshield-engine` (ingested/rejected counts).
+**Written by:** `ramshield-detection` (`record_batch`, `record_block_ip`,
+`inc_ingested`), `ramshield-forecasting` (`set_forecast_hw`, `set_entropy`,
+`record_block_ip`), `ramshield-enforcement` (`inc_blocks`,
+`inc_xdp_apply_failures`, `set_wal_lsn`), the root package's IPC server
+(`inc_requests`, `inc_rejected`) and the root engine's native ingest
+(`inc_native_ingest_drop`).
 
-**Read by:** `ramshield-dashboard` (snapshot, Prometheus endpoint), `ramshield-ipc` (stats response).
+**Read by:** `ramshield` (the root package — its `src/dashboard/` module serves `/api/snapshot`, `/metrics` and `/api/history/*` from it, and `src/ipc/` is the other consumer), `ramshield-detection`, `ramshield-enforcement` and `ramshield-forecasting`. The dashboard and the IPC server are modules of the root crate, not crates of their own.
 
 ## Benchmarks
 
-No standalone benchmarks — metrics overhead is measured implicitly through the detection batch benchmarks. At 150K events/second, the metrics update time is <0.01ms per event.
+Measured in the workspace `hot_paths` bench (see `docs/BENCHMARKS.md`):
+
+| Operation | ns/op | ops/s |
+|---|---:|---:|
+| `inc_requests` (AtomicU64) | 7.2 | 139,373,988 |
+| `inc_ingested` (AtomicU64) | 6.9 | 144,835,178 |
+| `render_prometheus` (text format) | 20,638.6 | 48,453 |
 
 ## Testing
 
-14 tests covering: atomic counter accuracy under concurrent increment, batch history ring buffer overflow (old entries evicted), block log ring buffer overflow, Prometheus format validity (parsed by `prometheus::text::parse`), and dashboard snapshot field completeness.
+18 tests: JSON-cache invalidation for the block log and the batch history,
+the 1-second Prometheus render cache, the ingest depth and peak gauges,
+the IPC rejection breakdown series, the bloom series and the k=2
+false-positive formula, the XDP staleness and apply-failure counters, the
+native-ingest drop counters, the native capture worker counters, and
+block-log ring eviction at the configured cap.

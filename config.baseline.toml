@@ -9,19 +9,29 @@
 # surgical overrides only (ports, wal.dir, xdp toggle). Never copy-paste a
 # whole config again — one source of truth.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [engine] — Worker pool & RAM budget
+# Controls the Tokio async runtime and memory ceiling.
+# ─────────────────────────────────────────────────────────────────────────────
 [engine]
-# 0 = all cores (tokio auto). Pin an integer only on fixed-shape nodes.
+# 0 = all cores (Tokio auto). Pin an integer only on fixed-shape nodes.
 worker_threads = 0
-# Pin the engine's RAM budget explicitly (0 = schema default 512). 1024 =
-# safe default for small VMs; raise for production traffic.
+# Hard store budget in MB. Validation requires >= 64. Raise for production.
 ram_limit_mb = 1024
-# Lock-free shard fanout for the store: 256 = 2^8, power of two.
+# Lock-free shard fanout for the store. Must be a power of two.
 shard_count = 256
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [detection] — Attack detection thresholds & tuning
+# Rates are per-IP unless noted. Thresholds are policy — tune for your workload.
+# ─────────────────────────────────────────────────────────────────────────────
 [detection]
 # ── per-IP rate gate ────────────────────────────────────────────────────
+# Requests per second per IP to promote to full tracking. Lower = more sensitive.
 rps_threshold = 500
+# Rolling window (seconds) for RPS calculation.
 rate_window_secs = 10
+# Minimum events before full IpRecord tracking begins.
 promote_min_events = 4
 # Relative / small-scale detector: experimental, opt-in, qualify before production.
 relative_enabled = false
@@ -29,42 +39,52 @@ relative_factor = 5.0
 relative_floor_rps = 3.0
 relative_min_samples = 8
 relative_min_breaches = 3
+# Per-IP emergency burst gate: instant block if one IP emits this many events
+# in a single unflushed detection window (~pre_aggs_flush_interval).
+# 0 disables the fast path (flush-only detection).
 emergency_burst_threshold = 500
-# ── decision cadence (detection-first tuning, 4c18c78) ──────────────────
-# 25ms = decision-sample quantum per worker: halves block-decision latency.
-# flush 0.4-2ms at 4096 events ≈ 6-8% of a worker core — inside budget.
+# ── decision cadence ────────────────────────────────────────────────────
+# 25ms = decision-sample quantum per worker. Lower = faster decisions, higher CPU.
 batch_window_ms = 25
+# Max events accumulated before a forced flush.
 batch_max_events = 4096
-# Staleness backstop: 250ms — CUSUM arms ~2s faster, pulse windows sample
-# 4x/s. Idle cost ~3 near-empty flushes/s (microseconds).
+# Max wait (ms) before flushing a partial batch.
 pre_aggs_flush_interval_ms = 250
-# Force-flush trigger on shared pre_aggs: 1M holds the full working set
-# (bounded ~100 MB) — 8192 thrashed flushes under IP fanout.
+# Max unique IPs in the pre-aggregation buffer before flushing to main store.
 pre_aggs_max_size = 1_000_000
-# Sizing rule: bloom_bits ≈ 20 × (promoted IPs per 8s epoch) for ~1% FP.
-# 8M bits covers ~400k promotions/epoch; engine self-heals a mis-sized
-# value with an early epoch clear + warn.
+# Bloom filter bits (~1% FP at 400k promotions/epoch). Engine self-heals a
+# mis-sized value with an early epoch clear + warn.
 bloom_bits = 8_000_000
 # ── subnet layer ────────────────────────────────────────────────────────
-# Hot-filter floor for the subnet scan. MUST sit at or below the CGNAT
-# gate floor (hosts > 64) or the filter is stricter than the gate; and for
-# v4 /24 keys the max distinct hosts is 254, so 800 (the old "tuned" value)
-# made the v4 subnet layer structurally unreachable. 64 = gate floor.
+# Unique IPs per /24 in one window required to arm swarm detection.
+# MUST sit at or below the CGNAT gate floor (hosts > 64) or the filter is
+# stricter than the gate. For v4 /24 keys max distinct hosts is 254.
 subnet_batch_threshold = 64
+# /24 event volume in the same window — BOTH conditions required for block.
 subnet_batch_min_events = 500
+# /24 event count that lowers promotion threshold for that subnet.
 subnet_window_threshold = 12
+# Enable subnet batch blocking.
 batch_block_enabled = true
+# TTL (seconds) for per-IP blocks.
 block_ttl_secs = 300
+# TTL (seconds) for subnet-level blocks — shorter to avoid CGNAT lockout.
 subnet_burst_ttl_secs = 60
 # ── pulse (persistent low-rate) ─────────────────────────────────────────
+# Sliding window (seconds) to detect short bursts spaced below threshold.
 pulse_window_secs = 5
+# Distinct over-threshold samples within pulse_window_secs to escalate.
 pulse_threshold_samples = 3
-
 # ── L7 / HTTP2 ─────────────────────────────────────────────────────────
+# Enable bounded L7/HTTP2 scoring from proxy/application telemetry.
 l7_enabled = false
+# Per-IP L7 request rate considered abusive when L7 telemetry present.
 l7_rps_threshold = 500
+# Minimum HTTP/2 streams before reset-ratio scoring applies.
 l7_http2_min_streams = 32
+# HTTP/2 reset ratio percentage triggering protocol-specific detector.
 l7_http2_reset_ratio_pct = 80
+# TTL for L7/HTTP2 detector blocks.
 l7_block_ttl_secs = 300
 # Example route rule (disabled by default):
 # [[detection.l7_rules]]
@@ -77,78 +97,129 @@ l7_block_ttl_secs = 300
 # baseline_latency_us = 100000
 # max_effective_rps = 100
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [ipc] — Local control plane & authentication
+# Unix/TCP socket for CLI and operator commands. Loopback only in production.
+# ─────────────────────────────────────────────────────────────────────────────
 [ipc]
 tcp_addr = "127.0.0.1:7890"
-max_connections = 1024
+max_connections = 128
 max_line_length = 262_144
 max_connection_bytes = 1_048_576
 read_timeout_ms = 5000
 write_timeout_ms = 5000
 connection_idle_timeout_ms = 30_000
-# Development-only loopback credential. It is intentionally public and MUST be
-# replaced in any deployment where an untrusted local principal exists.
-# Every IPC frame remains HMAC-authenticated even on loopback.
+# HMAC-SHA256 keys as `key_id:hex_key` pairs. Replace the dev key in production.
+# Format: key_id:hex_key (hex >= 32 chars = 16 bytes).
 auth_keys = ["k1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 key_roles = [{ key_id = "k1", role = "Admin" }]
+# Refuse state-mutating requests without verified principal.
 require_auth = true
+# Require auth even when keys empty (loopback dev default).
+# Keep true unless loopback-only risk is accepted.
+require_auth_for_mutations = true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [dashboard] — Web UI & observability
+# RamShield has NO built-in TLS listener. Public bind requires admin_password_hash
+# and tls_enabled=true (external TLS terminator in front).
+# ─────────────────────────────────────────────────────────────────────────────
 [dashboard]
 enabled = true
 http_addr = "127.0.0.1:9999"
 block_log_size = 1_000
-# admin_password_hash: set via overlay (argon2 PHC string) before exposing
-# beyond loopback. tls_enabled/cookie_secure: flip when behind HTTPS.
+# Argon2 PHC hash of admin password. Generate with argon2 CLI.
+# Set before exposing beyond loopback.
+admin_password_hash = ""
+require_auth_for_config = true
 session_ttl_secs = 28_800
 max_login_attempts = 50
 max_password_length = 1024
 trusted_proxies = []
+# Set true only when behind HTTPS terminator. No built-in TLS stack.
 tls_enabled = false
+# Force/disable Secure flag on session cookies. None = derive from bind addr.
+cookie_secure = ""
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [wal] — Crash-durable persistence
+# Write-Ahead Log for block-state persistence across restarts.
+# ─────────────────────────────────────────────────────────────────────────────
 [wal]
 enabled = true
 dir = "/tmp/ramshield-wal"
-# GroupCommit = fsync amortized across concurrent commits; Flush = fdatasync
-# per write (use "flush" only when every block must survive power loss).
+# GroupCommit = fsync amortized across concurrent commits (~100ms window).
+# Flush = fdatasync per write (slower, safer). Use "flush" only when every
+# block must survive power loss.
 durability = "GroupCommit"
 compress = true
+# Segment rotation threshold in bytes.
 seg_max_bytes = 67_108_864
+# Max total WAL size on disk. Oldest segments deleted first. 0 = unlimited.
 retention_max_bytes = 1_073_741_824
+# When WAL open/replay fails, continue without durability. Default false.
+allow_volatile_fallback = false
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [forecasting] — Anomaly detection & trend analysis
+# EWMA + Holt-Winters forecasting for trend-based blocking.
+# ─────────────────────────────────────────────────────────────────────────────
 [forecasting]
 enabled = true
+# EWMA smoothing factor (0.0-1.0). Lower = smoother, higher = reactive.
 ewma_alpha = 0.3
+# Holt-Winters trend component (0.0-1.0).
 hw_beta = 0.1
+# Holt-Winters seasonality component (0.0-1.0).
 hw_gamma = 0.1
+# Seasonal period in seconds (1..86400). Match your traffic cycle.
 seasonality_period = 60
+# Z-score threshold for anomaly detection. Lower = more alerts.
 anomaly_zscore = 3.0
+# Minimum entropy threshold.
 min_entropy = 4.5
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [xdp] — Kernel eBPF dataplane
+# Kernel-level packet drops before socket allocation. Requires root/caps.
+# ─────────────────────────────────────────────────────────────────────────────
 [xdp]
-# Kernel dataplane: needs cap_net_admin,cap_perfmon,cap_bpf on the binary
-# (setcap re-applied after every rebuild). Fails gracefully → in-band.
+# Enable XDP. Requires cap_net_admin,cap_perfmon,cap_bpf on the binary
+# (re-apply setcap after every rebuild).
 enabled = false
+# Network interface to attach to (e.g. "eth0", "lo", "eno1").
 interface = "eth0"
+# "skb" (generic, works everywhere) or "drv" (native, production NICs).
 mode = "drv"
-require_native_for_autonomous = true
-require_rss_rebalance = true
-# Example cloud/LB node identity prefixes; keep empty unless this host receives
-# traffic through an overlay whose outer source is not the real client.
-trusted_overlay_cidrs = []
+# When XDP attach fails, continue in-band (DEGRADED). Default false:
+# configured XDP not attached = FAILED (/healthz 503).
 allow_inband_fallback = true
+# Autonomous protection qualified only for native/driver XDP.
+require_native_for_autonomous = true
+# Refuse autonomous startup if RSS cannot be rebalanced.
+require_rss_rebalance = true
+# Trusted cloud/LB source prefixes not interpreted as tenant bans.
+trusted_overlay_cidrs = []
 
-
-# ── Fleet mesh ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# [mesh] — CRDT-based cluster coordination
+# Lock-free CRDTs for multi-node block synchronization.
+# ─────────────────────────────────────────────────────────────────────────────
 [mesh]
 enabled = false
 node_id = 1
 listen_addr = "127.0.0.1:7900"
+# Peer socket addresses, same order as peer_node_ids and peer_auth_keys.
 peers = []
 peer_node_ids = []
 peer_auth_keys = []
-# Local node key. Keep secrets in a local overlay, not this template.
+# Local node HMAC key (hex, >= 32 chars). Must differ from every peer key.
 auth_key = ""
 
-# ── Upstream saturation escalation ────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# [upstream] — BGP FlowSpec / RTBH escalation
+# Upstream saturation escalation for ISP-level attacks.
+# ─────────────────────────────────────────────────────────────────────────────
 [upstream]
 enabled = false
 interface = "eth0"
@@ -162,26 +233,31 @@ bgp_fifo = ""
 protected_prefix = ""
 bgp_community = ""
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# [autonomous] — First-line cold-start packet protection
+# Stateless XDP PPS budgets. Qualified only for native/driver XDP.
+# ─────────────────────────────────────────────────────────────────────────────
 [autonomous]
-# First-line cold-start packet protection in XDP. Production baseline enabled.
 enabled = false
 syn_pps_per_cpu = 25000
 udp_pps_per_cpu = 50000
 packet_pps_per_cpu = 200000
 window_ms = 100
 
-# ── Native host observation ────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# [native_ingest] — AF_PACKET host telemetry
+# Direct NIC observation on Linux. Admission cap, not delivery guarantee.
+# ─────────────────────────────────────────────────────────────────────────────
 [native_ingest]
-# ponytail: eth0 doesn't exist on this host (eno1/wlp2s0) — disable until
-# interface is auto-detected; upgrade path: derive from default route.
 enabled = false
 interface = "eth0"
 max_events_per_sec = 20000
 
-# ── Kernel SYN proxy ──────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# [synproxy] — Kernel SYN proxy
+# Kernel-stateful SYN flood defense complementary to XDP stateless guard.
+# ─────────────────────────────────────────────────────────────────────────────
 [synproxy]
-# ponytail: disabled until running with CAP_NET_ADMIN / root.
 enabled = false
 ports = [22, 53, 80, 443]
 mss = 1460

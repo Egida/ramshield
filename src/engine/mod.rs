@@ -63,10 +63,13 @@ pub struct Engine {
     /// oneshot: sync send (usable from rt.block_on), async recv. Exactly-once.
     startup_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>,
     startup_rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>>,
+    /// F1: Cached channel capacity from config at startup (immutable).
+    effective_channel_capacity: usize,
 }
 
 impl Engine {
     pub fn new(cfg: Config, store: Arc<Store>, metrics: Arc<Metrics>) -> Self {
+        let effective_channel_capacity = cfg.detection.batch_channel_capacity;
         let (enforcement_tx, enforcement_rx) = mpsc::channel(8192);
         let (shutdown_tx, _) = watch::channel(false);
         let (startup_tx, startup_rx) = tokio::sync::oneshot::channel::<std::io::Result<()>>();
@@ -84,6 +87,8 @@ impl Engine {
             shutdown_tx,
             startup_tx: std::sync::Mutex::new(Some(startup_tx)),
             startup_rx: std::sync::Mutex::new(Some(startup_rx)),
+            // F1: Cache channel capacity at startup
+            effective_channel_capacity,
         }
     }
 
@@ -229,12 +234,30 @@ impl Engine {
         let pipeline_ok = self.pipeline_ready.load(Ordering::Acquire)
             && !self.pipeline_failed.load(Ordering::Acquire);
         let xdp_projection_stale = metrics.xdp_projection_stale.load(Ordering::Acquire) != 0;
+        // The native capture path is observation, not enforcement: the
+        // detection pipeline has a second event source (the IPC path
+        // feeds the same channel) and XDP/netfilter remain the
+        // enforcement layers. So a dead capture degrades the service and
+        // says so, it does not refuse readiness - a telemetry fault must
+        // not become an enforcement outage. The owner decided this.
+        //
+        // `expected` is set only when the capture path starts, so the
+        // daemon does not read "degraded" in the window before it does.
+        let native_capture_expected = metrics
+            .native_capture_workers_expected
+            .load(Ordering::Acquire);
+        let native_capture_running = metrics
+            .native_capture_workers_running
+            .load(Ordering::Acquire);
+        let native_capture_dead = native_capture_expected > 0 && native_capture_running == 0;
         let protection_state = if self.is_shutting_down() {
             crate::metrics::ProtectionState::Stopping
         } else if self.pipeline_failed.load(Ordering::Acquire) {
             crate::metrics::ProtectionState::Failed
         } else if !self.pipeline_ready.load(Ordering::Acquire) {
             crate::metrics::ProtectionState::Starting
+        } else if native_capture_dead {
+            crate::metrics::ProtectionState::Degraded
         } else if xdp_configured && !xdp_active && !allow_fb {
             crate::metrics::ProtectionState::Failed
         } else if xdp_configured && !xdp_active && allow_fb {
@@ -296,6 +319,8 @@ impl Engine {
                 "pipeline failed".into()
             } else if !self.pipeline_ready.load(Ordering::Acquire) {
                 "starting".into()
+            } else if native_capture_dead {
+                "native capture stopped".into()
             } else if xdp_configured && !xdp_active && !allow_fb {
                 "xdp inactive".into()
             } else if xdp_configured && !xdp_active && allow_fb {
@@ -309,6 +334,10 @@ impl Engine {
             },
             xdp_active,
             xdp_configured,
+            native_capture_workers_running: native_capture_running,
+            native_capture_worker_failures: metrics
+                .native_capture_worker_failures
+                .load(Ordering::Acquire),
             protection_state,
         }
     }
@@ -418,8 +447,29 @@ impl Engine {
             .try_send(cmd)
             .map_err(|e| format!("enforcement channel full or closed: {}", e))
     }
+
+    /// F1/F2: returns the startup-cached channel capacity. Immutable after boot
+    /// so hot-path IPC reads never touch the engine lock or ArcSwap.
+    pub fn channel_capacity(&self) -> usize {
+        self.effective_channel_capacity
+    }
+
+    /// F9: Boot-time invariant — DetectionEngine channel capacity must match
+    /// Engine's cached capacity. Fails closed at boot if they diverge.
+    pub fn set_detection(&self, det: Arc<crate::detection::DetectionEngine>) {
+        let det_cap = det.event_channel_capacity();
+        assert_eq!(
+            det_cap, self.effective_channel_capacity,
+            "FATAL: DetectionEngine allocated capacity does not match Engine startup capacity"
+        );
+        *self.detection.lock().unwrap_or_else(|e| e.into_inner()) = Some(det);
+    }
 }
 
 #[cfg(test)]
 #[path = "tests/startup.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+#[path = "tests/native_capture.rs"]
+mod native_capture_tests;

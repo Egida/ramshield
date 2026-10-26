@@ -342,10 +342,10 @@ impl Wal {
             }
         };
 
-        // The guard is released before retention: `run_retention` takes the same
-        // non-reentrant mutex, so holding it here would self-deadlock.
-        drop(g);
-
+        // fsync_dir runs BEFORE the mutex is released: the new segment's
+        // directory entry must be durable before any other thread can append
+        // to it, otherwise a crash could leave durable file contents with no
+        // durable directory entry (segment lost on recovery).
         if must_rotate {
             // A new segment whose directory entry was never made durable may
             // not survive a crash — poison like any other storage failure.
@@ -370,13 +370,17 @@ impl Wal {
                     .state = WalState::Poisoned;
                 return Err(Error::from_io(e));
             }
-            if self.retention_max > 0
-                && let Err(_e) = self.run_retention(self.ckpt_lsn.load(Ordering::SeqCst))
-            {
-                // Retention errors are logged and ignored per spec §20.2-3.
-                // We do not propagate them from append.
-            }
         }
+
+        // The guard is released AFTER directory sync (if rotation occurred):
+        // `run_retention` takes the same non-reentrant mutex, so holding it
+        // here would self-deadlock.
+        if must_rotate && self.retention_max > 0 {
+            // Retention errors are logged and ignored per spec §20.2-3.
+            // We do not propagate them from append.
+            let _ = self.run_retention(self.ckpt_lsn.load(Ordering::SeqCst));
+        }
+
         Ok(lsn_obj)
     }
 

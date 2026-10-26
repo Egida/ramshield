@@ -11,12 +11,63 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: ramshield
+      app.kubernetes.io/component: server
   template:
     metadata:
       labels:
         app.kubernetes.io/name: ramshield
+        app.kubernetes.io/component: server
     spec:
+      serviceAccountName: ramshield
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: ramshield
-          image: {{ k8s_image | default('ghcr.io/grep999/ramshield') }}:{{ k8s_image_tag | default('latest') }}
+          image: {{ k8s_image | default('ghcr.io/grep999/ramshield') }}:{{ k8s_image_tag | default('0.6.0') }}
+          imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/ramshield/config.toml"]
+          ports:
+            - name: ipc
+              containerPort: 7890
+              protocol: TCP
+            - name: dashboard
+              containerPort: 9999
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,ramshield=debug"
+            - name: RAMSHIELD_DASHBOARD__ADMIN_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: ramshield-admin
+                  key: argon2-hash
+                  optional: false
+            - name: RAMSHIELD_IPC__AUTH_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: ramshield-admin
+                  key: ipc-auth-key
+                  optional: false
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ramshield
+              readOnly: true
+            - name: wal
+              mountPath: /var/lib/ramshield/wal
+      volumes:
+        - name: config
+          configMap:
+            name: ramshield-config
+        - name: wal
+          persistentVolumeClaim:
+            claimName: ramshield-wal

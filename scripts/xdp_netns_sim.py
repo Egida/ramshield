@@ -139,7 +139,7 @@ def main() -> int:
     print(f"    Subnet: {SUBNET}.0/24  Bridge: {BRIDGE}  XDP target: {DST_IP} (peer {PEER})")
 
     # Verify XDP active
-    snap_req = urllib.request.Request("http://127.0.0.1:9999/api/snapshot")
+    snap_req = urllib.request.Request(f"{DASH}/api/snapshot")
     with urllib.request.urlopen(snap_req, timeout=3) as r:
         snap = json.loads(r.read())
     if not snap.get("xdp_active"):

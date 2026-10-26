@@ -98,6 +98,30 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
+            "ramshield_native_capture_workers_expected",
+            self.native_capture_workers_expected.load(Ordering::Relaxed),
+            "Capture worker slots the native capture path plans to run.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_workers_started",
+            self.native_capture_workers_started.load(Ordering::Relaxed),
+            "Capture worker slots that were actually started.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_workers_running",
+            self.native_capture_workers_running.load(Ordering::Relaxed),
+            "Capture worker slots alive right now.",
+            "gauge"
+        ));
+        out.push_str(&emit!(
+            "ramshield_native_capture_worker_failures_total",
+            self.native_capture_worker_failures.load(Ordering::Relaxed),
+            "Capture attempts that failed.",
+            "counter"
+        ));
+        out.push_str(&emit!(
             "ramshield_ingest_channel_depth",
             self.ingest_channel_depth.load(Ordering::Relaxed),
             "Current buffered events in the bounded ingest queue.",
@@ -176,16 +200,39 @@ impl Metrics {
             "counter"
         ));
         out.push_str(&emit!(
-            "auth_lockout_total",
+            "ramshield_auth_lockout_total",
             self.auth_lockout_total.load(Ordering::Relaxed),
             "Total dashboard login lockout events.",
             "counter"
         ));
         out.push_str(&emit!(
-            "auth_verification_wait_ms",
+            "ramshield_auth_verification_wait_ms",
             self.auth_verification_wait_ms.load(Ordering::Relaxed),
             "Latest Argon2 verification wait duration in ms.",
             "gauge"
+        ));
+        // The 403 breakdown: the aggregate above counts every rejected
+        // request, this one counts the authorization rejections, so the
+        // two can be compared.
+        out.push_str(&emit!(
+            "ramshield_ipc_authz_rejections_total",
+            self.ipc_authz_rejections.load(Ordering::Relaxed),
+            "Total IPC requests rejected with 403 for authorization reasons.",
+            "counter"
+        ));
+        // The store's RAM refusal: the IP was dropped from tracking
+        // entirely, so the count is the only trace it left.
+        out.push_str(&emit!(
+            "ramshield_store_ram_refusals_total",
+            self.capacity_exceeded_count.load(Ordering::Relaxed),
+            "Total records the store refused to admit because of the RAM budget.",
+            "counter"
+        ));
+        out.push_str(&emit!(
+            "ramshield_store_ram_refused_ips_total",
+            self.capacity_exceeded_ips.load(Ordering::Relaxed),
+            "Total IPs the store refused to admit because of the RAM budget.",
+            "counter"
         ));
         // Patch A: bloom is an advisory revisit cache over PROMOTED ips (not
         // a block list). n = distinct promotes this 8s epoch, m = capacity in

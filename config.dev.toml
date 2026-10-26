@@ -28,6 +28,11 @@ retention_max_bytes = 10485760
 
 [forecasting]
 enabled = false
+ewma_alpha = 0.3
+hw_beta = 0.5
+hw_gamma = 0.7
+seasonality_period = 30
+anomaly_zscore = 2.0
 
 [detection]
 rps_threshold = 500

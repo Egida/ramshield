@@ -30,7 +30,13 @@ pub struct AppState {
 
 // ponytail: this is redundant due to Rust edition; async fn is part of
 // the standard (edition 2021). Keep for clarity, but no syntax change needed.
-pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), String> {
+/// Build the dashboard's auth state and app state around the engine.
+///
+/// The auth state shares the **engine's** metrics instance. It used to
+/// get a fresh one, so the CSRF and lockout counters it wrote never
+/// reached the instance `/metrics` exports - the control-plane abuse
+/// signals were structurally always zero.
+fn app_state(engine: &Arc<Engine>, cfg: &Config) -> (auth::AuthState, AppState) {
     let auth = auth::AuthState::new(
         cfg.dashboard.admin_password_hash.clone(),
         cfg.dashboard.session_ttl_secs,
@@ -40,13 +46,18 @@ pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), 
         cfg.dashboard
             .cookie_secure
             .unwrap_or(cfg.dashboard.tls_enabled),
-        Arc::new(ramshield_metrics::Metrics::new()),
+        engine.metrics.clone(),
         cfg.dashboard.argon2_parallelism,
     );
     let app_state = AppState {
         engine: engine.clone(),
         auth: Arc::new(auth.clone()),
     };
+    (auth, app_state)
+}
+
+pub async fn serve(engine: Arc<Engine>, addr: &str, cfg: &Config) -> Result<(), String> {
+    let (auth, app_state) = app_state(&engine, cfg);
     let login = auth::router().with_state(auth);
     let app = Router::new()
         .route("/", get(index))
@@ -115,6 +126,11 @@ async fn api_healthz(State(state): State<AppState>) -> (StatusCode, Json<serde_j
             "xdp_active": snapshot.xdp_active,
             "xdp_configured": snapshot.xdp_configured,
             "protection_state": snapshot.protection_state,
+            // The native capture path is observation, not enforcement: a
+            // dead capture leaves the service degraded, not unready, and
+            // this is where an operator sees that.
+            "native_capture_workers_running": snapshot.native_capture_workers_running,
+            "native_capture_worker_failures": snapshot.native_capture_worker_failures,
         })),
     )
 }
@@ -480,8 +496,8 @@ async fn api_stream(
             serde_json::json!({"stage":"wire","unit":"events","ingress":snapshot.events_ingested+snapshot.events_rejected+snapshot.events_shed,"drops":0}),
             serde_json::json!({"stage":"xdp","unit":"packets","ingress":state.engine.metrics.xdp_wire_pass.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed),"drops":state.engine.metrics.xdp_v4_drops.load(std::sync::atomic::Ordering::Relaxed)+state.engine.metrics.xdp_v6_drops.load(std::sync::atomic::Ordering::Relaxed)}),
             serde_json::json!({"stage":"ipc","unit":"events","ingress":snapshot.events_ingested,"drops":snapshot.events_rejected+snapshot.events_shed}),
-            serde_json::json!({"stage":"cold","unit":"IPs","ingress":snapshot.pipeline.batched,"drops":snapshot.cold_skipped}),
-            serde_json::json!({"stage":"detection","unit":"IPs","ingress":snapshot.pipeline.promoted+snapshot.pipeline.merged+snapshot.pipeline.blocked,"drops":0}),
+            serde_json::json!({"stage":"cold","unit":"IPs","ingress":snapshot.pipeline.promoted+snapshot.cold_skipped,"drops":snapshot.cold_skipped}),
+            serde_json::json!({"stage":"detection","unit":"IPs","ingress":snapshot.pipeline.promoted,"drops":0}),
             serde_json::json!({"stage":"enforcement","unit":"blocks","ingress":snapshot.pipeline.blocked,"drops":0}),
         ];
         let payload = serde_json::json!({
@@ -510,6 +526,8 @@ async fn api_stream(
                 "cold_skipped_total": snapshot.cold_skipped,
                 "blocks_total": snapshot.blocks_applied,
                 "blocks_detection": state.engine.metrics.blocks_detection.load(std::sync::atomic::Ordering::Relaxed),
+                "capacity_exceeded_total": state.engine.metrics.capacity_exceeded_count.load(std::sync::atomic::Ordering::Relaxed),
+                "capacity_refused_ips_total": state.engine.metrics.capacity_exceeded_ips.load(std::sync::atomic::Ordering::Relaxed),
                 "subnet_blocks": state.engine.metrics.blocks_subnet.load(std::sync::atomic::Ordering::Relaxed),
                 "forecast_blocks": state.engine.metrics.blocks_forecast.load(std::sync::atomic::Ordering::Relaxed),
                 "modules": modules
@@ -536,7 +554,9 @@ async fn api_stream(
                 "health_reason": snapshot.health_reason,
                 "xdp_active": snapshot.xdp_active,
                 "xdp_configured": snapshot.xdp_configured,
-                "protection_state": snapshot.protection_state
+                "protection_state": snapshot.protection_state,
+                "native_capture_workers_running": snapshot.native_capture_workers_running,
+                "native_capture_worker_failures": snapshot.native_capture_worker_failures
             },
             "pipeline": pipeline_stages
         });
@@ -588,6 +608,149 @@ mod tests {
         assert!(
             load_blocks.contains("filterTable()"),
             "loadBlocks must re-apply the filter after it rebuilds the rows, or the filter reverts every refresh"
+        );
+    }
+
+    /// The quarantine table's headers, the cells each row gets, the CSV
+    /// export's columns and its slice bound must all agree.
+    ///
+    /// They did not: the table had 5 headers and 6 cells (the surplus was a
+    /// trailing em dash), and the CSV declared 5 column names but sliced 4
+    /// cells out of every row, so every exported row silently lost its
+    /// Time. The mismatch came back on every 5 s rebuild.
+    #[test]
+    fn the_quarantine_table_and_its_csv_export_agree_on_the_column_count() {
+        let page = include_str!("static/index.html");
+
+        // The header cells of the quarantine table (the page has more than
+        // one table, so scope to the quarantine one).
+        let table = page
+            .split("id=\"quarantineTable\"")
+            .nth(1)
+            .expect("the quarantine table must exist");
+        let head_section = &table[..table.find("</thead>").expect("the table must have a head")];
+        let head = head_section.matches("<th>").count();
+        assert_eq!(
+            head, 5,
+            "the quarantine table's header count changed: {head}"
+        );
+
+        // The cells each row gets: the value list loadBlocks builds.
+        let values = page
+            .split("for(const v of [")
+            .nth(1)
+            .expect("loadBlocks must build rows from a value list");
+        let values = &values[..values.find(']').expect("the value list must end")];
+        assert_eq!(
+            count_top_level_items(values),
+            head,
+            "the quarantine table builds a different number of cells than it has headers"
+        );
+
+        // The CSV export: the names it declares and the cells it takes.
+        let csv = page
+            .split("let csv=")
+            .nth(1)
+            .expect("exportCSV must declare a CSV header");
+        let csv = &csv[..csv.find(';').expect("the CSV header must end")];
+        let names = csv.trim_matches('\'').trim_matches('"');
+        assert_eq!(
+            names.split(',').count(),
+            head,
+            "the CSV export declares a different number of columns than the table has"
+        );
+
+        let export = page
+            .split("function exportCSV()")
+            .nth(1)
+            .expect("exportCSV must exist");
+        let slice = export
+            .split("slice(0,")
+            .nth(1)
+            .expect("exportCSV must slice the row's cells");
+        let bound: usize = slice
+            .split(')')
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or_else(|| panic!("the CSV slice bound is not a number: {slice}"));
+        assert_eq!(
+            bound, head,
+            "the CSV export takes {bound} cells of a {head}-column row"
+        );
+
+        // The placeholder rows must span the same number of columns.
+        for span in ["colspan=\"", "colSpan="] {
+            let mut rest = page;
+            while let Some(i) = rest.find(span) {
+                let after = &rest[i + span.len()..];
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    let n: usize = digits.parse().unwrap();
+                    assert_eq!(
+                        n, head,
+                        "a quarantine placeholder row spans {n} columns, the table has {head}"
+                    );
+                }
+                rest = &rest[i + span.len()..];
+            }
+        }
+    }
+
+    /// The number of items in a JavaScript array literal, ignoring the
+    /// commas that sit inside a nested call or a quoted string.
+    fn count_top_level_items(list: &str) -> usize {
+        let list = list.trim();
+        if list.is_empty() {
+            return 0;
+        }
+        let mut depth = 0usize;
+        let mut items = 1usize;
+        let mut in_str = false;
+        let mut quote = ' ';
+        for c in list.chars() {
+            if in_str {
+                if c == quote {
+                    in_str = false;
+                }
+                continue;
+            }
+            match c {
+                '\'' | '"' | '`' => {
+                    in_str = true;
+                    quote = c;
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => items += 1,
+                _ => {}
+            }
+        }
+        items
+    }
+
+    /// F-32: the auth state must share the engine's metrics instance.
+    /// It used to get a fresh one, so the CSRF and lockout counters it
+    /// writes never reached the instance `/metrics` exports, and the
+    /// control-plane abuse signals were structurally always zero.
+    #[test]
+    fn the_auth_state_shares_the_engine_metrics() {
+        use crate::metrics::Metrics;
+        use crate::storage::Store;
+        let engine = Arc::new(Engine::new(
+            Config::default(),
+            Arc::new(Store::new(16)),
+            Arc::new(Metrics::new()),
+        ));
+        let (_auth, state) = app_state(&engine, &Config::default());
+        assert!(
+            Arc::ptr_eq(&state.auth.metrics, &state.engine.metrics),
+            "the auth state must share the engine's metrics, or its counters are never exported"
+        );
+        state.auth.metrics.inc_csrf_blocked();
+        let text = state.engine.metrics.render_prometheus();
+        assert!(
+            text.contains("ramshield_csrf_blocked_total 1"),
+            "a blocked CSRF request must reach the exported series:\n{text}"
         );
     }
 

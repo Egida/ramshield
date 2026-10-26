@@ -521,10 +521,11 @@ def shell(cfg: NexusConfig, profiles: Dict[str, Any]) -> int:
     def start_flood(dur: float) -> None:
         nonlocal flood_thread
         stop.clear()
-        local_stop = StopFlag()
 
         def _run() -> None:
-            run_flood(cfg, duration=dur, stop=local_stop, stats=stats)
+            # The same flag the `stop` command sets: a local one would make
+            # the command a no-op and the flood would run to its duration.
+            run_flood(cfg, duration=dur, stop=stop, stats=stats)
 
         flood_thread = threading.Thread(target=_run, daemon=True)
         flood_thread.start()

@@ -331,7 +331,11 @@ pub async fn require_auth(
     // ponytail: /static/ is dead — nothing serves it (the HUD is inlined via
     // include_str! in mod.rs). Leaving the prefix exemption is a latent
     // unauthenticated surface the moment a static mount is added. Drop it.
-    if path == "/healthz" || path == "/livez" || path == "/login" || path == "/metrics" {
+    // /metrics is NOT exempt (F-48): the exporter's operational counters are
+    // not public on a port the network policy opens to other namespaces.
+    // A scraper that needs it unauthenticated must go through a session
+    // or a dedicated port.
+    if path == "/healthz" || path == "/livez" || path == "/login" {
         return next.run(req).await;
     }
     if session_valid(auth, req.headers()) {

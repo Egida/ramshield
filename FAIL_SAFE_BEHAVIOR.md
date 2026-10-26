@@ -1,10 +1,30 @@
 # RamShield Fail-Safe Behavior Documentation
 
-This document describes the fail-safe policies implemented across RamShield's critical components. All findings and implementations are based on the code audit performed on 2026-10-13.
+This document describes the fail-safe policies implemented across RamShield's critical components. It was last checked against the source on 2026-10-22; every claim below names the file it is about.
 
 ## Executive Summary
 
-RamShield follows a **fail-closed** security posture across all production code paths. The guiding principle is: **any uncertainty or failure defaults to blocking traffic, never allowing it through.** This ensures that under adversarial conditions (DDoS, network partitions, component failures), the system degrades securely rather than silently accepting all traffic.
+RamShield has **no single fail-closed posture**. The subsystems differ, on
+purpose, and each one states its own behaviour:
+
+- **The XDP dataplane fails open on packets it cannot judge.**
+  `crates/ramshield-xdp/ramshield-xdp-bpf/src/main.rs` returns `XDP_PASS`
+  on the parse-failure and unsupported-traffic paths (lines 130, 192, 197,
+  236) and `XDP_DROP` only where it can classify the packet. Dropping
+  every packet the parser cannot read would be a self-inflicted outage;
+  the dataplane trades that availability for the packets it cannot judge.
+  A *map update* failure is different: it returns `Err` and the caller
+  keeps its in-band state (section 1).
+- **The authentication path fails closed.** A wrong signature, a
+  timestamp outside the 10-second skew window and a replayed frame are
+  all rejected (`crates/ramshield-protocol/src/auth.rs:62-91`).
+- **The store refuses rather than drops.** Under the RAM budget it
+  refuses a net-new key with `RsError::CapacityExceeded`; it does not
+  evict live entries to make room.
+- **The native capture path degrades the service and keeps serving.** A
+  capture that cannot start, or that dies, shows in the metrics, the
+  dashboard and the health reason; the daemon reports `Degraded` and
+  stays up. Capture is observation, not enforcement. This ensures that under adversarial conditions (DDoS, network partitions, component failures), the system degrades securely rather than silently accepting all traffic.
 
 ## Documented Fail-Safe Behaviors
 
@@ -97,7 +117,7 @@ These fail-safe behaviors are enforced as gate criteria before production deploy
 | **Gate 1** | All map operations return `Result` on failure (no bare `.unwrap()` in production paths) | ✅ Enforcement XDP: Fixed; WAL: Pending test refactor |
 | **Gate 2** | Clock errors handled defensively (no panic on SystemTime failure) | ✅ Auth module: Fixed |
 | **Gate 3** | Error context preserved (no `.map_err(Foo)` without `?` context) | ✅ Both modules: Fixed |
-| **Gate 4** | Fail-closed documented and verified in CI | ✅ Audit report: Complete |
+| **Gate 4** | Every subsystem's fail-safe behaviour documented | ⚠️ Partial — the dataplane is fail-open by design (section 1), so there is no single fail-closed contract to verify; what is verified is that each subsystem states its own behaviour |
 
 ## Verification Checklist
 
@@ -109,7 +129,7 @@ These fail-safe behaviors are enforced as gate criteria before production deploy
 
 ## Related Documentation
 
-- `.hermes/plans/2026-08-22_enforcement-production.md` - Original production semantics
+- `docs/development/MASTER_AUDIT_2026_10_21_REVIEW.md` - the current independent review of the enforcement path
 - `AUDIT_REPORT.md` - Full audit with P0/P1/P2/P3 findings and remediation code
 - `deployment_cli.rs` - Automated deployment integration that validates these gates
 
@@ -117,4 +137,5 @@ These fail-safe behaviors are enforced as gate criteria before production deploy
 
 1. **WAL Test Refactoring** (P2 effort): Convert `wal_checkpoint_flow()` test from `()->()` to `Result<(), RsError>` to enable full error propagation fixes
 2. **Monitoring Integration**: Add metrics for fail-safe triggers (map errors, auth clock fallsbacks)
-3. **Cross-Crate Validation**: Ensure all crates respect the same fail-closed contract
+3. **Cross-Crate Validation**: The subsystems have different postures by
+   design; the check is that each one states its own, not that they agree

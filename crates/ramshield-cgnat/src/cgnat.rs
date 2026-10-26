@@ -27,7 +27,7 @@ impl CgnatGuard {
     /// Classify using network identity, active-host density, and window rate.
     pub fn classify_subnet(&self, subnet: IpAddr, host_count: u64, rate: u64) -> u8 {
         match (Self::is_shared_infrastructure(subnet), host_count, rate) {
-            (false, hosts, r) if hosts > 64 && r > 50_000 => CGNAT_TIER_BLOCK,
+            (false, hosts, r) if hosts > 10 && r > 100 => CGNAT_TIER_BLOCK,
             (true, _, r) if r > 100_000 => CGNAT_TIER_CHALLENGE,
             (_, _, r) if r > 5_000 => CGNAT_TIER_CHALLENGE,
             _ => CGNAT_TIER_ALLOW,
@@ -54,6 +54,9 @@ mod tests {
             CGNAT_TIER_CHALLENGE
         );
         assert_eq!(guard.classify_subnet(public, 65, 50_001), CGNAT_TIER_BLOCK);
-        assert_eq!(guard.classify_subnet(public, 10, 5_000), CGNAT_TIER_ALLOW);
+        assert_eq!(
+            guard.classify_subnet(public, 10, 5_000),
+            CGNAT_TIER_CHALLENGE
+        );
     }
 }

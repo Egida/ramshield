@@ -16,9 +16,17 @@ def build_plan(count: int, family: str, prefixlen: int, hosts_per_network: int, 
         raise ValueError("IPv6 test fixtures require /64")
     out = []
     for i in range(count):
-        net = ipaddress.ip_network(f"192.0.{2 + i}.0/24") if family != "v6" else ipaddress.ip_network(f"2001:db8:{seed + i}::/64")
-        hosts = [{"ip": str(net.network_address + (j % (net.num_addresses - 2)) + 1), "events": 1} for j in range(hosts_per_network)]
-        out.append({"network": str(net), "family": 4 if net.version == 4 else 6, "hosts": hosts})
+        # "dual" means both families, one network each per index - the
+        # sibling generator does the same.
+        families = ("v4", "v6") if family == "dual" else (family,)
+        for fam in families:
+            net = (
+                ipaddress.ip_network(f"192.0.{2 + i}.0/24")
+                if fam == "v4"
+                else ipaddress.ip_network(f"2001:db8:{seed + i}::/64")
+            )
+            hosts = [{"ip": str(net.network_address + (j % (net.num_addresses - 2)) + 1), "events": 1} for j in range(hosts_per_network)]
+            out.append({"network": str(net), "family": 4 if net.version == 4 else 6, "hosts": hosts})
     return out
 
 def ramshield_overlay(interface: str, ipc_port: str, dashboard_port: str) -> dict:
@@ -58,10 +66,14 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=("plan", "create", "destroy"))
     p.add_argument("--count", type=int, default=2)
+    p.add_argument("--family", choices=("v4", "v6", "dual"), default="v4")
+    p.add_argument("--prefixlen", type=int, default=None)
+    p.add_argument("--hosts-per-net", type=int, default=32)
     p.add_argument("--output", default="-")
     args = p.parse_args()
     try:
-        result = build_plan(args.count, "v4", 24, 32, 7) if args.action == "plan" else (create(args.count) if args.action == "create" else (destroy(args.count) or {"destroyed": args.count}))
+        prefix = args.prefixlen if args.prefixlen is not None else (64 if args.family == "v6" else 24)
+        result = build_plan(args.count, args.family, prefix, args.hosts_per_net, 7) if args.action == "plan" else (create(args.count) if args.action == "create" else (destroy(args.count) or {"destroyed": args.count}))
     except (ValueError, PermissionError, subprocess.CalledProcessError) as e:
         print(f"network_create: {e}")
         return 2
