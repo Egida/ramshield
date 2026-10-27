@@ -512,6 +512,12 @@ impl Store {
                     proto_fingerprint: 0,
                     threat_score: 0.0,
                     block_state: new_state,
+                    variance: 0.1,
+                    last_bucket_ns: 0,
+                    adaptive_sample_count: 0,
+                    recovery_count: 0,
+                    bucket_accum_pps: 0.0,
+                    detector_mode: 0,
                 };
                 let old_had_ttl = e.expires_at.is_some();
                 e.value = Value::IpRecord(rec.clone());
@@ -547,6 +553,12 @@ impl Store {
                     proto_fingerprint: 0,
                     threat_score: 0.0,
                     block_state: new_state,
+                    variance: 0.1,
+                    last_bucket_ns: 0,
+                    adaptive_sample_count: 0,
+                    recovery_count: 0,
+                    bucket_accum_pps: 0.0,
+                    detector_mode: 0,
                 };
                 let entry_size = std::mem::size_of::<IpAddr>() + std::mem::size_of::<Entry>();
                 let mut current = self.ram_bytes.load(Ordering::Relaxed);

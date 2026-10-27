@@ -1417,6 +1417,7 @@ dependencies = [
  "dashmap",
  "ramshield-cgnat",
  "ramshield-config",
+ "ramshield-forecasting",
  "ramshield-metrics",
  "ramshield-storage",
  "ramshield-types",

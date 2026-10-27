@@ -16,6 +16,7 @@ use ramshield_types::events::ConnectionEvent;
 const CHANNEL_CAPACITY: usize = 64_000;
 const DEFAULT_BATCH_WINDOW_MS: u64 = 250;
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 250;
+#[allow(dead_code)]
 const LOCAL_MERGE_SOFT_CAP: usize = 8_192;
 
 /// Build a detection engine wrapped in Arc for spawn_workers API.
@@ -80,6 +81,7 @@ struct LoadMetrics {
     started_at: Instant,
 }
 
+#[allow(dead_code)]
 impl LoadMetrics {
     fn new() -> Self {
         Self {
@@ -315,7 +317,7 @@ fn burst_overload_rejection() {
 
     metrics.report("burst_overload_rejection");
 
-    let rejected = metrics.events_rejected.load(Ordering::Relaxed);
+    let _rejected = metrics.events_rejected.load(Ordering::Relaxed);
     let accepted = metrics.events_accepted.load(Ordering::Relaxed);
     // In fast-consumer environments, 0 rejections is valid - system handles the load
     // Just ensure accepted events are bounded by channel capacity + some headroom

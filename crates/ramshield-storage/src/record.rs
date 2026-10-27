@@ -162,6 +162,30 @@ pub struct IpRecord {
     pub proto_fingerprint: u32,
     pub threat_score: f32,
     pub block_state: BlockState,
+    /// Adaptive CUSUM variance — baseline for serde default to 0.1 (positive floor).
+    #[serde(default = "default_variance")]
+    pub variance: f64,
+    /// Last completed 1-second bucket timestamp (ns).
+    #[serde(default)]
+    pub last_bucket_ns: u64,
+    /// Adaptive sample count (full u64 — storage keeps legacy u8 sample_count).
+    #[serde(default)]
+    pub adaptive_sample_count: u64,
+    /// Consecutive clean-tick recovery counter while breached.
+    #[serde(default)]
+    pub recovery_count: u64,
+    /// Sub-second bucket accumulator (pps) — flushed at 1s boundary.
+    #[serde(default)]
+    pub bucket_accum_pps: f64,
+    /// Detector mode: 0=WarmingUp, 1=Monitoring, 2=Breached.
+    #[serde(default)]
+    pub detector_mode: u8,
+}
+
+/// Default variance for serde deserialization of legacy IpRecord checkpoints.
+#[inline]
+pub fn default_variance() -> f64 {
+    0.1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

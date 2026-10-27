@@ -590,3 +590,706 @@ mod t13_pulse_tracker_tests {
         assert_eq!(tracker.observations.len(), MAX_PULSE_OBSERVATIONS);
     }
 }
+
+// P7/P8 adaptive detector: kept additive to preserve the existing rate-tracker API.
+use ramshield_forecasting::Hypothesis;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectorMode {
+    WarmingUp,
+    Monitoring,
+    Breached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrafficContext {
+    pub hypothesis: Hypothesis,
+    pub observed_at_ns: u64,
+    pub confidence: f64,
+}
+
+impl TrafficContext {
+    pub fn is_valid(&self) -> bool {
+        self.confidence.is_finite() && (0.0..=1.0).contains(&self.confidence)
+    }
+
+    /// Evaluates freshness.
+    ///
+    /// # Invariant
+    /// Future-dated context (observed_at_ns > now_ns) is rejected before checking staleness.
+    pub fn is_fresh(&self, now_ns: u64, max_staleness_ns: u64) -> bool {
+        self.is_valid()
+            && self.observed_at_ns <= now_ns
+            && (now_ns - self.observed_at_ns) <= max_staleness_ns
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DetectorProfile {
+    pub min_threshold_h: f64,
+    pub min_slack_k: f64,
+    pub min_variance: f64,
+    pub alpha: f64,
+    pub clear_ratio: f64,
+    pub warmup_samples: u64,
+    /// Number of consecutive non-increasing, below-clear-threshold samples needed to recover.
+    pub recovery_samples: u64,
+    pub max_gap_tolerance_ns: u64,
+}
+
+impl Default for DetectorProfile {
+    fn default() -> Self {
+        Self {
+            min_threshold_h: 5.0,
+            min_slack_k: 1.0,
+            min_variance: 0.5,
+            alpha: 0.05,
+            clear_ratio: 0.35,
+            warmup_samples: 5,
+            recovery_samples: 3,
+            max_gap_tolerance_ns: 5_000_000_000, // 5 seconds
+        }
+    }
+}
+
+impl DetectorProfile {
+    /// Reject invalid parameters before they can poison threshold or adaptation math.
+    fn is_valid(&self) -> bool {
+        self.min_threshold_h.is_finite()
+            && self.min_threshold_h > 0.0
+            && self.min_slack_k.is_finite()
+            && self.min_slack_k > 0.0
+            && self.min_variance.is_finite()
+            && self.min_variance > 0.0
+            && self.alpha.is_finite()
+            && self.alpha > 0.0
+            && self.alpha <= 1.0
+            && self.clear_ratio.is_finite()
+            && self.clear_ratio > 0.0
+            && self.clear_ratio < 1.0
+            && self.warmup_samples > 0
+            && self.recovery_samples > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectorError {
+    InvalidCurrentRate,
+    NonMonotonicTimestamp,
+    InvalidInternalBaseline,
+    InvalidInternalVariance,
+    InvalidInternalCusum,
+    InvalidContextConfidence,
+    InvalidProfile,
+    InvalidInternalSampleCount,
+    NumericalCalculationFailure,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectionOutcome {
+    pub is_breached: bool,
+    pub cusum_score: f64,
+    pub firing_threshold: f64,
+    pub baseline_rate: f64,
+    pub mode: DetectorMode,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerIpRecord {
+    pub baseline_rate: f64,
+    pub variance: f64,
+    pub cusum_s: f64,
+    pub last_bucket_ns: u64,
+    pub sample_count: u64,
+    /// Consecutive recovery-evidence samples observed while breached.
+    pub recovery_count: u64,
+    pub mode: DetectorMode,
+    pub profile: DetectorProfile,
+}
+
+impl PerIpRecord {
+    /// Constructs a detector record after validating every profile parameter.
+    pub fn new(initial_rate: f64, profile: DetectorProfile) -> Result<Self, DetectorError> {
+        if !initial_rate.is_finite() || initial_rate < 0.0 {
+            return Err(DetectorError::InvalidCurrentRate);
+        }
+        if !profile.is_valid() {
+            return Err(DetectorError::InvalidProfile);
+        }
+
+        let scaled_rate = initial_rate * 0.1;
+        let initial_variance = (scaled_rate * scaled_rate).max(profile.min_variance);
+        if !initial_variance.is_finite() || initial_variance <= 0.0 {
+            return Err(DetectorError::NumericalCalculationFailure);
+        }
+
+        Ok(Self {
+            baseline_rate: initial_rate,
+            variance: initial_variance,
+            cusum_s: 0.0,
+            last_bucket_ns: 0,
+            sample_count: 0,
+            recovery_count: 0,
+            mode: DetectorMode::WarmingUp,
+            profile,
+        })
+    }
+
+    /// Evaluates a discrete bucket rate update.
+    ///
+    /// # Atomic Guarantees
+    /// Pre-validates input and state fields before mutating any record variables.
+    /// If an error occurs, the record remains identical to its pre-call state.
+    #[allow(clippy::collapsible_if)]
+    pub fn update(
+        &mut self,
+        current_rate: f64,
+        timestamp_ns: u64,
+        context: Option<&TrafficContext>,
+    ) -> Result<DetectionOutcome, DetectorError> {
+        // --- STEP 1: ATOMIC PRE-VALIDATION ---
+        if !current_rate.is_finite() || current_rate < 0.0 {
+            return Err(DetectorError::InvalidCurrentRate);
+        }
+        // sample_count, not timestamp==0, indicates whether a prior sample exists.
+        // Timestamp zero is a valid first timestamp and must not disable monotonicity.
+        if self.sample_count > 0 && timestamp_ns <= self.last_bucket_ns {
+            return Err(DetectorError::NonMonotonicTimestamp);
+        }
+        if self.sample_count == 0 && self.last_bucket_ns != 0 {
+            return Err(DetectorError::InvalidInternalSampleCount);
+        }
+        if !self.baseline_rate.is_finite() || self.baseline_rate < 0.0 {
+            return Err(DetectorError::InvalidInternalBaseline);
+        }
+        if !self.variance.is_finite() || self.variance <= 0.0 {
+            return Err(DetectorError::InvalidInternalVariance);
+        }
+        if !self.cusum_s.is_finite() || self.cusum_s < 0.0 {
+            return Err(DetectorError::InvalidInternalCusum);
+        }
+        if let Some(ctx) = context {
+            if !ctx.is_valid() {
+                return Err(DetectorError::InvalidContextConfidence);
+            }
+        }
+        // Defensive validation also protects records created through deserialization
+        // or future internal constructors that might bypass `new`.
+        if !self.profile.is_valid() {
+            return Err(DetectorError::InvalidProfile);
+        }
+
+        // --- STEP 2: GAP HANDLING ---
+        let mut working_cusum = self.cusum_s;
+        let mut gap_detected = false;
+        if self.sample_count > 0 {
+            let gap_ns = timestamp_ns - self.last_bucket_ns;
+            if gap_ns > self.profile.max_gap_tolerance_ns {
+                // Extended gap: reset cumulative drift without fabricating synthetic samples.
+                // It also breaks any "consecutive recovery samples" sequence.
+                working_cusum = 0.0;
+                gap_detected = true;
+            }
+        }
+
+        // --- STEP 3: DISCRETE THRESHOLD DERIVATION (Consistent Rate Units) ---
+        let std_dev = self.variance.sqrt();
+        let mut k = (self.baseline_rate * 0.2)
+            .max(0.75 * std_dev)
+            .max(self.profile.min_slack_k);
+
+        let mut h = (self.baseline_rate * 1.5).max(self.profile.min_threshold_h);
+
+        // Apply advisory context if fresh and confident
+        if let Some(ctx) = context {
+            if ctx.is_fresh(timestamp_ns, 2_000_000_000) && ctx.confidence >= 0.6 {
+                match ctx.hypothesis {
+                    Hypothesis::FlashCrowd => {
+                        k *= 1.5;
+                        h *= 2.0;
+                    }
+                    Hypothesis::VolumetricDoS => {
+                        h *= 0.8;
+                    }
+                    Hypothesis::SlowRampDoS => {
+                        k *= 0.5;
+                    }
+                    Hypothesis::Normal => {}
+                }
+            }
+        }
+
+        // Context is advisory: modulation must never lower either configured floor.
+        k = k.max(self.profile.min_slack_k);
+        h = h.max(self.profile.min_threshold_h);
+
+        // --- STEP 4: CUSUM ACCUMULATION ---
+        let delta = current_rate - self.baseline_rate - k;
+        let windup_ceiling = h * 3.0;
+        if !k.is_finite()
+            || k <= 0.0
+            || !h.is_finite()
+            || h <= 0.0
+            || !delta.is_finite()
+            || !windup_ceiling.is_finite()
+        {
+            return Err(DetectorError::NumericalCalculationFailure);
+        }
+
+        let mut new_cusum = (working_cusum + delta).max(0.0);
+        if !new_cusum.is_finite() {
+            return Err(DetectorError::NumericalCalculationFailure);
+        }
+        if new_cusum > windup_ceiling {
+            new_cusum = windup_ceiling;
+        }
+
+        // --- STEP 5: STATE TRANSITIONS & HYSTERESIS ---
+        let new_sample_count = self
+            .sample_count
+            .checked_add(1)
+            .ok_or(DetectorError::InvalidInternalSampleCount)?;
+        let mut new_mode = self.mode;
+        let mut new_recovery_count = if new_mode == DetectorMode::Breached && !gap_detected {
+            self.recovery_count
+        } else {
+            0
+        };
+
+        if new_mode == DetectorMode::WarmingUp && new_sample_count >= self.profile.warmup_samples {
+            new_mode = DetectorMode::Monitoring;
+        }
+
+        if new_mode == DetectorMode::Monitoring && new_cusum > h {
+            new_mode = DetectorMode::Breached;
+            new_recovery_count = 0;
+        } else if new_mode == DetectorMode::Breached {
+            // Recovery requires consecutive samples that both reduce cumulative evidence
+            // and remain below the clear threshold. A single transient dip cannot clear it.
+            if delta <= 0.0 && new_cusum <= (h * self.profile.clear_ratio) {
+                new_recovery_count = new_recovery_count.saturating_add(1);
+            } else {
+                new_recovery_count = 0;
+            }
+            if new_recovery_count >= self.profile.recovery_samples {
+                new_mode = DetectorMode::Monitoring;
+                new_cusum = 0.0;
+                new_recovery_count = 0;
+            }
+        }
+
+        // --- STEP 6: BASELINE & VARIANCE ADAPTATION ---
+        let mut new_baseline = self.baseline_rate;
+        let mut new_variance = self.variance;
+
+        // Baseline adaptation freezes during breach to protect reference statistics
+        if new_mode != DetectorMode::Breached {
+            let alpha = self.profile.alpha;
+            let old_b = new_baseline;
+            new_baseline += alpha * (current_rate - old_b);
+
+            let diff1 = current_rate - old_b;
+            let diff2 = current_rate - new_baseline;
+            new_variance = ((1.0 - alpha) * new_variance + alpha * (diff1 * diff2))
+                .max(self.profile.min_variance);
+
+            if !new_baseline.is_finite()
+                || new_baseline < 0.0
+                || !new_variance.is_finite()
+                || new_variance <= 0.0
+            {
+                return Err(DetectorError::NumericalCalculationFailure);
+            }
+        }
+
+        // --- STEP 7: COMMIT STATE ---
+        self.baseline_rate = new_baseline;
+        self.variance = new_variance;
+        self.cusum_s = new_cusum;
+        self.last_bucket_ns = timestamp_ns;
+        self.sample_count = new_sample_count;
+        self.recovery_count = new_recovery_count;
+        self.mode = new_mode;
+
+        Ok(DetectionOutcome {
+            is_breached: self.mode == DetectorMode::Breached,
+            cusum_score: self.cusum_s,
+            firing_threshold: h,
+            baseline_rate: self.baseline_rate,
+            mode: self.mode,
+        })
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::*;
+
+    const SECOND_NS: u64 = 1_000_000_000;
+
+    #[test]
+    fn future_dated_context_is_strictly_rejected_for_freshness() {
+        let now_ns = 10 * SECOND_NS;
+        let ctx_future = TrafficContext {
+            hypothesis: Hypothesis::FlashCrowd,
+            observed_at_ns: now_ns + 1,
+            confidence: 0.9,
+        };
+        assert!(!ctx_future.is_fresh(now_ns, 2 * SECOND_NS));
+
+        let ctx_exact_now = TrafficContext {
+            hypothesis: Hypothesis::FlashCrowd,
+            observed_at_ns: now_ns,
+            confidence: 0.9,
+        };
+        assert!(ctx_exact_now.is_fresh(now_ns, 2 * SECOND_NS));
+
+        let ctx_at_staleness_limit = TrafficContext {
+            hypothesis: Hypothesis::FlashCrowd,
+            observed_at_ns: now_ns - (2 * SECOND_NS),
+            confidence: 0.9,
+        };
+        assert!(ctx_at_staleness_limit.is_fresh(now_ns, 2 * SECOND_NS));
+
+        let ctx_stale = TrafficContext {
+            hypothesis: Hypothesis::FlashCrowd,
+            observed_at_ns: now_ns - (2 * SECOND_NS) - 1,
+            confidence: 0.9,
+        };
+        assert!(!ctx_stale.is_fresh(now_ns, 2 * SECOND_NS));
+    }
+
+    #[test]
+    fn invalid_confidence_rejected() {
+        let now_ns = 10 * SECOND_NS;
+        let mut ctx = TrafficContext {
+            hypothesis: Hypothesis::Normal,
+            observed_at_ns: now_ns,
+            confidence: f64::NAN,
+        };
+        assert!(!ctx.is_valid());
+        assert!(!ctx.is_fresh(now_ns, SECOND_NS));
+
+        ctx.confidence = 1.01;
+        assert!(!ctx.is_valid());
+
+        ctx.confidence = -0.01;
+        assert!(!ctx.is_valid());
+
+        ctx.confidence = f64::INFINITY;
+        assert!(!ctx.is_valid());
+    }
+
+    #[test]
+    fn zero_baseline_detects_sustained_burst_without_collapsing() {
+        let profile = DetectorProfile {
+            min_threshold_h: 10.0,
+            min_slack_k: 2.0,
+            warmup_samples: 2,
+            ..Default::default()
+        };
+
+        let mut record = PerIpRecord::new(0.0, profile).unwrap();
+        assert_eq!(record.baseline_rate, 0.0);
+        assert!(record.variance > 0.0);
+
+        let mut t = SECOND_NS;
+
+        record.update(0.0, t, None).unwrap();
+        t += SECOND_NS;
+        record.update(0.0, t, None).unwrap();
+        assert_eq!(record.mode, DetectorMode::WarmingUp);
+
+        t += SECOND_NS;
+        record.update(0.0, t, None).unwrap();
+        assert_eq!(record.mode, DetectorMode::Monitoring);
+
+        let mut breached = false;
+        for _ in 0..5 {
+            t += SECOND_NS;
+            let outcome = record.update(50.0, t, None).unwrap();
+            assert!(outcome.firing_threshold >= 10.0);
+            if outcome.is_breached {
+                breached = true;
+                break;
+            }
+        }
+
+        assert!(
+            breached,
+            "Zero-baseline record must trigger breach on sustained burst"
+        );
+        assert_eq!(record.mode, DetectorMode::Breached);
+    }
+
+    #[test]
+    fn prevalidation_is_strictly_atomic_on_invalid_inputs() {
+        let mut record = PerIpRecord::new(100.0, DetectorProfile::default()).unwrap();
+        let t1 = SECOND_NS;
+        record.update(100.0, t1, None).unwrap();
+
+        let snapshot = record.clone();
+
+        // 1. Non-monotonic timestamp
+        assert_eq!(
+            record.update(150.0, t1, None),
+            Err(DetectorError::NonMonotonicTimestamp)
+        );
+        assert_eq!(record, snapshot);
+
+        // 2. Negative rate
+        assert_eq!(
+            record.update(-1.0, t1 + SECOND_NS, None),
+            Err(DetectorError::InvalidCurrentRate)
+        );
+        assert_eq!(record, snapshot);
+
+        // 3. NaN rate
+        assert_eq!(
+            record.update(f64::NAN, t1 + SECOND_NS, None),
+            Err(DetectorError::InvalidCurrentRate)
+        );
+        assert_eq!(record, snapshot);
+
+        // 4. Invalid context confidence
+        let malformed_ctx = TrafficContext {
+            hypothesis: Hypothesis::Normal,
+            observed_at_ns: t1 + SECOND_NS,
+            confidence: f64::NAN,
+        };
+        assert_eq!(
+            record.update(150.0, t1 + SECOND_NS, Some(&malformed_ctx)),
+            Err(DetectorError::InvalidContextConfidence)
+        );
+        assert_eq!(record, snapshot);
+    }
+
+    #[test]
+    fn gap_beyond_tolerance_resets_accumulated_cusum() {
+        let profile = DetectorProfile {
+            max_gap_tolerance_ns: 3 * SECOND_NS,
+            min_slack_k: 1.0,
+            warmup_samples: 1,
+            ..Default::default()
+        };
+
+        let mut record = PerIpRecord::new(50.0, profile).unwrap();
+        let mut t = SECOND_NS;
+
+        record.update(50.0, t, None).unwrap();
+        t += SECOND_NS;
+        let o1 = record.update(70.0, t, None).unwrap();
+        assert!(o1.cusum_score > 0.0);
+
+        // Advance time by 10s (gap > 3s tolerance)
+        t += 10 * SECOND_NS;
+        let o2 = record.update(50.0, t, None).unwrap();
+        assert_eq!(
+            o2.cusum_score, 0.0,
+            "CUSUM must reset after gap exceeding tolerance"
+        );
+    }
+
+    #[test]
+    fn baseline_freezes_during_breach_and_recovers_via_hysteresis() {
+        let profile = DetectorProfile {
+            min_threshold_h: 20.0,
+            min_slack_k: 5.0,
+            clear_ratio: 0.35,
+            warmup_samples: 1,
+            ..Default::default()
+        };
+
+        let mut record = PerIpRecord::new(100.0, profile).unwrap();
+        let mut t = SECOND_NS;
+
+        record.update(100.0, t, None).unwrap();
+
+        let mut breached = false;
+        for _ in 0..5 {
+            t += SECOND_NS;
+            let o = record.update(300.0, t, None).unwrap();
+            if o.is_breached {
+                breached = true;
+                break;
+            }
+        }
+        assert!(breached);
+        assert_eq!(record.mode, DetectorMode::Breached);
+
+        let frozen_baseline = record.baseline_rate;
+
+        t += SECOND_NS;
+        record.update(500.0, t, None).unwrap();
+        assert_eq!(
+            record.baseline_rate, frozen_baseline,
+            "Baseline must remain frozen during breach"
+        );
+
+        t += SECOND_NS;
+        record.update(100.0, t, None).unwrap();
+        assert_eq!(
+            record.mode,
+            DetectorMode::Breached,
+            "Brief dip must not cause premature recovery"
+        );
+        assert_eq!(record.baseline_rate, frozen_baseline);
+
+        let mut recovered = false;
+        for _ in 0..10 {
+            t += SECOND_NS;
+            let o = record.update(20.0, t, None).unwrap();
+            if !o.is_breached {
+                recovered = true;
+                break;
+            }
+        }
+
+        assert!(
+            recovered,
+            "Sustained normal traffic must clear breach via hysteresis"
+        );
+        assert_eq!(record.mode, DetectorMode::Monitoring);
+        assert_eq!(record.cusum_s, 0.0);
+
+        t += SECOND_NS;
+        record.update(20.0, t, None).unwrap();
+        assert!(
+            record.baseline_rate < frozen_baseline,
+            "Baseline must resume adapting after recovery"
+        );
+    }
+
+    #[test]
+    fn advisory_context_cannot_lower_configured_threshold_floors() {
+        let profile = DetectorProfile {
+            min_threshold_h: 10.0,
+            min_slack_k: 2.0,
+            warmup_samples: 1,
+            ..Default::default()
+        };
+        let mut record = PerIpRecord::new(0.0, profile).unwrap();
+        let context = TrafficContext {
+            hypothesis: Hypothesis::VolumetricDoS,
+            observed_at_ns: SECOND_NS,
+            confidence: 0.9,
+        };
+        let outcome = record.update(0.0, SECOND_NS, Some(&context)).unwrap();
+        assert_eq!(outcome.firing_threshold, 10.0);
+
+        let mut slow_ramp_record = PerIpRecord::new(0.0, profile).unwrap();
+        let slow_ramp = TrafficContext {
+            hypothesis: Hypothesis::SlowRampDoS,
+            observed_at_ns: SECOND_NS,
+            confidence: 0.9,
+        };
+        let outcome = slow_ramp_record
+            .update(10.0, SECOND_NS, Some(&slow_ramp))
+            .unwrap();
+        // k remains at the configured floor (2.0), so 10 - 0 - 2 = 8.
+        assert_eq!(outcome.cusum_score, 8.0);
+    }
+
+    #[test]
+    fn timestamp_zero_is_valid_once_but_not_reusable() {
+        let mut record = PerIpRecord::new(0.0, DetectorProfile::default()).unwrap();
+        record.update(0.0, 0, None).unwrap();
+        let snapshot = record.clone();
+        assert_eq!(
+            record.update(0.0, 0, None),
+            Err(DetectorError::NonMonotonicTimestamp)
+        );
+        assert_eq!(record, snapshot);
+    }
+
+    #[test]
+    fn numerical_failure_leaves_entire_record_unchanged() {
+        // A finite but extreme configured threshold makes the derived anti-windup
+        // ceiling overflow deterministically, exercising the pre-commit error path.
+        let profile = DetectorProfile {
+            min_threshold_h: f64::MAX,
+            ..DetectorProfile::default()
+        };
+        let mut record = PerIpRecord::new(100.0, profile).unwrap();
+        let snapshot = record.clone();
+
+        assert_eq!(
+            record.update(100.0, SECOND_NS, None),
+            Err(DetectorError::NumericalCalculationFailure)
+        );
+        assert_eq!(record, snapshot);
+    }
+
+    #[test]
+    fn invalid_profile_is_rejected_before_record_creation() {
+        let profile = DetectorProfile {
+            min_threshold_h: f64::NAN,
+            ..DetectorProfile::default()
+        };
+        assert_eq!(
+            PerIpRecord::new(0.0, profile),
+            Err(DetectorError::InvalidProfile)
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_rate_that_overflows_initial_variance() {
+        assert_eq!(
+            PerIpRecord::new(f64::MAX, DetectorProfile::default()),
+            Err(DetectorError::NumericalCalculationFailure)
+        );
+    }
+
+    #[test]
+    fn long_gap_breaks_consecutive_recovery_sequence() {
+        let profile = DetectorProfile {
+            max_gap_tolerance_ns: SECOND_NS,
+            warmup_samples: 1,
+            recovery_samples: 3,
+            ..DetectorProfile::default()
+        };
+        let mut record = PerIpRecord::new(100.0, profile).unwrap();
+        record.update(100.0, SECOND_NS, None).unwrap();
+
+        // Seed a breached record at the recovery boundary to isolate gap semantics.
+        record.mode = DetectorMode::Breached;
+        record.cusum_s = 0.0;
+        record.recovery_count = 2;
+
+        let outcome = record.update(0.0, 4 * SECOND_NS, None).unwrap();
+        assert!(outcome.is_breached);
+        assert_eq!(record.recovery_count, 1);
+    }
+
+    #[test]
+    fn deterministic_sample_sequence_produces_identical_accumulators() {
+        let profile = DetectorProfile::default();
+        let mut r1 = PerIpRecord::new(100.0, profile).unwrap();
+        let mut r2 = PerIpRecord::new(100.0, profile).unwrap();
+
+        let samples = [105.0, 110.0, 95.0, 140.0, 180.0, 220.0, 80.0];
+        let mut t = SECOND_NS;
+
+        for &s in &samples {
+            t += SECOND_NS;
+            let o1 = r1.update(s, t, None).unwrap();
+            let o2 = r2.update(s, t, None).unwrap();
+            assert_eq!(o1, o2);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test]
+    fn sample_count_overflow_is_rejected_atomically() {
+        let mut record = PerIpRecord::new(100.0, DetectorProfile::default()).unwrap();
+        record.sample_count = u64::MAX;
+        record.last_bucket_ns = SECOND_NS;
+        let before = record.clone();
+
+        assert_eq!(
+            record.update(100.0, 2 * SECOND_NS, None),
+            Err(DetectorError::InvalidInternalSampleCount)
+        );
+        assert_eq!(record, before);
+    }
+}

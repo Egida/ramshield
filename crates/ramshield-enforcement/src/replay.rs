@@ -180,6 +180,12 @@ fn replay_wal_into_store_seeded_internal(
                     reason,
                     since_ns: ts_ns,
                 },
+                variance: 0.1,
+                last_bucket_ns: 0,
+                adaptive_sample_count: 0,
+                recovery_count: 0,
+                bucket_accum_pps: 0.0,
+                detector_mode: 0,
             },
         };
         store
