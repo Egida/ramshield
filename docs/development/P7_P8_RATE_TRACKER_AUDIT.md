@@ -32,11 +32,13 @@
 
 ## Commit sequence
 
-- `build(detection): declare forecasting dependency for adaptive rate tracker`
-- `feat(detection): add validated adaptive CUSUM rate tracker`
-- `build: update lockfile for detection forecasting dependency`
+1. `build(detection): declare forecasting dependency for adaptive rate tracker`
+2. `feat(detection): add validated adaptive CUSUM rate tracker`
+3. `build: update lockfile for detection forecasting dependency`
+4. `docs: record P7/P8 rate tracker integration audit`
+5. `build: keep lockfile dependencies in canonical order`
 
-This audit document is committed separately so the code changes and the verification caveats remain visible in the PR.
+The implementation is currently **additive**: the existing detector helpers remain intact, and the new `PerIpRecord` API has its own regression tests. It is not yet wired into `DetectionEngine::merge_record`; that runtime integration is a separate step and must not be implied by this patch. This audit document records that boundary explicitly.
 
 ## Verification status
 
