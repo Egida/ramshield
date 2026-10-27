@@ -1418,6 +1418,7 @@ dependencies = [
  "ramshield-cgnat",
  "ramshield-config",
  "ramshield-metrics",
+ "ramshield-forecasting",
  "ramshield-storage",
  "ramshield-types",
  "tokio",
