@@ -243,6 +243,12 @@ pub fn restore_from_snapshot(store: &Store, snap: &CheckpointSnapshot) -> Snapsh
                         .unwrap_or(BlockReason::ManualBlock),
                     since_ns: snap_ip.since_ns,
                 },
+                variance: 0.1,
+                last_bucket_ns: 0,
+                adaptive_sample_count: 0,
+                recovery_count: 0,
+                bucket_accum_pps: 0.0,
+                detector_mode: 0,
             };
             // Store-level TTL (secs) for its passive expiry wheel; the
             // enforcement ring re-arms below from the same deadline.
@@ -369,6 +375,12 @@ mod tests {
                 reason: BlockReason::ManualBlock,
                 since_ns: now_unix_ns(),
             },
+            variance: 0.1,
+            last_bucket_ns: 0,
+            adaptive_sample_count: 0,
+            recovery_count: 0,
+            bucket_accum_pps: 0.0,
+            detector_mode: 0,
         };
         store
             .insert(ip, Value::IpRecord(rec), None, 256 * 1024 * 1024)
@@ -473,6 +485,12 @@ mod tests {
                 reason: BlockReason::ManualBlock,
                 since_ns: now_unix_ns(),
             },
+            variance: 0.1,
+            last_bucket_ns: 0,
+            adaptive_sample_count: 0,
+            recovery_count: 0,
+            bucket_accum_pps: 0.0,
+            detector_mode: 0,
         };
         store
             .insert(ip, Value::IpRecord(rec), None, 256 * 1024 * 1024)

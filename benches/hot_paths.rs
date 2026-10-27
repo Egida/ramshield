@@ -204,6 +204,12 @@ fn default_record() -> ramshield_storage::IpRecord {
         proto_fingerprint: 0,
         threat_score: 0.0,
         block_state: ramshield_storage::BlockState::Clean,
+        variance: 0.1,
+        last_bucket_ns: 0,
+        adaptive_sample_count: 0,
+        recovery_count: 0,
+        bucket_accum_pps: 0.0,
+        detector_mode: 0,
     }
 }
 

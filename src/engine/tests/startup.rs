@@ -173,6 +173,12 @@ fn blocked_record(ip: std::net::IpAddr) -> crate::storage::IpRecord {
             reason: BlockReason::HighRps,
             since_ns: 0,
         },
+        variance: 0.1,
+        last_bucket_ns: 0,
+        adaptive_sample_count: 0,
+        recovery_count: 0,
+        bucket_accum_pps: 0.0,
+        detector_mode: 0,
     }
 }
 

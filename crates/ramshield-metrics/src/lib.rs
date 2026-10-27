@@ -116,6 +116,17 @@ pub struct Metrics {
     pub hw_z_bits: Arc<AtomicU64>,
     pub hw_forecast_bits: Arc<AtomicU64>,
     pub entropy_bits: Arc<AtomicU64>,
+    /// Number of out-of-order samples dropped because they arrived before the
+    /// 1-second bucket boundary. Preserved for telemetry of detection accuracy.
+    pub out_of_order_sample_dropped_total: Arc<AtomicU64>,
+    /// Number of times a numerical calculation (CUSUM, variance, windup ceiling)
+    /// produced a non-finite value and was rejected. Preserved for debugging.
+    pub numerical_calculation_failure_total: Arc<AtomicU64>,
+    /// Number of times an adaptive breach was triggered via the CUSUM detector.
+    pub adaptive_breach_total: Arc<AtomicU64>,
+    /// Number of IPs currently in Breached mode (frozen baseline). Gauge for
+    /// operators monitoring active breach state.
+    pub baseline_frozen_ips_gauge: Arc<AtomicU64>,
     /// P2: CGNAT graduated mitigation counters
     pub cgnat_classify_ticks: Arc<AtomicU64>,
     pub cgnat_tier_allow: Arc<AtomicU64>,
@@ -260,6 +271,10 @@ impl Metrics {
             hw_z_bits: Arc::new(AtomicU64::new(0)),
             hw_forecast_bits: Arc::new(AtomicU64::new(0)),
             entropy_bits: Arc::new(AtomicU64::new(0)),
+            out_of_order_sample_dropped_total: Arc::new(AtomicU64::new(0)),
+            numerical_calculation_failure_total: Arc::new(AtomicU64::new(0)),
+            adaptive_breach_total: Arc::new(AtomicU64::new(0)),
+            baseline_frozen_ips_gauge: Arc::new(AtomicU64::new(0)),
             cgnat_classify_ticks: Arc::new(AtomicU64::new(0)),
             cgnat_tier_allow: Arc::new(AtomicU64::new(0)),
             cgnat_tier_challenge: Arc::new(AtomicU64::new(0)),

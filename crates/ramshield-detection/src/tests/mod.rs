@@ -1567,3 +1567,4 @@ fn merge_local_holds_the_merge_lock_for_the_whole_drain() {
          it must be held for the whole drain (old per-IP lock: ~12.5M)"
     );
 }
+mod macro_replay;

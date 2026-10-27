@@ -1,4 +1,5 @@
 use super::*;
+use crate::rate_tracker::{DetectorMode, DetectorProfile, PerIpRecord};
 
 impl DetectionEngine {
     /// ponytail: returns the 5-tuple `(ewma_rps, threat, should_block, was_blocked, stored)`.
@@ -48,6 +49,12 @@ impl DetectionEngine {
                 proto_fingerprint: ip_agg.proto_fp,
                 threat_score: 0.0,
                 block_state: BlockState::Clean,
+                variance: 0.1,
+                last_bucket_ns: 0,
+                adaptive_sample_count: 0,
+                recovery_count: 0,
+                bucket_accum_pps: 0.0,
+                detector_mode: 0,
             },
             ram_lim,
             |rec| {
@@ -75,22 +82,79 @@ impl DetectionEngine {
                 // then updated. Relative detection uses exactly the same prior
                 // baseline, so the current sample cannot move its own threshold.
                 let prior_baseline = rec.baseline_rps;
-                let baseline_for_cusum = if prior_baseline > 0.0 && prior_baseline.is_finite() {
-                    prior_baseline
-                } else {
-                    rec.ewma_rps
-                };
 
                 rec.sample_count = rec.sample_count.saturating_add(1);
-                if rec.sample_count >= CUSUM_WARMUP_SAMPLES {
-                    let k = cusum_allowance(det_thr);
-                    rec.cusum_s = cusum_step_capped(
-                        rec.cusum_s,
-                        inst_rps,
-                        baseline_for_cusum + k,
-                        det_thr as f64,
-                    );
-                }
+
+                // P7/P8 adaptive: bucket quantization — accumulate sub-second
+                // counts, only advance CUSUM at completed 1-second boundaries.
+                rec.bucket_accum_pps += inst_rps;
+                let bucket_ready = rec.last_bucket_ns == 0
+                    || now.saturating_sub(rec.last_bucket_ns) >= 1_000_000_000;
+
+                let adaptive_blocked = if bucket_ready {
+                    let rate = if rec.last_bucket_ns == 0 {
+                        // First sample: use inst_rps directly.
+                        inst_rps
+                    } else {
+                        rec.bucket_accum_pps
+                    };
+                    // Save state in case update() returns error (D-06 atomicity).
+                    let prev_accum = rec.bucket_accum_pps;
+                    let prev_bucket_ns = rec.last_bucket_ns;
+                    rec.bucket_accum_pps = 0.0;
+                    rec.last_bucket_ns = now;
+
+                    // Build PerIpRecord from IpRecord state.
+                    let profile = DetectorProfile {
+                        min_threshold_h: det_thr as f64 * 1.5,
+                        min_slack_k: det_thr as f64 * 0.75,
+                        min_variance: 0.1,
+                        alpha: 0.3,
+                        clear_ratio: 0.35,
+                        warmup_samples: CUSUM_WARMUP_SAMPLES as u64,
+                        recovery_samples: 3,
+                        max_gap_tolerance_ns: 5_000_000_000,
+                    };
+                    let mut tracker = PerIpRecord {
+                        baseline_rate: rec.baseline_rps,
+                        variance: rec.variance,
+                        cusum_s: rec.cusum_s,
+                        last_bucket_ns: rec.last_bucket_ns,
+                        sample_count: rec.adaptive_sample_count,
+                        recovery_count: rec.recovery_count,
+                        mode: match rec.detector_mode {
+                            0 => DetectorMode::WarmingUp,
+                            1 => DetectorMode::Monitoring,
+                            _ => DetectorMode::Breached,
+                        },
+                        profile,
+                    };
+
+                    match tracker.update(rate, now, None) {
+                        Ok(outcome) => {
+                            // Write adaptive state back to IpRecord.
+                            rec.baseline_rps = outcome.baseline_rate;
+                            rec.cusum_s = outcome.cusum_score;
+                            rec.variance = tracker.variance;
+                            rec.adaptive_sample_count = tracker.sample_count;
+                            rec.recovery_count = tracker.recovery_count;
+                            rec.detector_mode = outcome.mode as u8;
+                            if outcome.is_breached {
+                                self.metrics.inc_adaptive_breach();
+                            }
+                            outcome.is_breached
+                        }
+                        Err(_) => {
+                            // Numerical failure — restore pre-update state per D-06 atomicity.
+                            rec.bucket_accum_pps = prev_accum;
+                            rec.last_bucket_ns = prev_bucket_ns;
+                            self.metrics.inc_numerical_calculation_failure();
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
 
                 let relative_breach = if det.relative_enabled
                     && prior_baseline.is_finite()
@@ -159,8 +223,7 @@ impl DetectionEngine {
                     && relative_breach
                     && rec.relative_breach_streak >= det.relative_min_breaches;
 
-                let block =
-                    hot || cusum_fired(rec.cusum_s, det_thr) || pulse_fired || relative_fired;
+                let block = hot || pulse_fired || relative_fired || adaptive_blocked;
                 (was_blocked, (ewma_rps, threat, block))
             },
         );
